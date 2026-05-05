@@ -10,19 +10,14 @@ test_wrapper_creates_and_cleans_pidfile() {
     export VIGIL_LOG_DIR="$tmpstate/logs"
     mkdir -p "$VIGIL_STATE_DIR/active" "$VIGIL_LOG_DIR"
 
-    # Run a wrapper around a short-lived `sleep 0.5`. While it's running we
-    # snapshot whether a wrapper-*.pid file exists.
-    local snapshot_file="$tmpstate/snapshot"
-    (
-        "$VIGIL_REPO_ROOT/bin/vigil" run sleep 0.5 &
-        local wrapper_pid=$!
-        sleep 0.2
-        ls "$tmpstate/active/" > "$snapshot_file" 2>/dev/null || true
-        wait "$wrapper_pid"
-    )
-
-    local during; during=$(cat "$snapshot_file" 2>/dev/null)
-    local after; after=$(ls "$tmpstate/active/" 2>/dev/null)
+    # Run a wrapper around a short-lived `sleep`. Snapshot active/ in the
+    # middle of its lifetime, then again after it exits.
+    "$VIGIL_REPO_ROOT/bin/vigil" run sleep 0.6 &
+    local wrapper_pid=$!
+    sleep 0.2
+    local during; during=$(ls "$tmpstate/active/" 2>/dev/null || true)
+    wait "$wrapper_pid" 2>/dev/null || true
+    local after;  after=$(ls "$tmpstate/active/" 2>/dev/null || true)
 
     if [[ -z "$during" ]]; then
         echo "    FAIL: no wrapper PID file existed during the child's lifetime"

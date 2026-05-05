@@ -25,9 +25,15 @@ vigil_pmset_capture_baseline() {
 # Read baseline value. Returns "0" or "1". Defaults to "0" if missing.
 vigil_pmset_baseline_value() {
     if [[ -f "$VIGIL_BASELINE_FILE" ]]; then
-        # Don't depend on jq — keep deps minimal. Greppable JSON shape.
-        local v
-        v=$(awk -F'[:,}]' '/SleepDisabled/ {gsub(/[" ]/,"",$2); print $2; exit}' "$VIGIL_BASELINE_FILE" 2>/dev/null)
+        # Use refcount.sh's parser if loaded; otherwise inline parameter-expansion.
+        local v rest content
+        if declare -F _vigil_pidfile_field >/dev/null 2>&1; then
+            v=$(_vigil_pidfile_field "$VIGIL_BASELINE_FILE" "SleepDisabled")
+        else
+            content=$(<"$VIGIL_BASELINE_FILE")
+            rest="${content#*\"SleepDisabled\":}"
+            v="${rest%%,*}"; v="${v%%\}*}"
+        fi
         case "$v" in 0|1) printf '%s\n' "$v"; return 0 ;; esac
     fi
     printf '0\n'

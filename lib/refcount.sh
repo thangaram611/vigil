@@ -15,6 +15,30 @@
 # shellcheck source=common.sh
 source "${VIGIL_LIB_DIR:-$(dirname "${BASH_SOURCE[0]}")}/common.sh"
 
+# ---- internal: extract a numeric/string field from our JSON-ish PID files -----
+# We don't ship jq. The PID files have a fixed shape:
+#   {"pid":<n>,"comm":"<exe>","start_ts":<unix>,"name":"<match-name>"[,...]}
+# Pull a numeric or string value by name using shell parameter expansion. Works
+# for both numbers and quoted strings.
+_vigil_pidfile_field() {
+    local file="$1" key="$2" content rest val
+    [[ -f "$file" ]] || return 1
+    content=$(<"$file")
+    # Strip everything up to and including `"key":`
+    rest="${content#*\"$key\":}"
+    [[ "$rest" == "$content" ]] && return 1   # key not found
+    # If the value is a quoted string, drop the leading quote and stop at the next quote.
+    if [[ "$rest" == \"* ]]; then
+        rest="${rest#\"}"
+        val="${rest%%\"*}"
+    else
+        # Numeric or bare token — stop at the first comma or closing brace.
+        val="${rest%%,*}"
+        val="${val%%\}*}"
+    fi
+    printf '%s\n' "$val"
+}
+
 # ---- file ops -----------------------------------------------------------------
 
 # Write/refresh a PID file. Args: <name> <pid> <exe> [start_ts]
@@ -103,8 +127,7 @@ vigil_refcount_gc() {
             continue
         fi
         # (b) PID reuse — start_ts on disk doesn't match the live process's start time
-        local on_disk_start
-        on_disk_start=$(awk -F'[:,}]' '/start_ts/ {gsub(/[" ]/,"",$2); print $2; exit}' "$f" 2>/dev/null)
+        local on_disk_start; on_disk_start=$(_vigil_pidfile_field "$f" "start_ts")
         local live_start; live_start=$(vigil_pid_start_ts "$pid")
         if [[ -n "$on_disk_start" && -n "$live_start" && "$on_disk_start" != "$live_start" ]]; then
             rm -f "$f"

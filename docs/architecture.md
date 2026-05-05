@@ -77,3 +77,13 @@ So:
 
 - State: `~/Library/Application Support/vigil/state/` (mode 0700, created by `vigil setup`).
 - Logs: `~/Library/Logs/vigil/` (created by `vigil setup`).
+
+## Why the daemon binary is COPIED out of the source repo
+
+Found by smoke test: macOS TCC (Transparency, Consent, Control) **denies user-domain launchd permission to execute scripts under `~/Documents/`**. The first run of `vigil setup` pointed the LaunchAgent at `~/Documents/projects/personal/vigil/bin/vigil-daemon`, and launchd recorded `last exit code = 126` with stderr `"Operation not permitted"` for every spawn. Granting Terminal full disk access doesn't carry over to launchd.
+
+The fix is the standard macOS LaunchAgent pattern: install the daemon out of the protected directory. `vigil setup` (and `vigil reload`) copy `bin/vigil-daemon` and `lib/*.sh` into `$VIGIL_INSTALL_DIR` (default `~/Library/Application Support/vigil/`), and the rendered plist points there.
+
+Trade-off: edits to the source repo do not auto-propagate to the running daemon. `vigil reload` re-syncs and bounces launchd in one shot — no sudo needed.
+
+A symlink in the install dir back to the source tree would NOT have helped, because TCC denies launchd from following symlinks into `~/Documents/` just as it denies direct execution.

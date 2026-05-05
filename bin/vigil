@@ -33,14 +33,25 @@ VIGIL_VERSION="0.1.0-dev"
 # ---- helpers -----------------------------------------------------------------
 
 cmd_render_plist() {
-    # Substitute placeholders in the plist template.
+    # Substitute placeholders in the plist template. The daemon path points to
+    # $VIGIL_INSTALL_DIR (NOT the source repo) — see the TCC note in common.sh.
     local in="$VIGIL_REPO_ROOT/etc/com.thangaram.vigil.plist.in"
-    local daemon="$VIGIL_REPO_ROOT/bin/vigil-daemon"
+    local daemon="$VIGIL_INSTALL_DIR/bin/vigil-daemon"
     sed \
         -e "s|@VIGIL_DAEMON_PATH@|$daemon|g" \
         -e "s|@VIGIL_LOG_DIR@|$VIGIL_LOG_DIR|g" \
         -e "s|@VIGIL_STATE_DIR@|$VIGIL_STATE_DIR|g" \
         "$in"
+}
+
+# Sync the daemon + libs from the source repo into $VIGIL_INSTALL_DIR. This
+# is the path the LaunchAgent points at (because launchd can't execute under
+# ~/Documents/ without TCC consent).
+cmd_sync_install() {
+    mkdir -p "$VIGIL_INSTALL_DIR/bin" "$VIGIL_INSTALL_DIR/lib"
+    install -m 0755 "$VIGIL_REPO_ROOT/bin/vigil-daemon" "$VIGIL_INSTALL_DIR/bin/vigil-daemon"
+    install -m 0644 "$VIGIL_REPO_ROOT/lib/"*.sh "$VIGIL_INSTALL_DIR/lib/"
+    echo "  installed daemon to $VIGIL_INSTALL_DIR/bin/vigil-daemon"
 }
 
 cmd_render_sudoers() {
@@ -57,6 +68,12 @@ cmd_setup() {
     vigil_ensure_dirs
     echo "  state dir: $VIGIL_STATE_DIR"
     echo "  log dir:   $VIGIL_LOG_DIR"
+
+    # If a previous daemon is loaded, boot it out before we replace its binary.
+    cmd_stop >/dev/null 2>&1 || true
+
+    # 0. Sync daemon + libs into the install dir (must not be ~/Documents/).
+    cmd_sync_install
 
     # 1. sudoers.d entry — render to a temp file, validate with visudo -c, sudo install
     local tmp_sudoers; tmp_sudoers=$(mktemp -t vigil-sudoers)
@@ -115,10 +132,10 @@ cmd_uninstall() {
         rm -f "$VIGIL_BASELINE_FILE"
     fi
 
-    # Wipe state. Keep logs (handy for post-mortem).
-    if [[ -d "$VIGIL_STATE_DIR" ]]; then
-        rm -rf "$VIGIL_STATE_DIR"
-        echo "  wiped $VIGIL_STATE_DIR"
+    # Wipe state + installed daemon copy. Keep logs (handy for post-mortem).
+    if [[ -d "$VIGIL_INSTALL_DIR" ]]; then
+        rm -rf "$VIGIL_INSTALL_DIR"
+        echo "  wiped $VIGIL_INSTALL_DIR"
     fi
 
     echo "vigil: uninstall complete. Logs preserved at $VIGIL_LOG_DIR."
@@ -208,12 +225,35 @@ cmd_run() {
     printf '{"pid":%d,"comm":"wrapper","start_ts":%d,"cmd":"%s"}\n' \
         "$$" "$now" "$cmd_str" > "$pidfile"
 
-    cleanup_wrapper() { rm -f "$pidfile"; }
-    trap cleanup_wrapper EXIT INT TERM HUP
+    # Bake $pidfile into the trap string so it survives the local scope ending.
+    # If we used a function or unquoted variable here, set -u trips when the
+    # trap fires after cmd_run has returned and `local pidfile` is gone.
+    # shellcheck disable=SC2064
+    trap "rm -f '$pidfile'" EXIT INT TERM HUP
 
     # Foreground call — bash blocks here. NOT exec; that would replace the shell
     # and prevent the trap from firing.
     "$@"
+}
+
+cmd_reload() {
+    # Re-sync daemon + libs from source repo into install dir, then bounce launchd.
+    # Use `launchctl kickstart -k` (kill+restart in one call) instead of stop/start —
+    # the stop/start path is async and the start half can race with the still-running
+    # old binary, leading to "already loaded" + a stale instance.
+    cmd_sync_install
+    if [[ -f "$VIGIL_PLIST" ]]; then
+        cmd_render_plist > "$VIGIL_PLIST"
+        echo "  re-rendered $VIGIL_PLIST"
+    fi
+    local domain="gui/$(id -u)"
+    if launchctl print "$domain/$VIGIL_LABEL" >/dev/null 2>&1; then
+        launchctl kickstart -k "$domain/$VIGIL_LABEL" >/dev/null 2>&1 || true
+        echo "  launchd: kickstarted $VIGIL_LABEL (kill+restart)"
+    else
+        cmd_start
+    fi
+    echo "vigil: reload complete."
 }
 
 cmd_doctor() {
@@ -259,11 +299,17 @@ cmd_doctor() {
         errs=$((errs+1))
     fi
 
-    # 5. plist
+    # 5. plist + installed daemon
     if [[ -f "$VIGIL_PLIST" ]]; then
         printf '  plist:              %s\n' "$VIGIL_PLIST"
     else
         printf '  plist:              MISSING — run vigil setup\n'
+        errs=$((errs+1))
+    fi
+    if [[ -x "$VIGIL_INSTALL_DIR/bin/vigil-daemon" ]]; then
+        printf '  installed daemon:   %s\n' "$VIGIL_INSTALL_DIR/bin/vigil-daemon"
+    else
+        printf '  installed daemon:   MISSING — run vigil setup\n'
         errs=$((errs+1))
     fi
 
@@ -311,6 +357,7 @@ Usage:
   vigil status       Show daemon state, refcount, pmset baseline, thermal, battery
   vigil log [-f]     cat / tail -f the daemon log
   vigil run <cmd>    Wrapper: holds sleep prevention while <cmd> runs
+  vigil reload       Re-sync daemon + libs into install dir, restart launchd
   vigil doctor       Diagnose installation
   vigil --version    Print version
   vigil --help       Show this help
@@ -334,6 +381,7 @@ main() {
         status)           cmd_status "$@" ;;
         log)              cmd_log "$@" ;;
         run)              cmd_run "$@" ;;
+        reload)           cmd_reload "$@" ;;
         doctor)           cmd_doctor "$@" ;;
         --version|-V)     printf 'vigil %s\n' "$VIGIL_VERSION" ;;
         --help|-h|help)   cmd_help ;;

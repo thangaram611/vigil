@@ -32,12 +32,22 @@ vigil_load_config
 vigil_ensure_dirs
 
 # ---- single-instance guard ---------------------------------------------------
-# flock 9 on the lock file. Drops out if another daemon is already running.
-exec 9>"$VIGIL_LOCK_FILE"
-if ! flock -n 9; then
-    log WARN "another vigil-daemon already holds $VIGIL_LOCK_FILE — exiting"
-    exit 0
+# macOS doesn't ship flock(1), so we use the atomic-mkdir pattern:
+#   mkdir succeeds atomically iff the directory didn't exist. Whoever wins
+#   writes its PID into the lock dir. Stale lock detection: if the recorded
+#   PID is dead, take the lock from the corpse.
+LOCK_DIR="$VIGIL_LOCK_FILE.d"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    other=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
+    if [[ -n "$other" ]] && kill -0 "$other" 2>/dev/null; then
+        log WARN "another vigil-daemon (pid=$other) holds $LOCK_DIR — exiting"
+        exit 0
+    fi
+    log WARN "stale lock at $LOCK_DIR (pid=${other:-?} not running) — taking over"
+    rm -rf "$LOCK_DIR"
+    mkdir "$LOCK_DIR" || { log ERROR "could not acquire lock"; exit 1; }
 fi
+echo $$ > "$LOCK_DIR/pid"
 echo $$ > "$VIGIL_DAEMON_PIDFILE"
 
 # ---- pre-flight: sudoers wired up? -------------------------------------------
@@ -57,6 +67,7 @@ cleanup_and_exit() {
         vigil_pmset_release || true
     fi
     rm -f "$VIGIL_DAEMON_PIDFILE"
+    rm -rf "$LOCK_DIR"
     exit 0
 }
 trap cleanup_and_exit INT TERM

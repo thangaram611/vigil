@@ -21,7 +21,11 @@ vigil_repo_root() {
 }
 
 VIGIL_REPO_ROOT="${VIGIL_REPO_ROOT:-$(vigil_repo_root)}"
-VIGIL_STATE_DIR="${VIGIL_STATE_DIR:-$HOME/Library/Application Support/vigil/state}"
+# Install location for the daemon + libs. Must NOT be ~/Documents/* — macOS TCC
+# blocks user-domain launchd from executing files there. ~/Library/Application
+# Support is unprotected for the user's own LaunchAgents.
+VIGIL_INSTALL_DIR="${VIGIL_INSTALL_DIR:-$HOME/Library/Application Support/vigil}"
+VIGIL_STATE_DIR="${VIGIL_STATE_DIR:-$VIGIL_INSTALL_DIR/state}"
 VIGIL_LOG_DIR="${VIGIL_LOG_DIR:-$HOME/Library/Logs/vigil}"
 VIGIL_CONFIG_FILE="${VIGIL_CONFIG_FILE:-$HOME/.config/vigil/vigil.conf}"
 VIGIL_LOG_FILE="${VIGIL_LOG_FILE:-$VIGIL_LOG_DIR/daemon.log}"
@@ -64,10 +68,18 @@ die() {
 
 # ---- sudo discipline --------------------------------------------------------
 
-# Verify non-interactive sudo for pmset works. Returns 0 if usable, 1 otherwise.
-# Never invokes plain `sudo` — that would prompt and (under launchd) hang.
+# Verify non-interactive sudo for the EXACT whitelisted pmset commands works.
+# Returns 0 if usable, 1 otherwise. Never invokes plain `sudo` — that would
+# prompt and (under launchd) hang.
+#
+# `sudo -n -l <cmd> [args...]` doesn't run the command — it tells us whether
+# the command is allowed for this user. Output is the canonical command path
+# on success, empty + non-zero on denial / no NOPASSWD. We test BOTH whitelist
+# entries so a partial sudoers truncation doesn't silently look healthy.
 sudo_n_pmset_check() {
-    sudo -n /usr/bin/pmset -g >/dev/null 2>&1
+    sudo -n -l /usr/bin/pmset -a disablesleep 0 >/dev/null 2>&1 || return 1
+    sudo -n -l /usr/bin/pmset -a disablesleep 1 >/dev/null 2>&1 || return 1
+    return 0
 }
 
 # Run `sudo -n /usr/bin/pmset -a disablesleep <0|1>`. Logs failure loudly.
