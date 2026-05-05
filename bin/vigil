@@ -7,7 +7,19 @@
 set -euo pipefail
 
 # ---- locate libs and source them ---------------------------------------------
-_self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve the script's real path even when invoked via a symlink (e.g. from
+# ~/.local/bin/vigil). Without this, _self_dir lands in ~/.local/bin and we
+# fail to find lib/.
+_resolve_self() {
+    local src="${BASH_SOURCE[0]}"
+    while [[ -L "$src" ]]; do
+        local dir; dir=$(cd -P "$(dirname "$src")" && pwd)
+        src=$(readlink "$src")
+        [[ "$src" != /* ]] && src="$dir/$src"
+    done
+    cd -P "$(dirname "$src")" && pwd
+}
+_self_dir="$(_resolve_self)"
 VIGIL_REPO_ROOT="$(cd "$_self_dir/.." && pwd)"
 export VIGIL_REPO_ROOT
 VIGIL_LIB_DIR="$VIGIL_REPO_ROOT/lib"
