@@ -1,0 +1,348 @@
+#!/usr/bin/env bash
+# bin/vigil — main CLI dispatcher.
+#
+# Subcommands:
+#   setup, uninstall, start, stop, status, log, run, doctor, --version
+
+set -euo pipefail
+
+# ---- locate libs and source them ---------------------------------------------
+_self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VIGIL_REPO_ROOT="$(cd "$_self_dir/.." && pwd)"
+export VIGIL_REPO_ROOT
+VIGIL_LIB_DIR="$VIGIL_REPO_ROOT/lib"
+# shellcheck source=../lib/common.sh
+source "$VIGIL_LIB_DIR/common.sh"
+# shellcheck source=../lib/refcount.sh
+source "$VIGIL_LIB_DIR/refcount.sh"
+# shellcheck source=../lib/pmset.sh
+source "$VIGIL_LIB_DIR/pmset.sh"
+# shellcheck source=../lib/thermal.sh
+source "$VIGIL_LIB_DIR/thermal.sh"
+# shellcheck source=../lib/battery.sh
+source "$VIGIL_LIB_DIR/battery.sh"
+
+vigil_load_config
+
+# ---- constants ---------------------------------------------------------------
+VIGIL_LABEL="com.thangaram.vigil"
+VIGIL_PLIST="$HOME/Library/LaunchAgents/${VIGIL_LABEL}.plist"
+VIGIL_SUDOERS_FILE="/etc/sudoers.d/vigil"
+VIGIL_VERSION="0.1.0-dev"
+
+# ---- helpers -----------------------------------------------------------------
+
+cmd_render_plist() {
+    # Substitute placeholders in the plist template.
+    local in="$VIGIL_REPO_ROOT/etc/com.thangaram.vigil.plist.in"
+    local daemon="$VIGIL_REPO_ROOT/bin/vigil-daemon"
+    sed \
+        -e "s|@VIGIL_DAEMON_PATH@|$daemon|g" \
+        -e "s|@VIGIL_LOG_DIR@|$VIGIL_LOG_DIR|g" \
+        -e "s|@VIGIL_STATE_DIR@|$VIGIL_STATE_DIR|g" \
+        "$in"
+}
+
+cmd_render_sudoers() {
+    local in="$VIGIL_REPO_ROOT/etc/vigil.sudoers.in"
+    local user; user=$(id -un)
+    sed -e "s|@USER@|$user|g" "$in"
+}
+
+# ---- subcommands -------------------------------------------------------------
+
+cmd_setup() {
+    echo "vigil: setting up..."
+
+    vigil_ensure_dirs
+    echo "  state dir: $VIGIL_STATE_DIR"
+    echo "  log dir:   $VIGIL_LOG_DIR"
+
+    # 1. sudoers.d entry — render to a temp file, validate with visudo -c, sudo install
+    local tmp_sudoers; tmp_sudoers=$(mktemp -t vigil-sudoers)
+    cmd_render_sudoers > "$tmp_sudoers"
+    chmod 0440 "$tmp_sudoers"
+    if ! visudo -c -f "$tmp_sudoers" >/dev/null; then
+        rm -f "$tmp_sudoers"
+        die "generated sudoers file failed visudo -c"
+    fi
+    echo "  sudoers (preview):"
+    sed 's/^/    /' "$tmp_sudoers"
+    echo
+    echo "  installing $VIGIL_SUDOERS_FILE — this prompts for your password ONCE"
+    sudo install -m 0440 -o root -g wheel "$tmp_sudoers" "$VIGIL_SUDOERS_FILE"
+    rm -f "$tmp_sudoers"
+    if ! sudo_n_pmset_check; then
+        die "after sudoers install, sudo -n /usr/bin/pmset still fails — refusing to continue"
+    fi
+    echo "  sudoers ok: $VIGIL_SUDOERS_FILE"
+
+    # 2. LaunchAgent plist
+    mkdir -p "$(dirname "$VIGIL_PLIST")"
+    cmd_render_plist > "$VIGIL_PLIST"
+    echo "  plist: $VIGIL_PLIST"
+
+    # 3. Bootstrap the LaunchAgent
+    cmd_start
+
+    echo
+    echo "vigil: setup complete. Run 'vigil status' to verify."
+}
+
+cmd_uninstall() {
+    echo "vigil: uninstalling..."
+
+    # Stop the daemon if it's running so it can release its hold cleanly.
+    cmd_stop || true
+
+    # Remove plist
+    if [[ -f "$VIGIL_PLIST" ]]; then
+        rm -f "$VIGIL_PLIST"
+        echo "  removed $VIGIL_PLIST"
+    fi
+
+    # Remove sudoers entry — needs sudo
+    if [[ -f "$VIGIL_SUDOERS_FILE" ]]; then
+        echo "  removing $VIGIL_SUDOERS_FILE — sudo prompt"
+        sudo rm -f "$VIGIL_SUDOERS_FILE"
+    fi
+
+    # Restore baseline if any (e.g., daemon crashed mid-engagement)
+    if [[ -f "$VIGIL_BASELINE_FILE" ]]; then
+        local target; target=$(vigil_pmset_baseline_value)
+        echo "  baseline restore: pmset -a disablesleep=$target (requires sudo)"
+        sudo /usr/bin/pmset -a disablesleep "$target" || true
+        rm -f "$VIGIL_BASELINE_FILE"
+    fi
+
+    # Wipe state. Keep logs (handy for post-mortem).
+    if [[ -d "$VIGIL_STATE_DIR" ]]; then
+        rm -rf "$VIGIL_STATE_DIR"
+        echo "  wiped $VIGIL_STATE_DIR"
+    fi
+
+    echo "vigil: uninstall complete. Logs preserved at $VIGIL_LOG_DIR."
+}
+
+cmd_start() {
+    if [[ ! -f "$VIGIL_PLIST" ]]; then
+        die "plist not found at $VIGIL_PLIST — run 'vigil setup' first"
+    fi
+    local domain="gui/$(id -u)"
+    if launchctl print "$domain/$VIGIL_LABEL" >/dev/null 2>&1; then
+        echo "  launchd: already loaded ($domain/$VIGIL_LABEL)"
+        return 0
+    fi
+    launchctl bootstrap "$domain" "$VIGIL_PLIST"
+    launchctl enable "$domain/$VIGIL_LABEL" 2>/dev/null || true
+    echo "  launchd: bootstrapped $VIGIL_LABEL"
+}
+
+cmd_stop() {
+    local domain="gui/$(id -u)"
+    if launchctl print "$domain/$VIGIL_LABEL" >/dev/null 2>&1; then
+        launchctl bootout "$domain/$VIGIL_LABEL" 2>/dev/null || true
+        echo "  launchd: booted out $VIGIL_LABEL"
+    else
+        echo "  launchd: not loaded"
+    fi
+}
+
+cmd_status() {
+    local domain="gui/$(id -u)"
+    local loaded="no"
+    launchctl print "$domain/$VIGIL_LABEL" >/dev/null 2>&1 && loaded="yes"
+
+    local daemon_pid="-"
+    [[ -f "$VIGIL_DAEMON_PIDFILE" ]] && daemon_pid=$(cat "$VIGIL_DAEMON_PIDFILE" 2>/dev/null)
+
+    local count; count=$(vigil_refcount_count)
+    local sd; sd=$(vigil_read_sleepdisabled)
+    local baseline="-"
+    [[ -f "$VIGIL_BASELINE_FILE" ]] && baseline=$(vigil_pmset_baseline_value)
+    local caff="-"
+    [[ -f "$VIGIL_CAFFEINATE_PIDFILE" ]] && caff=$(cat "$VIGIL_CAFFEINATE_PIDFILE" 2>/dev/null)
+
+    printf 'launchd loaded:    %s\n' "$loaded"
+    printf 'daemon pid:        %s\n' "$daemon_pid"
+    printf 'refcount:          %s\n' "$count"
+    printf 'pmset disablesleep: %s   (baseline=%s)\n' "$sd" "$baseline"
+    printf 'caffeinate pid:    %s\n' "$caff"
+    printf 'thermal:           %s\n' "$(vigil_thermal_summary)"
+    printf 'battery:           %s\n' "$(vigil_battery_summary)"
+    printf 'sudoers ok:        %s\n' "$(sudo_n_pmset_check && echo yes || echo no)"
+    if (( count > 0 )); then
+        echo
+        echo 'active matches:'
+        vigil_refcount_list | awk -F'\t' '{printf "  pid=%-7s name=%-15s age=%ss\n", $1, $2, $3}'
+    fi
+}
+
+cmd_log() {
+    local follow=0
+    [[ "${1:-}" == "-f" || "${1:-}" == "--follow" ]] && follow=1
+    if [[ ! -f "$VIGIL_LOG_FILE" ]]; then
+        echo "no log yet at $VIGIL_LOG_FILE"
+        return 0
+    fi
+    if (( follow == 1 )); then
+        tail -f "$VIGIL_LOG_FILE"
+    else
+        cat "$VIGIL_LOG_FILE"
+    fi
+}
+
+cmd_run() {
+    if [[ $# -eq 0 ]]; then
+        die "usage: vigil run <cmd> [args...]"
+    fi
+    vigil_ensure_dirs
+    # shellcheck source=../lib/refcount.sh
+    source "$VIGIL_LIB_DIR/refcount.sh"
+
+    local pidfile="$VIGIL_ACTIVE_DIR/wrapper-$$.pid"
+    local now; now=$(vigil_now_unix)
+    # quoted-args summary; not robust to embedded newlines but fine for status display.
+    local cmd_str="$*"
+    cmd_str="${cmd_str//\"/}"
+    printf '{"pid":%d,"comm":"wrapper","start_ts":%d,"cmd":"%s"}\n' \
+        "$$" "$now" "$cmd_str" > "$pidfile"
+
+    cleanup_wrapper() { rm -f "$pidfile"; }
+    trap cleanup_wrapper EXIT INT TERM HUP
+
+    # Foreground call — bash blocks here. NOT exec; that would replace the shell
+    # and prevent the trap from firing.
+    "$@"
+}
+
+cmd_doctor() {
+    local errs=0
+    echo "vigil doctor"
+    echo
+
+    # 1. arch
+    local arch; arch=$(uname -m)
+    printf '  cpu arch:           %s\n' "$arch"
+    if [[ "$arch" == "arm64" ]]; then
+        echo "                      ⚠ Apple Silicon: lid-closed sleep prevention is best-effort."
+        echo "                        See docs/apple-silicon-lid-closed.md."
+    fi
+
+    # 2. caffeinate
+    if command -v caffeinate >/dev/null 2>&1; then
+        printf '  caffeinate:         ok\n'
+    else
+        printf '  caffeinate:         MISSING (expected /usr/bin/caffeinate)\n'
+        errs=$((errs+1))
+    fi
+
+    # 3. pmset
+    if command -v pmset >/dev/null 2>&1; then
+        printf '  pmset:              ok\n'
+    else
+        printf '  pmset:              MISSING\n'
+        errs=$((errs+1))
+    fi
+
+    # 4. sudoers
+    if [[ -f "$VIGIL_SUDOERS_FILE" ]]; then
+        printf '  sudoers file:       %s\n' "$VIGIL_SUDOERS_FILE"
+    else
+        printf '  sudoers file:       MISSING — run vigil setup\n'
+        errs=$((errs+1))
+    fi
+    if sudo_n_pmset_check; then
+        printf '  sudo -n pmset:      ok\n'
+    else
+        printf '  sudo -n pmset:      FAIL — non-interactive sudo not configured\n'
+        errs=$((errs+1))
+    fi
+
+    # 5. plist
+    if [[ -f "$VIGIL_PLIST" ]]; then
+        printf '  plist:              %s\n' "$VIGIL_PLIST"
+    else
+        printf '  plist:              MISSING — run vigil setup\n'
+        errs=$((errs+1))
+    fi
+
+    local domain="gui/$(id -u)"
+    if launchctl print "$domain/$VIGIL_LABEL" >/dev/null 2>&1; then
+        printf '  launchd:            loaded\n'
+    else
+        printf '  launchd:            not loaded\n'
+        # Not a hard error — user may have manually stopped.
+    fi
+
+    # 6. dirs
+    if [[ -d "$VIGIL_STATE_DIR" ]]; then
+        local mode; mode=$(stat -f %Lp "$VIGIL_STATE_DIR" 2>/dev/null)
+        printf '  state dir:          %s (mode %s)\n' "$VIGIL_STATE_DIR" "$mode"
+    else
+        printf '  state dir:          MISSING\n'
+        errs=$((errs+1))
+    fi
+    if [[ -d "$VIGIL_LOG_DIR" ]]; then
+        printf '  log dir:            %s\n' "$VIGIL_LOG_DIR"
+    else
+        printf '  log dir:            MISSING\n'
+        errs=$((errs+1))
+    fi
+
+    echo
+    if (( errs == 0 )); then
+        echo "all checks passed"
+    else
+        echo "$errs check(s) failed"
+        exit 1
+    fi
+}
+
+cmd_help() {
+    cat <<EOF
+vigil — keep Mac awake while AI agents are working
+
+Usage:
+  vigil setup        Install sudoers entry, create state/log dirs, load LaunchAgent
+  vigil uninstall    Remove sudoers entry, plist, restore baseline state, wipe state
+  vigil start        Bootstrap the LaunchAgent
+  vigil stop         Boot out the LaunchAgent
+  vigil status       Show daemon state, refcount, pmset baseline, thermal, battery
+  vigil log [-f]     cat / tail -f the daemon log
+  vigil run <cmd>    Wrapper: holds sleep prevention while <cmd> runs
+  vigil doctor       Diagnose installation
+  vigil --version    Print version
+  vigil --help       Show this help
+
+Phase 1 detects the CLI processes 'claude', 'codex', 'copilot' only.
+Desktop apps and copilot-companion daemon are deferred — see ROADMAP.md.
+
+Lid-closed on Apple Silicon: see docs/apple-silicon-lid-closed.md.
+EOF
+}
+
+# ---- dispatch ----------------------------------------------------------------
+
+main() {
+    local cmd="${1:-help}"; shift || true
+    case "$cmd" in
+        setup)            cmd_setup "$@" ;;
+        uninstall)        cmd_uninstall "$@" ;;
+        start)            cmd_start "$@" ;;
+        stop)             cmd_stop "$@" ;;
+        status)           cmd_status "$@" ;;
+        log)              cmd_log "$@" ;;
+        run)              cmd_run "$@" ;;
+        doctor)           cmd_doctor "$@" ;;
+        --version|-V)     printf 'vigil %s\n' "$VIGIL_VERSION" ;;
+        --help|-h|help)   cmd_help ;;
+        *)
+            printf 'vigil: unknown command: %s\n\n' "$cmd" >&2
+            cmd_help >&2
+            exit 64
+            ;;
+    esac
+}
+
+main "$@"

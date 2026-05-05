@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# lib/common.sh — paths, logging, sudo wrapper. Sourced by every other lib + bin.
+#
+# Conventions:
+#   - All paths derived from XDG-ish defaults but honor VIGIL_* overrides for testing.
+#   - log() writes structured lines to the daemon log AND stderr if interactive.
+#   - sudo_n_pmset() is the ONLY way the rest of the codebase calls pmset with sudo.
+
+set -euo pipefail
+
+vigil_repo_root() {
+    # Resolve the repo root from the location of THIS file. Works regardless
+    # of where the caller cd'd to or how the script was invoked.
+    local src="${BASH_SOURCE[0]}"
+    while [[ -L "$src" ]]; do
+        local dir; dir=$(cd -P "$(dirname "$src")" && pwd)
+        src=$(readlink "$src")
+        [[ "$src" != /* ]] && src="$dir/$src"
+    done
+    cd -P "$(dirname "$src")/.." && pwd
+}
+
+VIGIL_REPO_ROOT="${VIGIL_REPO_ROOT:-$(vigil_repo_root)}"
+VIGIL_STATE_DIR="${VIGIL_STATE_DIR:-$HOME/Library/Application Support/vigil/state}"
+VIGIL_LOG_DIR="${VIGIL_LOG_DIR:-$HOME/Library/Logs/vigil}"
+VIGIL_CONFIG_FILE="${VIGIL_CONFIG_FILE:-$HOME/.config/vigil/vigil.conf}"
+VIGIL_LOG_FILE="${VIGIL_LOG_FILE:-$VIGIL_LOG_DIR/daemon.log}"
+VIGIL_ACTIVE_DIR="$VIGIL_STATE_DIR/active"
+VIGIL_BASELINE_FILE="$VIGIL_STATE_DIR/baseline.json"
+VIGIL_CAFFEINATE_PIDFILE="$VIGIL_STATE_DIR/caffeinate.pid"
+VIGIL_DAEMON_PIDFILE="$VIGIL_STATE_DIR/daemon.pid"
+VIGIL_LOCK_FILE="$VIGIL_STATE_DIR/state.lock"
+
+# Tunables (overridable in vigil.conf — sourced by daemon if present)
+VIGIL_TICK_SECS="${VIGIL_TICK_SECS:-5}"
+VIGIL_STALE_AGE_SECS="${VIGIL_STALE_AGE_SECS:-30}"
+VIGIL_STALE_CPU_PCT="${VIGIL_STALE_CPU_PCT:-0.5}"
+VIGIL_THERMAL_COOLDOWN_SECS="${VIGIL_THERMAL_COOLDOWN_SECS:-60}"
+VIGIL_BATTERY_FLOOR_PCT="${VIGIL_BATTERY_FLOOR_PCT:-20}"
+VIGIL_FORCE="${VIGIL_FORCE:-0}"
+
+# ---- logging ----------------------------------------------------------------
+
+log() {
+    # Usage: log LEVEL message...
+    # Levels: INFO WARN ERROR DEBUG
+    local level="$1"; shift
+    local ts; ts=$(date '+%Y-%m-%dT%H:%M:%S%z')
+    local line="$ts $level $*"
+    # daemon log (best-effort; never fail the caller because we couldn't log)
+    if [[ -n "${VIGIL_LOG_FILE:-}" ]]; then
+        printf '%s\n' "$line" >> "$VIGIL_LOG_FILE" 2>/dev/null || true
+    fi
+    # stderr if attached to a tty (interactive vigil CLI)
+    if [[ -t 2 ]]; then
+        printf '%s\n' "$line" >&2
+    fi
+}
+
+die() {
+    log ERROR "$*"
+    exit 1
+}
+
+# ---- sudo discipline --------------------------------------------------------
+
+# Verify non-interactive sudo for pmset works. Returns 0 if usable, 1 otherwise.
+# Never invokes plain `sudo` — that would prompt and (under launchd) hang.
+sudo_n_pmset_check() {
+    sudo -n /usr/bin/pmset -g >/dev/null 2>&1
+}
+
+# Run `sudo -n /usr/bin/pmset -a disablesleep <0|1>`. Logs failure loudly.
+# Returns whatever pmset returns; 1 if non-interactive sudo isn't available.
+sudo_n_pmset_disablesleep() {
+    local val="$1"
+    case "$val" in 0|1) ;; *) log ERROR "invalid disablesleep value: $val"; return 2 ;; esac
+    if ! sudo_n_pmset_check; then
+        log ERROR "sudo -n /usr/bin/pmset failed — sudoers.d not configured. Run 'vigil setup' or 'vigil doctor'."
+        return 1
+    fi
+    if ! sudo -n /usr/bin/pmset -a disablesleep "$val" 2>>"$VIGIL_LOG_FILE"; then
+        log ERROR "sudo -n /usr/bin/pmset -a disablesleep $val failed"
+        return 1
+    fi
+    log INFO "pmset -a disablesleep $val"
+    return 0
+}
+
+# ---- config file ------------------------------------------------------------
+
+vigil_load_config() {
+    if [[ -f "$VIGIL_CONFIG_FILE" ]]; then
+        # shellcheck source=/dev/null
+        source "$VIGIL_CONFIG_FILE"
+    fi
+}
+
+# ---- misc helpers -----------------------------------------------------------
+
+vigil_ensure_dirs() {
+    mkdir -p "$VIGIL_STATE_DIR" "$VIGIL_ACTIVE_DIR" "$VIGIL_LOG_DIR"
+    chmod 0700 "$VIGIL_STATE_DIR" 2>/dev/null || true
+}
+
+vigil_now_unix() { date +%s; }
+
+# basename of a path, no trailing slash assumed
+vigil_basename() { printf '%s\n' "${1##*/}"; }
+
+# Read SleepDisabled from `pmset -g`. Returns "0" or "1" on stdout (default 0).
+vigil_read_sleepdisabled() {
+    # Output line shape: "  SleepDisabled        0" (varies by macOS version)
+    local out; out=$(pmset -g 2>/dev/null | awk '/SleepDisabled/ {print $NF}')
+    case "$out" in 0|1) printf '%s\n' "$out" ;; *) printf '0\n' ;; esac
+}

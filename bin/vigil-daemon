@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# bin/vigil-daemon — main loop. Run by launchd via the LaunchAgent plist.
+#
+# Per tick (default 5s):
+#   1. Detect agent processes via `ps -axww -o pid= -o command=`
+#   2. Touch a PID file per match; refcount = files in active/
+#   3. GC stale PID files
+#   4. Check thermal + battery cutoffs (override via VIGIL_FORCE=1)
+#   5. Compute desired transition vs. current state, act on it
+#
+# Single-instance via flock(1). On SIGTERM/SIGINT: full release + exit cleanly.
+
+set -euo pipefail
+
+# ---- locate libs and source them ---------------------------------------------
+_self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VIGIL_LIB_DIR="$_self_dir/../lib"
+# shellcheck source=../lib/common.sh
+source "$VIGIL_LIB_DIR/common.sh"
+# shellcheck source=../lib/detect.sh
+source "$VIGIL_LIB_DIR/detect.sh"
+# shellcheck source=../lib/refcount.sh
+source "$VIGIL_LIB_DIR/refcount.sh"
+# shellcheck source=../lib/pmset.sh
+source "$VIGIL_LIB_DIR/pmset.sh"
+# shellcheck source=../lib/thermal.sh
+source "$VIGIL_LIB_DIR/thermal.sh"
+# shellcheck source=../lib/battery.sh
+source "$VIGIL_LIB_DIR/battery.sh"
+
+vigil_load_config
+vigil_ensure_dirs
+
+# ---- single-instance guard ---------------------------------------------------
+# flock 9 on the lock file. Drops out if another daemon is already running.
+exec 9>"$VIGIL_LOCK_FILE"
+if ! flock -n 9; then
+    log WARN "another vigil-daemon already holds $VIGIL_LOCK_FILE — exiting"
+    exit 0
+fi
+echo $$ > "$VIGIL_DAEMON_PIDFILE"
+
+# ---- pre-flight: sudoers wired up? -------------------------------------------
+if ! sudo_n_pmset_check; then
+    log ERROR "non-interactive sudo for /usr/bin/pmset is not configured — run 'vigil setup' or 'vigil doctor'"
+    exit 1
+fi
+
+# ---- transition state --------------------------------------------------------
+DAEMON_ENGAGED=0           # 1 iff vigil currently holds disablesleep=1 + caffeinate
+COOLDOWN_UNTIL=0           # epoch ts; while now < COOLDOWN_UNTIL, refuse to engage
+
+# ---- cleanup on exit ---------------------------------------------------------
+cleanup_and_exit() {
+    log INFO "shutting down — releasing sleep prevention and cleaning up"
+    if (( DAEMON_ENGAGED == 1 )); then
+        vigil_pmset_release || true
+    fi
+    rm -f "$VIGIL_DAEMON_PIDFILE"
+    exit 0
+}
+trap cleanup_and_exit INT TERM
+
+# Crash-recovery: if a baseline exists from a prior crashed daemon, restore it
+# now (so we start from a known state). We treat existing baseline as evidence
+# of "we were engaged before" and release.
+if [[ -f "$VIGIL_BASELINE_FILE" ]]; then
+    log WARN "baseline.json present at startup — restoring prior state from a prior daemon"
+    vigil_pmset_release || true
+fi
+# Wipe any stale wrapper PID files older than 60s (from prior crashed wrappers).
+vigil_refcount_gc
+
+log INFO "vigil-daemon started (tick=${VIGIL_TICK_SECS}s, lock=$VIGIL_LOCK_FILE, repo=$VIGIL_REPO_ROOT)"
+
+# ---- main loop ---------------------------------------------------------------
+
+while true; do
+    # 1. Detect — write/refresh PID files for every CLI agent currently running.
+    ps_out=$(ps -axww -o pid= -o command= 2>/dev/null || true)
+    if [[ -n "$ps_out" ]]; then
+        # Detect via stdin so we don't redundantly call ps.
+        while IFS=$'\t' read -r pid name exe args; do
+            [[ -z "$pid" ]] && continue
+            # Wrappers handle their own PID files via the wrapper script's trap.
+            vigil_refcount_touch "$name" "$pid" "$exe"
+        done < <(printf '%s\n' "$ps_out" | vigil_detect_all -)
+    fi
+
+    # 2. GC stale entries.
+    vigil_refcount_gc
+
+    # 3. Refcount.
+    count=$(vigil_refcount_count)
+
+    # 4. Cutoff checks.
+    now=$(vigil_now_unix)
+    cut_thermal=0; vigil_thermal_should_cut && cut_thermal=1 || true
+    cut_battery=0; vigil_battery_should_cut && cut_battery=1 || true
+    if (( cut_thermal == 1 )); then
+        # Re-arm the cooldown window every time we observe thermal pressure.
+        COOLDOWN_UNTIL=$(( now + VIGIL_THERMAL_COOLDOWN_SECS ))
+    fi
+    cooling=$(( now < COOLDOWN_UNTIL ? 1 : 0 ))
+
+    # 5. Decide.
+    desired=0
+    if (( count > 0 && cut_thermal == 0 && cut_battery == 0 && cooling == 0 )); then
+        desired=1
+    fi
+
+    if (( desired == 1 && DAEMON_ENGAGED == 0 )); then
+        log INFO "engage — count=$count thermal=ok battery=ok"
+        if vigil_pmset_engage; then
+            DAEMON_ENGAGED=1
+        fi
+    elif (( desired == 0 && DAEMON_ENGAGED == 1 )); then
+        if (( cut_thermal == 1 )); then
+            log WARN "release — thermal cutoff (cooldown ${VIGIL_THERMAL_COOLDOWN_SECS}s)"
+            vigil_pmset_soft_release || true
+            DAEMON_ENGAGED=0
+        elif (( cut_battery == 1 )); then
+            log WARN "release — battery floor ($(vigil_battery_summary | tr -d '\n'))"
+            vigil_pmset_release || true
+            DAEMON_ENGAGED=0
+        elif (( count == 0 )); then
+            log INFO "release — no active agents"
+            vigil_pmset_release || true
+            DAEMON_ENGAGED=0
+        fi
+    fi
+
+    sleep "$VIGIL_TICK_SECS"
+done
