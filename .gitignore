@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Generated artifacts (none in phase 1; future Rust phases)
+target/
+Cargo.lock
+
+# Scratch / local-only files
+.scratch/
+*.local

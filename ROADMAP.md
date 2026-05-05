@@ -1,0 +1,18 @@
+# Vigil Roadmap
+
+Phases ship locally, in order. **No version tag, no GitHub release, no Homebrew tap until every phase has shipped and stabilized.** Each phase from 2 onward gets a *detailed plan written into its `future/phase-N-*.md` file before implementation starts* — the sketches below are direction-setting only.
+
+| Phase | Scope | Status |
+| --- | --- | --- |
+| **1. CLI + wrapper** | Detect `claude`, `codex`, `copilot` CLIs. `vigil run <cmd>` wrapper. Bash daemon, sudoers.d, LaunchAgent, refcount, thermal/battery guards, baseline-state restore. | **in progress** |
+| **2. copilot-companion integration** | End-to-end re-evaluation of the companion daemon. Session-aware via mtime on `~/.claude/copilot-companion/threads/*.json`. | sketched — [`future/phase-2-copilot-companion.md`](./future/phase-2-copilot-companion.md) |
+| **3. Desktop app detection** | Session-aware Claude.app / Codex.app / Copilot.app, mirroring `hiddenest/awake`'s provider model. Off-by-default opt-in until trustworthy. | sketched — [`future/phase-3-desktop-apps.md`](./future/phase-3-desktop-apps.md) |
+| **4. Lock feature** | `vigil lock` freezes laptop until a configured key combo. Native Rust helper (CGEventTap + `NSWorkspace.lockScreen` on macOS). | sketched — [`future/phase-4-lock-feature.md`](./future/phase-4-lock-feature.md) |
+| **5. Cross-OS port** | Full Rust rewrite. Linux (D-Bus systemd-logind / ScreenSaver) + Windows (`SetThreadExecutionState` / `LockWorkStation`). Bash phase 1 stays the macOS reference. | sketched — [`future/phase-5-cross-os.md`](./future/phase-5-cross-os.md) |
+
+## Working policy
+
+- **No release until all phases ship and stabilize locally.** Then v1.0.0 + Homebrew tap.
+- **Re-plan every deferred phase before implementing.** Edit the corresponding `future/phase-N-*.md` from a sketch into a real plan before starting work.
+- **Bash for v1, Rust for v4-5.** Native code only enters when there's no shell-out path (key capture, lock screen, cross-OS APIs). Rust over Swift to avoid Apple lock-in.
+- **No interim semver.** Master branch is the working state until v1.0.0.
