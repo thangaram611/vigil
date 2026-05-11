@@ -21,6 +21,8 @@ source "$VIGIL_LIB_DIR/common.sh"
 source "$VIGIL_LIB_DIR/detect.sh"
 # shellcheck source=../lib/refcount.sh
 source "$VIGIL_LIB_DIR/refcount.sh"
+# shellcheck source=../lib/activity.sh
+source "$VIGIL_LIB_DIR/activity.sh"
 # shellcheck source=../lib/pmset.sh
 source "$VIGIL_LIB_DIR/pmset.sh"
 # shellcheck source=../lib/thermal.sh
@@ -101,10 +103,15 @@ while true; do
     # 2. GC stale entries.
     vigil_refcount_gc
 
-    # 3. Refcount.
-    count=$(vigil_refcount_count)
+    # 3. Per-agent activity (computed once per tick — find -mmin -<N> with -quit).
+    claude_active=0;  vigil_agent_is_active claude  && claude_active=1
+    codex_active=0;   vigil_agent_is_active codex   && codex_active=1
+    copilot_active=0; vigil_agent_is_active copilot && copilot_active=1
 
-    # 4. Cutoff checks.
+    # 4. Activity-filtered refcount.
+    count=$(vigil_refcount_count "$claude_active" "$codex_active" "$copilot_active")
+
+    # 5. Cutoff checks.
     now=$(vigil_now_unix)
     cut_thermal=0; vigil_thermal_should_cut && cut_thermal=1 || true
     cut_battery=0; vigil_battery_should_cut && cut_battery=1 || true
@@ -114,14 +121,17 @@ while true; do
     fi
     cooling=$(( now < COOLDOWN_UNTIL ? 1 : 0 ))
 
-    # 5. Decide.
+    # 6. Decide.
     desired=0
     if (( count > 0 && cut_thermal == 0 && cut_battery == 0 && cooling == 0 )); then
         desired=1
     fi
 
     if (( desired == 1 && DAEMON_ENGAGED == 0 )); then
-        log INFO "engage — count=$count thermal=ok battery=ok"
+        cs="idle"; (( claude_active ))  && cs="active"
+        xs="idle"; (( codex_active ))   && xs="active"
+        ps="idle"; (( copilot_active )) && ps="active"
+        log INFO "engage — count=$count thermal=ok battery=ok claude=$cs codex=$xs copilot=$ps"
         if vigil_pmset_engage; then
             DAEMON_ENGAGED=1
         fi

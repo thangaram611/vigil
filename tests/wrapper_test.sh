@@ -29,3 +29,36 @@ test_wrapper_creates_and_cleans_pidfile() {
 
     rm -rf "$tmpstate"
 }
+
+test_wrapper_pidfile_survives_stale_gc() {
+    # A wrapper around a low-CPU command (`sleep 60`) used to be GC'd at 30s
+    # because branch (c) of vigil_refcount_gc deletes any pidfile with
+    # age > VIGIL_STALE_AGE_SECS AND cpu < VIGIL_STALE_CPU_PCT. Wrappers are
+    # written once (no per-tick mtime refresh), so they aged out. The fix:
+    # GC skips wrapper records in branch (c). We exercise that here.
+    local tmpstate; tmpstate=$(mktemp -d)
+    export VIGIL_STATE_DIR="$tmpstate"
+    export VIGIL_LOG_DIR="$tmpstate/logs"
+    export VIGIL_ACTIVE_DIR="$tmpstate/active"
+    mkdir -p "$VIGIL_ACTIVE_DIR" "$VIGIL_LOG_DIR"
+
+    # Source under our overrides so VIGIL_ACTIVE_DIR resolves correctly.
+    # shellcheck source=../lib/common.sh
+    source "$VIGIL_REPO_ROOT/lib/common.sh"
+    # shellcheck source=../lib/refcount.sh
+    source "$VIGIL_REPO_ROOT/lib/refcount.sh"
+
+    # Use $$ (this test's bash) — guaranteed alive and ~0% CPU, exactly the
+    # condition that used to trigger the bug.
+    local pidfile="$VIGIL_ACTIVE_DIR/wrapper-$$.pid"
+    local start_ts; start_ts=$(vigil_pid_start_ts "$$")
+    printf '{"pid":%s,"comm":"wrapper","start_ts":%s,"cmd":"sleep 99"}\n' "$$" "$start_ts" > "$pidfile"
+    # Backdate the file beyond the stale threshold (default 30s).
+    touch -t 200001010000 "$pidfile"
+
+    VIGIL_STALE_AGE_SECS=30 VIGIL_STALE_CPU_PCT=0.5 vigil_refcount_gc
+
+    assert_file_exists "$pidfile" "wrapper pidfile must survive idle-CPU GC"
+
+    rm -rf "$tmpstate"
+}

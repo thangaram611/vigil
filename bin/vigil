@@ -27,6 +27,8 @@ VIGIL_LIB_DIR="$VIGIL_REPO_ROOT/lib"
 source "$VIGIL_LIB_DIR/common.sh"
 # shellcheck source=../lib/refcount.sh
 source "$VIGIL_LIB_DIR/refcount.sh"
+# shellcheck source=../lib/activity.sh
+source "$VIGIL_LIB_DIR/activity.sh"
 # shellcheck source=../lib/pmset.sh
 source "$VIGIL_LIB_DIR/pmset.sh"
 # shellcheck source=../lib/thermal.sh
@@ -185,7 +187,14 @@ cmd_status() {
     local daemon_pid="-"
     [[ -f "$VIGIL_DAEMON_PIDFILE" ]] && daemon_pid=$(cat "$VIGIL_DAEMON_PIDFILE" 2>/dev/null)
 
-    local count; count=$(vigil_refcount_count)
+    # Per-agent activity, computed once for both the count and the per-row state.
+    local claude_active=0;  vigil_agent_is_active claude  && claude_active=1
+    local codex_active=0;   vigil_agent_is_active codex   && codex_active=1
+    local copilot_active=0; vigil_agent_is_active copilot && copilot_active=1
+
+    local active; active=$(vigil_refcount_count "$claude_active" "$codex_active" "$copilot_active")
+    local total;  total=$(vigil_refcount_count_total)
+    local idle_min=$(( (VIGIL_IDLE_AFTER_SEC + 59) / 60 ))
     local sd; sd=$(vigil_read_sleepdisabled)
     local baseline="-"
     [[ -f "$VIGIL_BASELINE_FILE" ]] && baseline=$(vigil_pmset_baseline_value)
@@ -194,16 +203,19 @@ cmd_status() {
 
     printf 'launchd loaded:    %s\n' "$loaded"
     printf 'daemon pid:        %s\n' "$daemon_pid"
-    printf 'refcount:          %s\n' "$count"
+    printf 'refcount:          %s active / %s total   (idle window %sm)\n' "$active" "$total" "$idle_min"
+    printf 'agents:            claude=%s  codex=%s  copilot=%s\n' \
+        "$(vigil_agent_state claude)" "$(vigil_agent_state codex)" "$(vigil_agent_state copilot)"
     printf 'pmset disablesleep: %s   (baseline=%s)\n' "$sd" "$baseline"
     printf 'caffeinate pid:    %s\n' "$caff"
     printf 'thermal:           %s\n' "$(vigil_thermal_summary)"
     printf 'battery:           %s\n' "$(vigil_battery_summary)"
     printf 'sudoers ok:        %s\n' "$(sudo_n_pmset_check && echo yes || echo no)"
-    if (( count > 0 )); then
+    if (( total > 0 )); then
         echo
         echo 'active matches:'
-        vigil_refcount_list | awk -F'\t' '{printf "  pid=%-7s name=%-15s age=%ss\n", $1, $2, $3}'
+        vigil_refcount_list "$claude_active" "$codex_active" "$copilot_active" \
+            | awk -F'\t' '{printf "  pid=%-7s name=%-15s age=%-5s %s\n", $1, $2, $3"s", $4}'
     fi
 }
 
@@ -226,16 +238,11 @@ cmd_run() {
         die "usage: vigil run <cmd> [args...]"
     fi
     vigil_ensure_dirs
-    # shellcheck source=../lib/refcount.sh
-    source "$VIGIL_LIB_DIR/refcount.sh"
 
-    local pidfile="$VIGIL_ACTIVE_DIR/wrapper-$$.pid"
-    local now; now=$(vigil_now_unix)
     # quoted-args summary; not robust to embedded newlines but fine for status display.
     local cmd_str="$*"
-    cmd_str="${cmd_str//\"/}"
-    printf '{"pid":%d,"comm":"wrapper","start_ts":%d,"cmd":"%s"}\n' \
-        "$$" "$now" "$cmd_str" > "$pidfile"
+    vigil_refcount_touch_wrapper "$$" "$cmd_str"
+    local pidfile="$VIGIL_ACTIVE_DIR/wrapper-$$.pid"
 
     # Bake $pidfile into the trap string so it survives the local scope ending.
     # If we used a function or unquoted variable here, set -u trips when the

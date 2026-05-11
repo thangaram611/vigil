@@ -14,6 +14,8 @@ Borrow `hiddenest/awake`'s session-provider model:
 - Mark *active* iff at least one file under `~/.claude/copilot-companion/threads/*.json` has mtime within an `ACTIVE_SESSION_WINDOW_SECS` (15-30s, TBD after the audit).
 - Otherwise treat the daemon as idle even though it is running.
 
+Reuse `lib/activity.sh::vigil_agent_is_active` from phase 1 — the per-thread mtime check lands cleanly on top of the same probe (just a different agent token, dir, and pattern).
+
 ## Open questions for the replan
 
 - Does the companion update thread JSON on every poll iteration, or only on state changes? Determines the mtime window.

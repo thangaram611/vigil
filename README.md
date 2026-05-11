@@ -11,7 +11,8 @@ Keep your Mac awake while AI coding agents are working — including with the li
 ## What it does today (phase 1)
 
 - Watches for the **CLI** processes `claude` (Claude Code), `codex`, `copilot`.
-- Provides a `vigil run <cmd>` wrapper for explicit invocations (re-aliases your `claudex` cleanly).
+- **Activity-aware:** a CLI agent only counts toward sleep prevention when its session storage has been touched within the last 5 minutes (`VIGIL_IDLE_AFTER_SEC=300`). An idle REPL waiting for input is treated as idle. Probe is per-agent-type and uses `find -mmin` against `~/.claude/projects/`, `~/.codex/sessions/`, `~/.copilot/session-state/`.
+- Provides a `vigil run <cmd>` wrapper for explicit invocations (re-aliases your `claudex` cleanly). Wrappers are an explicit user opt-in and hold sleep for the wrapped command's full lifetime, regardless of session activity.
 - Holds `pmset disablesleep=1` + `caffeinate -di` while at least one agent is active.
 - Restores your **prior** `SleepDisabled` state on release — does not clobber other tools.
 - Cuts off automatically on thermal warnings, on low battery while unplugged.

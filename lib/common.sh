@@ -41,6 +41,10 @@ VIGIL_STALE_AGE_SECS="${VIGIL_STALE_AGE_SECS:-30}"
 VIGIL_STALE_CPU_PCT="${VIGIL_STALE_CPU_PCT:-0.5}"
 VIGIL_THERMAL_COOLDOWN_SECS="${VIGIL_THERMAL_COOLDOWN_SECS:-60}"
 VIGIL_BATTERY_FLOOR_PCT="${VIGIL_BATTERY_FLOOR_PCT:-20}"
+# Idle window: a CLI agent only counts toward the refcount if its session
+# storage was modified within this many seconds. BSD `find -mmin` rounds up
+# to whole minutes, so values < 60s silently floor to 60s.
+VIGIL_IDLE_AFTER_SEC="${VIGIL_IDLE_AFTER_SEC:-300}"
 VIGIL_FORCE="${VIGIL_FORCE:-0}"
 
 # ---- logging ----------------------------------------------------------------

@@ -52,39 +52,71 @@ vigil_refcount_touch() {
         "$pid" "$safe_exe" "$start_ts" "$name" > "$pidfile"
 }
 
-# Wrapper invocation. Different prefix so the daemon's stale-GC treats it gently.
+# Wrapper invocation. Uses vigil_now_unix (not vigil_pid_start_ts) to avoid
+# the ps+date spawn cost on the user-facing `vigil run` path — start_ts here
+# is only used by GC's pid-reuse branch, which already runs every tick.
 vigil_refcount_touch_wrapper() {
     local pid="$1" cmd="$2"
-    local start_ts; start_ts=$(vigil_pid_start_ts "$pid")
-    [[ -z "$start_ts" ]] && start_ts=$(vigil_now_unix)
+    local now; now=$(vigil_now_unix)
     local pidfile="$VIGIL_ACTIVE_DIR/wrapper-${pid}.pid"
     local safe_cmd="${cmd//\"/}"
     printf '{"pid":%s,"comm":"wrapper","start_ts":%s,"cmd":"%s"}\n' \
-        "$pid" "$start_ts" "$safe_cmd" > "$pidfile"
+        "$pid" "$now" "$safe_cmd" > "$pidfile"
 }
 
-# Count of currently-alive PID files.
+# Activity-filtered refcount. Args: <claude_active> <codex_active> <copilot_active>.
+# Each arg is 0|1. A PID file contributes iff:
+#   - its prefix is `wrapper` (always counts; wrappers are explicit user opt-ins), or
+#   - its prefix is `cli-<agent>` and the corresponding flag is 1.
 vigil_refcount_count() {
+    local claude_active="$1" codex_active="$2" copilot_active="$3"
+    local n=0
+    [[ -d "$VIGIL_ACTIVE_DIR" ]] || { printf '0\n'; return; }
+    while IFS= read -r f; do
+        [[ -z "$f" ]] && continue
+        local base; base=$(basename "$f" .pid)
+        local prefix="${base%-*}"
+        case "$prefix" in
+            cli-claude)  (( claude_active ))  && n=$((n+1)) ;;
+            cli-codex)   (( codex_active ))   && n=$((n+1)) ;;
+            cli-copilot) (( copilot_active )) && n=$((n+1)) ;;
+            wrapper)     n=$((n+1)) ;;
+        esac
+    done < <(find "$VIGIL_ACTIVE_DIR" -maxdepth 1 -type f -name '*.pid' 2>/dev/null)
+    printf '%s\n' "$n"
+}
+
+# Raw count of all PID files (no activity filtering). Used by `vigil status`
+# to display "X active / Y total"; never used by the daemon's engage decision.
+vigil_refcount_count_total() {
     local n=0
     if [[ -d "$VIGIL_ACTIVE_DIR" ]]; then
-        # `find` to avoid glob errors when empty.
         n=$(find "$VIGIL_ACTIVE_DIR" -maxdepth 1 -type f -name '*.pid' 2>/dev/null | wc -l | tr -d ' ')
     fi
     printf '%s\n' "$n"
 }
 
-# List active matches as TSV: <pid>\t<name>\t<age_secs>
+# List active matches as TSV: <pid>\t<name>\t<age_secs>\t<state>
+# Args: <claude_active> <codex_active> <copilot_active>. Same parser as count;
+# wrapper rows are always reported as `active`.
 vigil_refcount_list() {
+    local claude_active="$1" codex_active="$2" copilot_active="$3"
     local now; now=$(vigil_now_unix)
-    if [[ -d "$VIGIL_ACTIVE_DIR" ]]; then
-        find "$VIGIL_ACTIVE_DIR" -maxdepth 1 -type f -name '*.pid' 2>/dev/null | while read -r f; do
-            local base; base=$(basename "$f" .pid)
-            local pid="${base##*-}"
-            local name="${base%-*}"
-            local mtime; mtime=$(stat -f %m "$f" 2>/dev/null || echo 0)
-            printf '%s\t%s\t%s\n' "$pid" "$name" "$((now - mtime))"
-        done
-    fi
+    [[ -d "$VIGIL_ACTIVE_DIR" ]] || return 0
+    find "$VIGIL_ACTIVE_DIR" -maxdepth 1 -type f -name '*.pid' 2>/dev/null | while read -r f; do
+        local base; base=$(basename "$f" .pid)
+        local pid="${base##*-}"
+        local name="${base%-*}"
+        local mtime; mtime=$(stat -f %m "$f" 2>/dev/null || echo 0)
+        local state="idle"
+        case "$name" in
+            cli-claude)  (( claude_active ))  && state="active" ;;
+            cli-codex)   (( codex_active ))   && state="active" ;;
+            cli-copilot) (( copilot_active )) && state="active" ;;
+            wrapper)     state="active" ;;
+        esac
+        printf '%s\t%s\t%s\t%s\n' "$pid" "$name" "$((now - mtime))" "$state"
+    done
 }
 
 # ---- stale GC ----------------------------------------------------------------
@@ -134,7 +166,12 @@ vigil_refcount_gc() {
             log DEBUG "gc pid-reuse pid=$pid name=$name on_disk=$on_disk_start live=$live_start"
             continue
         fi
-        # (c) idle — old file + low CPU
+        # (c) idle — old file + low CPU.
+        # Skip wrapper records: their PID files are written once by `vigil run`
+        # and never refreshed, so an explicit-opt-in wrapper around a low-CPU
+        # command (`vigil run sleep 60`) would otherwise be GC'd at 30s.
+        # Branches (a) dead-pid and (b) pid-reuse above still clean wrappers up.
+        [[ "$name" == "wrapper" ]] && continue
         if (( age > VIGIL_STALE_AGE_SECS )); then
             local cpu; cpu=$(vigil_pid_cpu_pct "$pid")
             if [[ -n "$cpu" ]] && _vigil_lt "$cpu" "$VIGIL_STALE_CPU_PCT"; then
