@@ -10,17 +10,27 @@ test_wrapper_creates_and_cleans_pidfile() {
     export VIGIL_LOG_DIR="$tmpstate/logs"
     mkdir -p "$VIGIL_STATE_DIR/active" "$VIGIL_LOG_DIR"
 
-    # Run a wrapper around a short-lived `sleep`. Snapshot active/ in the
-    # middle of its lifetime, then again after it exits.
-    "$VIGIL_REPO_ROOT/bin/vigil" run sleep 0.6 &
+    # Run a wrapper around a `sleep`. Poll for the pidfile rather than racing
+    # a fixed timeout — vigil's bash startup (sourcing 6 libs + load_config)
+    # adds non-trivial latency under loaded CI/CPU and the previous fixed-
+    # 200ms snapshot occasionally lost the race.
+    "$VIGIL_REPO_ROOT/bin/vigil" run sleep 2 &
     local wrapper_pid=$!
-    sleep 0.2
-    local during; during=$(ls "$tmpstate/active/" 2>/dev/null || true)
+    local during=""
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        sleep 0.1
+        during=$(ls "$tmpstate/active/" 2>/dev/null || true)
+        [[ -n "$during" ]] && break
+    done
+    # Kill the sleep child so we don't have to wait 2s for it to exit naturally.
+    # The trap inside `vigil run` will fire and clean the pidfile.
+    kill "$wrapper_pid" 2>/dev/null || true
     wait "$wrapper_pid" 2>/dev/null || true
-    local after;  after=$(ls "$tmpstate/active/" 2>/dev/null || true)
+    local after; after=$(ls "$tmpstate/active/" 2>/dev/null || true)
 
     if [[ -z "$during" ]]; then
-        echo "    FAIL: no wrapper PID file existed during the child's lifetime"
+        echo "    FAIL: no wrapper PID file existed during the child's lifetime (vigil startup > 1.5s?)"
         rm -rf "$tmpstate"
         return 1
     fi

@@ -40,23 +40,26 @@ cd ~/Documents/projects/personal/vigil
 ./bin/vigil doctor
 ```
 
-`vigil setup` does three things, each prompting only what's strictly needed:
+`vigil setup` does four things, each prompting only what's strictly needed:
 
 1. Writes `/etc/sudoers.d/vigil` (validated with `visudo -c` first) — exact-argv `NOPASSWD` only for `pmset -a disablesleep 0` and `pmset -a disablesleep 1`.
-2. Creates `~/Library/Application Support/vigil/state/` (mode 0700) and `~/Library/Logs/vigil/`.
-3. Installs and bootstraps `~/Library/LaunchAgents/com.thangaram.vigil.plist`.
+2. Writes `/etc/newsyslog.d/vigil.conf` — rotates `~/Library/Logs/vigil/daemon.log` at 1 MiB, keeps 5 gzipped generations. Standard macOS log-rotation pattern, evaluated hourly by `com.apple.newsyslog`.
+3. Creates `~/Library/Application Support/vigil/state/` (mode 0700) and `~/Library/Logs/vigil/`.
+4. Installs and bootstraps `~/Library/LaunchAgents/com.thangaram.vigil.plist`.
 
-Inspect the sudoers entry yourself before approving — `etc/vigil.sudoers.in` is the template.
+Inspect the sudoers and newsyslog entries yourself before approving — `etc/vigil.sudoers.in` and `etc/vigil.newsyslog.in` are the templates.
 
 ## Usage
 
 ```bash
-vigil status            # daemon state, refcount, pmset state, baseline, thermal, battery
+vigil status            # daemon state, refcount, pmset state, baseline, thermal, battery, power assertions
 vigil log -f            # tail daemon log
 vigil run claude …      # wrap a one-off command
 vigil doctor            # diagnose install
-vigil uninstall         # remove sudoers, plist, restore baseline state
+vigil uninstall         # remove sudoers + newsyslog, plist, restore baseline state
 ```
+
+`vigil status` includes a `power assertions:` block — a parsed view of `pmset -g assertions` that marks our own caffeinate child with `← vigil` so you can tell at a glance whether vigil or some other tool is the reason your Mac isn't sleeping.
 
 To wrap your existing `claudex` alias, edit `~/.zshrc`:
 

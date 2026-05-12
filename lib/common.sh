@@ -28,12 +28,18 @@ VIGIL_INSTALL_DIR="${VIGIL_INSTALL_DIR:-$HOME/Library/Application Support/vigil}
 VIGIL_STATE_DIR="${VIGIL_STATE_DIR:-$VIGIL_INSTALL_DIR/state}"
 VIGIL_LOG_DIR="${VIGIL_LOG_DIR:-$HOME/Library/Logs/vigil}"
 VIGIL_CONFIG_FILE="${VIGIL_CONFIG_FILE:-$HOME/.config/vigil/vigil.conf}"
-VIGIL_LOG_FILE="${VIGIL_LOG_FILE:-$VIGIL_LOG_DIR/daemon.log}"
 VIGIL_ACTIVE_DIR="$VIGIL_STATE_DIR/active"
 VIGIL_BASELINE_FILE="$VIGIL_STATE_DIR/baseline.json"
 VIGIL_CAFFEINATE_PIDFILE="$VIGIL_STATE_DIR/caffeinate.pid"
 VIGIL_DAEMON_PIDFILE="$VIGIL_STATE_DIR/daemon.pid"
 VIGIL_LOCK_FILE="$VIGIL_STATE_DIR/state.lock"
+# System-managed log-rotation drop-in. Owned by root, installed by `vigil setup`,
+# removed by `vigil uninstall`. NOT user-overridable — newsyslog only reads
+# /etc/newsyslog.d/.
+VIGIL_NEWSYSLOG_FILE="/etc/newsyslog.d/vigil.conf"
+# VIGIL_LOG_FILE is intentionally NOT set here. It's derived inside
+# vigil_load_config so that a vigil.conf overriding VIGIL_LOG_DIR re-derives
+# the log path. See the init-order note in vigil_load_config below.
 
 # Tunables (overridable in vigil.conf — sourced by daemon if present)
 VIGIL_TICK_SECS="${VIGIL_TICK_SECS:-5}"
@@ -110,6 +116,13 @@ vigil_load_config() {
         # shellcheck source=/dev/null
         source "$VIGIL_CONFIG_FILE"
     fi
+    # Derive VIGIL_LOG_FILE AFTER config sourcing so a vigil.conf that sets
+    # only VIGIL_LOG_DIR correctly re-derives the log file path. Unconditional
+    # assignment — no `:-` fallback — because the `:-` form is precisely what
+    # silently kept the stale top-level value before this fix. There is no
+    # legitimate use case for overriding the basename ("daemon.log") without
+    # also changing the directory; users override VIGIL_LOG_DIR only.
+    VIGIL_LOG_FILE="$VIGIL_LOG_DIR/daemon.log"
 }
 
 # ---- misc helpers -----------------------------------------------------------

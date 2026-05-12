@@ -54,6 +54,17 @@ The daemon runs under `launchd` with no controlling tty. A plain `sudo` call wou
 
 If you have Amphetamine or another tool already holding `disablesleep=1` when vigil engages, the original draft would have set it back to `0` on release — clobbering the other tool's setting. Vigil snapshots the prior value at the first acquire and restores exactly that on the last release.
 
+### Baseline stickiness: `SleepDisabled=1` is captured and re-captured
+
+If `SleepDisabled=1` is the value vigil captures on its first engage — because another tool was already holding it, or a prior vigil crash left it pinned — every subsequent release restores to `1`, and the **next** engage re-captures `1` (since `baseline.json` was cleared on release and the live value is still `1`). The daemon log will then show `captured baseline SleepDisabled=1` on every engage. This is the design working as intended: vigil never lowers a sleep-prevention flag it didn't originally raise.
+
+To reset the baseline back to `0`-state — i.e., to make vigil release all the way to sleep-enabled on the next quiet window — do one of:
+
+- While vigil is **idle** (refcount = 0, no `baseline.json` on disk): `sudo /usr/bin/pmset -a disablesleep 0`. The next vigil engage will then capture `0`, and the next release will go back to `0`.
+- `vigil uninstall && vigil setup` — uninstall restores baseline and clears state; setup starts fresh.
+
+If another tool (Amphetamine, an open `caffeinate -di` shell, etc.) is the *reason* `SleepDisabled=1` keeps coming back, vigil cannot fix that — the other tool will re-assert. Quit the other tool first.
+
 ## Why `caffeinate -di` and not `-dimsu`
 
 Reading `man caffeinate`:

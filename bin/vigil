@@ -74,6 +74,19 @@ cmd_render_sudoers() {
     sed -e "s|@USER@|$user|g" "$in"
 }
 
+cmd_render_newsyslog() {
+    # Substitute placeholders in the newsyslog.d template. Uses the RUNTIME
+    # values of VIGIL_LOG_FILE and the current user, so a vigil.conf override
+    # of VIGIL_LOG_DIR is picked up correctly (vigil_load_config derives
+    # VIGIL_LOG_FILE from VIGIL_LOG_DIR).
+    local in="$VIGIL_REPO_ROOT/etc/vigil.newsyslog.in"
+    local user; user=$(id -un)
+    sed \
+        -e "s|@VIGIL_LOG_FILE@|$VIGIL_LOG_FILE|g" \
+        -e "s|@VIGIL_USER@|$user|g" \
+        "$in"
+}
+
 # ---- subcommands -------------------------------------------------------------
 
 cmd_setup() {
@@ -108,12 +121,25 @@ cmd_setup() {
     fi
     echo "  sudoers ok: $VIGIL_SUDOERS_FILE"
 
-    # 2. LaunchAgent plist
+    # 2. newsyslog.d entry — same sudo session as sudoers if the cached
+    # credential is still valid; otherwise prompts a second time.
+    local tmp_newsyslog; tmp_newsyslog=$(mktemp -t vigil-newsyslog)
+    cmd_render_newsyslog > "$tmp_newsyslog"
+    chmod 0644 "$tmp_newsyslog"
+    echo "  newsyslog (preview):"
+    sed 's/^/    /' "$tmp_newsyslog"
+    echo
+    echo "  installing $VIGIL_NEWSYSLOG_FILE"
+    sudo install -m 0644 -o root -g wheel "$tmp_newsyslog" "$VIGIL_NEWSYSLOG_FILE"
+    rm -f "$tmp_newsyslog"
+    echo "  newsyslog ok: $VIGIL_NEWSYSLOG_FILE"
+
+    # 3. LaunchAgent plist
     mkdir -p "$(dirname "$VIGIL_PLIST")"
     cmd_render_plist > "$VIGIL_PLIST"
     echo "  plist: $VIGIL_PLIST"
 
-    # 3. Bootstrap the LaunchAgent
+    # 4. Bootstrap the LaunchAgent
     cmd_start
 
     echo
@@ -132,10 +158,11 @@ cmd_uninstall() {
         echo "  removed $VIGIL_PLIST"
     fi
 
-    # Remove sudoers entry — needs sudo
-    if [[ -f "$VIGIL_SUDOERS_FILE" ]]; then
-        echo "  removing $VIGIL_SUDOERS_FILE — sudo prompt"
-        sudo rm -f "$VIGIL_SUDOERS_FILE"
+    # Remove sudoers + newsyslog entries — needs sudo
+    if [[ -f "$VIGIL_SUDOERS_FILE" || -f "$VIGIL_NEWSYSLOG_FILE" ]]; then
+        echo "  removing root-owned files (sudoers + newsyslog) — sudo prompt"
+        [[ -f "$VIGIL_SUDOERS_FILE"   ]] && sudo rm -f "$VIGIL_SUDOERS_FILE"
+        [[ -f "$VIGIL_NEWSYSLOG_FILE" ]] && sudo rm -f "$VIGIL_NEWSYSLOG_FILE"
     fi
 
     # Restore baseline if any (e.g., daemon crashed mid-engagement)
@@ -173,6 +200,19 @@ cmd_stop() {
     local domain="gui/$(id -u)"
     if launchctl print "$domain/$VIGIL_LABEL" >/dev/null 2>&1; then
         launchctl bootout "$domain/$VIGIL_LABEL" 2>/dev/null || true
+        # Poll until launchd has fully torn the service down. `bootout` returns
+        # quickly but deregistration can briefly outlast the call; a follow-up
+        # `bootstrap` against the half-torn-down state yields:
+        #     Bootstrap failed: 5: Input/output error
+        # Without this poll, `vigil setup` (which calls cmd_stop then later
+        # cmd_start) intermittently leaves the new service unloaded — the
+        # bootstrap "succeeds" but launchd promptly drops the registration.
+        # Bounded at 5s (50 × 100ms); in practice unloads complete in 1-2 ticks.
+        local i
+        for i in $(seq 1 50); do
+            launchctl print "$domain/$VIGIL_LABEL" >/dev/null 2>&1 || break
+            sleep 0.1
+        done
         echo "  launchd: booted out $VIGIL_LABEL"
     else
         echo "  launchd: not loaded"
@@ -217,6 +257,26 @@ cmd_status() {
         vigil_refcount_list "$claude_active" "$codex_active" "$copilot_active" \
             | awk -F'\t' '{printf "  pid=%-7s name=%-15s age=%-5s %s\n", $1, $2, $3"s", $4}'
     fi
+
+    echo
+    echo 'power assertions:'
+    # vigil_assertions_summary emits either:
+    #   - a literal "(none)" or "(parse-failed; raw output:)..." block, OR
+    #   - one or more TSV rows: <pid>\t<process>\t<atype>[\t← vigil]
+    # The first-char `(` is the discriminator. Tab-delimited rows get formatted;
+    # parens-bracketed status passes through unchanged.
+    local assertions_out; assertions_out=$(vigil_assertions_summary)
+    if [[ "$assertions_out" == '('* ]]; then
+        printf '%s\n' "$assertions_out" | sed 's/^/  /'
+    else
+        # LC_ALL=C — see the note in vigil_assertions_summary; we never touch
+        # the assertion-name strings here (just pid/process/atype which are
+        # ASCII-only) but the safety belt costs nothing.
+        printf '%s\n' "$assertions_out" | LC_ALL=C awk -F'\t' '
+            NF == 0 { next }
+            { printf "  pid=%-7s %-28s %-32s %s\n", $1, $2, $3, $4 }
+        '
+    fi
 }
 
 cmd_log() {
@@ -256,22 +316,21 @@ cmd_run() {
 }
 
 cmd_reload() {
-    # Re-sync daemon + libs from source repo into install dir, then bounce launchd.
-    # Use `launchctl kickstart -k` (kill+restart in one call) instead of stop/start —
-    # the stop/start path is async and the start half can race with the still-running
-    # old binary, leading to "already loaded" + a stale instance.
+    # Re-sync daemon + libs from source repo into install dir, then bounce launchd
+    # via cmd_stop (bootout+poll) + cmd_start (bootstrap).
+    #
+    # Why NOT `launchctl kickstart -k`: kickstart restarts the daemon process
+    # but launchd KEEPS the cached plist config in memory. So plist changes —
+    # ExitTimeOut, ThrottleInterval, EnvironmentVariables, RunAtLoad, etc. —
+    # never take effect on the live service. `vigil reload` is the user-facing
+    # mechanism for picking up plist changes, so it must re-read the plist.
     cmd_sync_install
     if [[ -f "$VIGIL_PLIST" ]]; then
         cmd_render_plist > "$VIGIL_PLIST"
         echo "  re-rendered $VIGIL_PLIST"
     fi
-    local domain="gui/$(id -u)"
-    if launchctl print "$domain/$VIGIL_LABEL" >/dev/null 2>&1; then
-        launchctl kickstart -k "$domain/$VIGIL_LABEL" >/dev/null 2>&1 || true
-        echo "  launchd: kickstarted $VIGIL_LABEL (kill+restart)"
-    else
-        cmd_start
-    fi
+    cmd_stop
+    cmd_start
     echo "vigil: reload complete."
 }
 
@@ -315,6 +374,14 @@ cmd_doctor() {
         printf '  sudo -n pmset:      ok\n'
     else
         printf '  sudo -n pmset:      FAIL — non-interactive sudo not configured\n'
+        errs=$((errs+1))
+    fi
+
+    # 4b. newsyslog rotation drop-in
+    if [[ -f "$VIGIL_NEWSYSLOG_FILE" ]]; then
+        printf '  newsyslog file:     %s\n' "$VIGIL_NEWSYSLOG_FILE"
+    else
+        printf '  newsyslog file:     MISSING — run vigil setup\n'
         errs=$((errs+1))
     fi
 
@@ -369,11 +436,11 @@ cmd_help() {
 vigil — keep Mac awake while AI agents are working
 
 Usage:
-  vigil setup        Install sudoers entry, create state/log dirs, load LaunchAgent
-  vigil uninstall    Remove sudoers entry, plist, restore baseline state, wipe state
+  vigil setup        Install sudoers + newsyslog entries, create state/log dirs, load LaunchAgent
+  vigil uninstall    Remove sudoers + newsyslog entries, plist, restore baseline state, wipe state
   vigil start        Bootstrap the LaunchAgent
   vigil stop         Boot out the LaunchAgent
-  vigil status       Show daemon state, refcount, pmset baseline, thermal, battery
+  vigil status       Show daemon state, refcount, pmset baseline, thermal, battery, power assertions
   vigil log [-f]     cat / tail -f the daemon log
   vigil run <cmd>    Wrapper: holds sleep prevention while <cmd> runs
   vigil reload       Re-sync daemon + libs into install dir, restart launchd
