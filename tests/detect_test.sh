@@ -39,9 +39,26 @@ test_excludes_codex_app_server() {
 }
 
 test_excludes_copilot_companion_node() {
-    # The copilot-companion node daemon is deferred to phase 2.
+    # The copilot-companion node router daemon is the long-lived process that
+    # spawns `copilot --acp` workers per Copilot session. Matching the router
+    # itself would hold sleep 24/7; matching the worker (covered by
+    # test_picks_up_copilot_companion_acp_worker) is the correct shape.
     local out; out=$(vigil_detect_all "$FIXTURE")
-    assert_not_contains "$out" "copilot-acp-daemon" "phase 1 should NOT detect copilot-companion node daemon"
+    assert_not_contains "$out" "copilot-acp-daemon" "should NOT detect copilot-companion node router daemon"
+}
+
+test_picks_up_copilot_companion_acp_worker() {
+    # Phase 2 audit: the worker the copilot-companion daemon spawns is a real
+    # `copilot` CLI process invoked with `--acp` and ACP-mode flags. It must
+    # be matched as cli-copilot and the --acp marker must survive in the args
+    # column, since downstream callers (debug logs, future filters) may key
+    # on it. The fixture line is captured live and pins this contract.
+    local out; out=$(vigil_detect_all "$FIXTURE")
+    local row
+    row=$(printf '%s\n' "$out" | grep -E $'^3670\t')
+    assert_contains "$row" $'\tcli-copilot\t' "fixture pid 3670 (companion-spawned worker) must map to cli-copilot"
+    assert_contains "$row" "/opt/homebrew/bin/copilot" "exe column must preserve the resolved copilot binary path"
+    assert_contains "$row" "--acp" "args column must preserve the --acp marker that distinguishes companion workers"
 }
 
 test_output_format_is_tsv() {

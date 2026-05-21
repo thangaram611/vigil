@@ -10,7 +10,7 @@ Keep your Mac awake while AI coding agents are working — including with the li
 
 ## What it does today (phase 1)
 
-- Watches for the **CLI** processes `claude` (Claude Code), `codex`, `copilot`.
+- Watches for the **CLI** processes `claude` (Claude Code), `codex`, `copilot`. The `copilot --acp` worker that [`copilot-companion`](https://github.com/thangaram611/copilot-companion) spawns per Copilot session is the same `copilot` binary and is detected via the same path; the long-lived `node` router daemon is intentionally not detected (it does no agent work itself).
 - **Activity-aware:** a CLI agent only counts toward sleep prevention when its session storage has been touched within the last 5 minutes (`VIGIL_IDLE_AFTER_SEC=300`). An idle REPL waiting for input is treated as idle. Probe is per-agent-type and uses `find -mmin` against `~/.claude/projects/`, `~/.codex/sessions/`, `~/.copilot/session-state/`.
 - Provides a `vigil run <cmd>` wrapper for explicit invocations (re-aliases your `claudex` cleanly). Wrappers are an explicit user opt-in and hold sleep for the wrapped command's full lifetime, regardless of session activity.
 - Holds `pmset disablesleep=1` + `caffeinate -di` while at least one agent is active.
@@ -23,7 +23,6 @@ Keep your Mac awake while AI coding agents are working — including with the li
 What phase 1 **does not** do (yet) — see [`ROADMAP.md`](./ROADMAP.md):
 
 - Detect Claude.app / Codex.app / Copilot.app desktop apps (deferred to phase 3, needs session-aware logic to avoid false positives when the app is merely open).
-- Detect copilot-companion's background poller (deferred to phase 2).
 - Lock the laptop with a key-combo unlock (phase 4).
 - Linux / Windows support (phase 5).
 

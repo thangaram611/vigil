@@ -5,7 +5,7 @@ Phases ship locally, in order. **No version tag, no GitHub release, no Homebrew 
 | Phase | Scope | Status |
 | --- | --- | --- |
 | **1. CLI + wrapper** | Detect `claude`, `codex`, `copilot` CLIs. `vigil run <cmd>` wrapper. Bash daemon, sudoers.d, LaunchAgent, refcount, thermal/battery guards, baseline-state restore. | **in progress** |
-| **2. copilot-companion integration** | End-to-end re-evaluation of the companion daemon. Session-aware via mtime on `~/.claude/copilot-companion/threads/*.json`. | sketched — [`future/phase-2-copilot-companion.md`](./future/phase-2-copilot-companion.md) |
+| **2. copilot-companion integration** | End-to-end re-evaluation of the companion daemon. Session-aware via mtime on `~/.claude/copilot-companion/threads/*.json`. | **audited — no code change needed** ([closeout](./future/phase-2-copilot-companion.md)) |
 | **3. Desktop app detection** | Session-aware Claude.app / Codex.app / Copilot.app, mirroring `hiddenest/awake`'s provider model. Off-by-default opt-in until trustworthy. | sketched — [`future/phase-3-desktop-apps.md`](./future/phase-3-desktop-apps.md) |
 | **4. Lock feature** | `vigil lock` freezes laptop until a configured key combo. Native Rust helper (CGEventTap + `NSWorkspace.lockScreen` on macOS). | sketched — [`future/phase-4-lock-feature.md`](./future/phase-4-lock-feature.md) |
 | **5. Cross-OS port** | Full Rust rewrite. Linux (D-Bus systemd-logind / ScreenSaver) + Windows (`SetThreadExecutionState` / `LockWorkStation`). Bash phase 1 stays the macOS reference. | sketched — [`future/phase-5-cross-os.md`](./future/phase-5-cross-os.md) |
