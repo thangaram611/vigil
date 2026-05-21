@@ -15,6 +15,8 @@ Keep your Mac awake while AI coding agents are working — including with the li
 - Provides a `vigil run <cmd>` wrapper for explicit invocations (re-aliases your `claudex` cleanly). Wrappers are an explicit user opt-in and hold sleep for the wrapped command's full lifetime, regardless of session activity.
 - Holds `pmset disablesleep=1` + `caffeinate -di` while at least one agent is active.
 - Restores your **prior** `SleepDisabled` state on release — does not clobber other tools.
+- Reconciles the live engaged state every tick: if `SleepDisabled` is flipped back
+  or the `caffeinate` child exits while agents are still active, vigil reasserts.
 - Cuts off automatically on thermal warnings, on low battery while unplugged.
 - Runs as a per-user `launchd` LaunchAgent; auto-starts at login.
 
@@ -40,6 +42,9 @@ cd ~/Documents/projects/personal/vigil
 ./bin/vigil doctor
 ```
 
+Use `./bin/vigil setup --dry-run` first if you want to preview every install
+path and root-owned file without changing the system.
+
 `vigil setup` does four things, each prompting only what's strictly needed:
 
 1. Writes `/etc/sudoers.d/vigil` (validated with `visudo -c` first) — exact-argv `NOPASSWD` only for `pmset -a disablesleep 0` and `pmset -a disablesleep 1`.
@@ -53,9 +58,11 @@ Inspect the sudoers and newsyslog entries yourself before approving — `etc/vig
 
 ```bash
 vigil status            # daemon state, refcount, pmset state, baseline, thermal, battery, power assertions
+vigil status --json     # same state, machine-readable for agents/scripts
 vigil log -f            # tail daemon log
 vigil run claude …      # wrap a one-off command
 vigil doctor            # diagnose install
+vigil doctor --power    # focused pmset/caffeinate/assertion diagnostics
 vigil uninstall         # remove sudoers + newsyslog, plist, restore baseline state
 ```
 

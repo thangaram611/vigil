@@ -45,6 +45,65 @@ vigil_pmset_clear_baseline() {
 
 # ---- transitions --------------------------------------------------------------
 
+vigil_pmset_caffeinate_pid() {
+    [[ -f "$VIGIL_CAFFEINATE_PIDFILE" ]] || return 1
+    local cpid; cpid=$(cat "$VIGIL_CAFFEINATE_PIDFILE" 2>/dev/null)
+    [[ "$cpid" =~ ^[0-9]+$ ]] || return 1
+    printf '%s\n' "$cpid"
+}
+
+vigil_pmset_caffeinate_alive() {
+    local cpid; cpid=$(vigil_pmset_caffeinate_pid) || return 1
+    kill -0 "$cpid" 2>/dev/null || return 1
+    local cmd exe base
+    cmd=$(ps -p "$cpid" -o command= 2>/dev/null | sed 's/^ *//')
+    [[ -n "$cmd" ]] || return 1
+    exe="${cmd%% *}"
+    base="${exe##*/}"
+    [[ "$base" == "caffeinate" ]]
+}
+
+vigil_pmset_spawn_caffeinate() {
+    if vigil_pmset_caffeinate_alive; then
+        return 0
+    fi
+    rm -f "$VIGIL_CAFFEINATE_PIDFILE"
+    caffeinate -di &
+    echo $! > "$VIGIL_CAFFEINATE_PIDFILE"
+    log INFO "spawned caffeinate -di pid=$(cat "$VIGIL_CAFFEINATE_PIDFILE")"
+}
+
+# Reassert the live engaged state after drift. This is used while already
+# engaged and during crash recovery, so it intentionally does not capture or
+# clear baseline state.
+vigil_pmset_reconcile_engaged() {
+    local sd; sd=$(vigil_read_sleepdisabled)
+    if [[ "$sd" != "1" ]]; then
+        log WARN "SleepDisabled drifted to $sd while engaged — reasserting"
+        sudo_n_pmset_disablesleep 1 || return 1
+    fi
+    if ! vigil_pmset_caffeinate_alive; then
+        log WARN "caffeinate assertion missing while engaged — restarting"
+        vigil_pmset_spawn_caffeinate || return 1
+    fi
+}
+
+# Startup recovery for a daemon restart after an unclean exit. If active work
+# still exists, keep the original baseline and reassert. Otherwise restore.
+# Returns 0 when the caller should treat the daemon as engaged, 1 otherwise.
+vigil_pmset_recover_startup() {
+    local active_count="$1" can_hold="${2:-1}"
+    [[ -f "$VIGIL_BASELINE_FILE" ]] || return 1
+    if (( active_count > 0 && can_hold == 1 )); then
+        log WARN "baseline.json present at startup and active refs remain — recovering engaged state"
+        vigil_pmset_reconcile_engaged || return 1
+        return 0
+    fi
+    log WARN "baseline.json present at startup with no active refs — restoring prior state"
+    vigil_pmset_release || true
+    return 1
+}
+
 # 0 → >0 transition. Captures baseline, sets disablesleep=1, spawns caffeinate -di.
 vigil_pmset_engage() {
     vigil_pmset_capture_baseline
@@ -52,13 +111,7 @@ vigil_pmset_engage() {
         log ERROR "engage failed — pmset rejected disablesleep=1"
         return 1
     fi
-    # Spawn caffeinate -di if not already running.
-    if [[ -f "$VIGIL_CAFFEINATE_PIDFILE" ]] && kill -0 "$(cat "$VIGIL_CAFFEINATE_PIDFILE" 2>/dev/null)" 2>/dev/null; then
-        return 0
-    fi
-    caffeinate -di &
-    echo $! > "$VIGIL_CAFFEINATE_PIDFILE"
-    log INFO "spawned caffeinate -di pid=$(cat "$VIGIL_CAFFEINATE_PIDFILE")"
+    vigil_pmset_spawn_caffeinate
 }
 
 # >0 → 0 transition. Restores baseline value, kills caffeinate child.
@@ -69,8 +122,8 @@ vigil_pmset_release() {
         # Don't return early — still try to clean up caffeinate child.
     fi
     if [[ -f "$VIGIL_CAFFEINATE_PIDFILE" ]]; then
-        local cpid; cpid=$(cat "$VIGIL_CAFFEINATE_PIDFILE" 2>/dev/null)
-        if [[ -n "$cpid" ]] && kill -0 "$cpid" 2>/dev/null; then
+        local cpid; cpid=$(vigil_pmset_caffeinate_pid 2>/dev/null || true)
+        if [[ -n "$cpid" ]] && vigil_pmset_caffeinate_alive; then
             kill "$cpid" 2>/dev/null || true
             log INFO "killed caffeinate pid=$cpid"
         fi
@@ -86,8 +139,8 @@ vigil_pmset_soft_release() {
     local target; target=$(vigil_pmset_baseline_value)
     sudo_n_pmset_disablesleep "$target" || true
     if [[ -f "$VIGIL_CAFFEINATE_PIDFILE" ]]; then
-        local cpid; cpid=$(cat "$VIGIL_CAFFEINATE_PIDFILE" 2>/dev/null)
-        [[ -n "$cpid" ]] && kill "$cpid" 2>/dev/null || true
+        local cpid; cpid=$(vigil_pmset_caffeinate_pid 2>/dev/null || true)
+        [[ -n "$cpid" ]] && vigil_pmset_caffeinate_alive && kill "$cpid" 2>/dev/null || true
         rm -f "$VIGIL_CAFFEINATE_PIDFILE"
     fi
 }
@@ -167,7 +220,7 @@ vigil_assertions_summary() {
     ')
 
     local our_pid=""
-    [[ -f "$VIGIL_CAFFEINATE_PIDFILE" ]] && our_pid=$(cat "$VIGIL_CAFFEINATE_PIDFILE" 2>/dev/null)
+    our_pid=$(vigil_pmset_caffeinate_pid 2>/dev/null || true)
 
     local matched=0 non_matching=0
     local pid_re='^[[:space:]]*pid[[:space:]]+([0-9]+)\(([^)]+)\):.*\][[:space:]]+[0-9:]+[[:space:]]+([A-Za-z]+)'

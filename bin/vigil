@@ -87,9 +87,156 @@ cmd_render_newsyslog() {
         "$in"
 }
 
+cmd_setup_dry_run() {
+    echo "vigil: setup dry run (no changes will be made)"
+    echo "  state dir:        $VIGIL_STATE_DIR"
+    echo "  log dir:          $VIGIL_LOG_DIR"
+    echo "  install dir:      $VIGIL_INSTALL_DIR"
+    echo "  plist target:     $VIGIL_PLIST"
+    echo "  sudoers target:   $VIGIL_SUDOERS_FILE"
+    echo "  newsyslog target: $VIGIL_NEWSYSLOG_FILE"
+
+    local tmp_sudoers; tmp_sudoers=$(mktemp -t vigil-sudoers)
+    cmd_render_sudoers > "$tmp_sudoers"
+    chmod 0440 "$tmp_sudoers"
+    echo
+    echo "  sudoers (preview):"
+    sed 's/^/    /' "$tmp_sudoers"
+    if visudo -c -f "$tmp_sudoers" >/dev/null; then
+        echo "  sudoers validation: ok"
+    else
+        rm -f "$tmp_sudoers"
+        die "generated sudoers file failed visudo -c"
+    fi
+    rm -f "$tmp_sudoers"
+
+    echo
+    echo "  newsyslog (preview):"
+    cmd_render_newsyslog | sed 's/^/    /'
+
+    echo
+    echo "  LaunchAgent plist (preview):"
+    cmd_render_plist | sed 's/^/    /'
+
+    echo
+    echo "vigil: dry run complete. No files were installed and launchd was not changed."
+}
+
+cmd_status_json() {
+    local domain="gui/$(id -u)"
+    local loaded=false
+    launchctl print "$domain/$VIGIL_LABEL" >/dev/null 2>&1 && loaded=true
+
+    local daemon_pid_json="null"
+    if [[ -f "$VIGIL_DAEMON_PIDFILE" ]]; then
+        local daemon_pid; daemon_pid=$(cat "$VIGIL_DAEMON_PIDFILE" 2>/dev/null)
+        [[ "$daemon_pid" =~ ^[0-9]+$ ]] && daemon_pid_json="$daemon_pid"
+    fi
+
+    local claude_active=0;  vigil_agent_is_active claude  && claude_active=1
+    local codex_active=0;   vigil_agent_is_active codex   && codex_active=1
+    local copilot_active=0; vigil_agent_is_active copilot && copilot_active=1
+    local active; active=$(vigil_refcount_count "$claude_active" "$codex_active" "$copilot_active")
+    local total; total=$(vigil_refcount_count_total)
+    local idle_min=$(( (VIGIL_IDLE_AFTER_SEC + 59) / 60 ))
+    local sd; sd=$(vigil_read_sleepdisabled)
+    local baseline_json="null"
+    [[ -f "$VIGIL_BASELINE_FILE" ]] && baseline_json=$(vigil_pmset_baseline_value)
+    local caff_json="null" caff_alive=false
+    if [[ -f "$VIGIL_CAFFEINATE_PIDFILE" ]]; then
+        local caff; caff=$(vigil_pmset_caffeinate_pid 2>/dev/null || true)
+        [[ "$caff" =~ ^[0-9]+$ ]] && caff_json="$caff"
+        vigil_pmset_caffeinate_alive && caff_alive=true
+    fi
+    local sudo_ok=false
+    sudo_n_pmset_check && sudo_ok=true
+
+    local assertions_out; assertions_out=$(vigil_assertions_summary)
+    local assertions_state="ok" assertions_json="" sep=""
+    if [[ "$assertions_out" == "(none)" ]]; then
+        assertions_state="none"
+    elif [[ "$assertions_out" == "(parse-failed;"* ]]; then
+        assertions_state="parse_failed"
+    else
+        local pid proc atype marker vigil_marker
+        while IFS=$'\t' read -r pid proc atype marker; do
+            [[ -z "${pid:-}" ]] && continue
+            vigil_marker=false
+            [[ "${marker:-}" == *vigil* ]] && vigil_marker=true
+            assertions_json+="${sep}{\"pid\":$pid,\"process\":\"$(vigil_json_escape "$proc")\",\"type\":\"$(vigil_json_escape "$atype")\",\"vigil\":$vigil_marker}"
+            sep=","
+        done <<< "$assertions_out"
+    fi
+
+    printf '{\n'
+    printf '  "launchd_loaded": %s,\n' "$loaded"
+    printf '  "daemon_pid": %s,\n' "$daemon_pid_json"
+    printf '  "refcount_active": %s,\n' "$active"
+    printf '  "refcount_total": %s,\n' "$total"
+    printf '  "idle_window_minutes": %s,\n' "$idle_min"
+    printf '  "agents": {"claude":"%s","codex":"%s","copilot":"%s"},\n' \
+        "$(vigil_agent_state claude)" "$(vigil_agent_state codex)" "$(vigil_agent_state copilot)"
+    printf '  "pmset_disablesleep": %s,\n' "$sd"
+    printf '  "baseline": %s,\n' "$baseline_json"
+    printf '  "caffeinate_pid": %s,\n' "$caff_json"
+    printf '  "caffeinate_alive": %s,\n' "$caff_alive"
+    printf '  "thermal": "%s",\n' "$(vigil_json_escape "$(vigil_thermal_summary)")"
+    printf '  "battery": "%s",\n' "$(vigil_json_escape "$(vigil_battery_summary)")"
+    printf '  "sudoers_ok": %s,\n' "$sudo_ok"
+    printf '  "power_assertions_state": "%s",\n' "$assertions_state"
+    printf '  "power_assertions": [%s]\n' "$assertions_json"
+    printf '}\n'
+}
+
+cmd_doctor_power() {
+    echo "vigil power doctor"
+    echo
+    local arch; arch=$(uname -m)
+    printf '  cpu arch:           %s\n' "$arch"
+    if [[ "$arch" == "arm64" ]]; then
+        echo "                      Apple Silicon: closed-lid operation is best-effort unless clamshell requirements are met."
+    fi
+    printf '  pmset:              %s\n' "$(command -v pmset 2>/dev/null || echo MISSING)"
+    printf '  caffeinate:         %s\n' "$(command -v caffeinate 2>/dev/null || echo MISSING)"
+    printf '  pmset disablesleep: %s\n' "$(vigil_read_sleepdisabled)"
+    local baseline="-"
+    [[ -f "$VIGIL_BASELINE_FILE" ]] && baseline=$(vigil_pmset_baseline_value)
+    printf '  baseline:           %s\n' "$baseline"
+    local caff="-"
+    [[ -f "$VIGIL_CAFFEINATE_PIDFILE" ]] && caff=$(vigil_pmset_caffeinate_pid 2>/dev/null || echo "-")
+    printf '  caffeinate pid:     %s\n' "$caff"
+    printf '  caffeinate alive:   %s\n' "$(vigil_pmset_caffeinate_alive && echo yes || echo no)"
+    printf '  sudo -n pmset:      %s\n' "$(sudo_n_pmset_check && echo ok || echo FAIL)"
+    printf '  thermal:            %s\n' "$(vigil_thermal_summary)"
+    printf '  battery:            %s\n' "$(vigil_battery_summary)"
+    echo
+    echo '  power assertions:'
+    local assertions_out; assertions_out=$(vigil_assertions_summary)
+    if [[ "$assertions_out" == '('* ]]; then
+        printf '%s\n' "$assertions_out" | sed 's/^/    /'
+    else
+        printf '%s\n' "$assertions_out" | LC_ALL=C awk -F'\t' '
+            NF == 0 { next }
+            { printf "    pid=%-7s %-28s %-32s %s\n", $1, $2, $3, $4 }
+        '
+    fi
+}
+
 # ---- subcommands -------------------------------------------------------------
 
 cmd_setup() {
+    local dry_run=0
+    case "${1:-}" in
+        --dry-run) dry_run=1; shift ;;
+        "") ;;
+        *) die "usage: vigil setup [--dry-run]" ;;
+    esac
+    [[ $# -eq 0 ]] || die "usage: vigil setup [--dry-run]"
+    if (( dry_run == 1 )); then
+        cmd_setup_dry_run
+        return 0
+    fi
+
     echo "vigil: setting up..."
 
     vigil_ensure_dirs
@@ -220,6 +367,20 @@ cmd_stop() {
 }
 
 cmd_status() {
+    case "${1:-}" in
+        --json)
+            shift
+            [[ $# -eq 0 ]] || die "usage: vigil status [--json]"
+            cmd_status_json
+            return 0
+            ;;
+        "")
+            ;;
+        *)
+            die "usage: vigil status [--json]"
+            ;;
+    esac
+
     local domain="gui/$(id -u)"
     local loaded="no"
     launchctl print "$domain/$VIGIL_LABEL" >/dev/null 2>&1 && loaded="yes"
@@ -239,7 +400,7 @@ cmd_status() {
     local baseline="-"
     [[ -f "$VIGIL_BASELINE_FILE" ]] && baseline=$(vigil_pmset_baseline_value)
     local caff="-"
-    [[ -f "$VIGIL_CAFFEINATE_PIDFILE" ]] && caff=$(cat "$VIGIL_CAFFEINATE_PIDFILE" 2>/dev/null)
+    [[ -f "$VIGIL_CAFFEINATE_PIDFILE" ]] && caff=$(vigil_pmset_caffeinate_pid 2>/dev/null || echo "-")
 
     printf 'launchd loaded:    %s\n' "$loaded"
     printf 'daemon pid:        %s\n' "$daemon_pid"
@@ -335,6 +496,20 @@ cmd_reload() {
 }
 
 cmd_doctor() {
+    case "${1:-}" in
+        --power)
+            shift
+            [[ $# -eq 0 ]] || die "usage: vigil doctor [--power]"
+            cmd_doctor_power
+            return 0
+            ;;
+        "")
+            ;;
+        *)
+            die "usage: vigil doctor [--power]"
+            ;;
+    esac
+
     local errs=0
     echo "vigil doctor"
     echo
@@ -437,14 +612,20 @@ vigil — keep Mac awake while AI agents are working
 
 Usage:
   vigil setup        Install sudoers + newsyslog entries, create state/log dirs, load LaunchAgent
+  vigil setup --dry-run
+                     Preview install paths and root-owned files without changing the system
   vigil uninstall    Remove sudoers + newsyslog entries, plist, restore baseline state, wipe state
   vigil start        Bootstrap the LaunchAgent
   vigil stop         Boot out the LaunchAgent
   vigil status       Show daemon state, refcount, pmset baseline, thermal, battery, power assertions
+  vigil status --json
+                     Print machine-readable daemon and power state
   vigil log [-f]     cat / tail -f the daemon log
   vigil run <cmd>    Wrapper: holds sleep prevention while <cmd> runs
   vigil reload       Re-sync daemon + libs into install dir, restart launchd
   vigil doctor       Diagnose installation
+  vigil doctor --power
+                     Focused power-path diagnostics and assertion summary
   vigil --version    Print version
   vigil --help       Show this help
 

@@ -137,6 +137,18 @@ vigil_now_unix() { date +%s; }
 # basename of a path, no trailing slash assumed
 vigil_basename() { printf '%s\n' "${1##*/}"; }
 
+# Minimal JSON string escaping for status output. This intentionally stays small:
+# status fields are short operational strings, not arbitrary documents.
+vigil_json_escape() {
+    local s="${1:-}"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\t'/\\t}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\n'/\\n}"
+    printf '%s' "$s"
+}
+
 # Read SleepDisabled from `pmset -g`. Returns "0" or "1" on stdout (default 0).
 vigil_read_sleepdisabled() {
     # Output line shape: "  SleepDisabled        0" (varies by macOS version)

@@ -74,15 +74,29 @@ cleanup_and_exit() {
 }
 trap cleanup_and_exit INT TERM
 
-# Crash-recovery: if a baseline exists from a prior crashed daemon, restore it
-# now (so we start from a known state). We treat existing baseline as evidence
-# of "we were engaged before" and release.
-if [[ -f "$VIGIL_BASELINE_FILE" ]]; then
-    log WARN "baseline.json present at startup — restoring prior state from a prior daemon"
-    vigil_pmset_release || true
+# Crash-recovery: refresh current process evidence before deciding what to do
+# with a leftover baseline. If active work is still present, keep the original
+# baseline and reassert instead of briefly allowing sleep during daemon restart.
+ps_out=$(ps -axww -o pid= -o command= 2>/dev/null || true)
+if [[ -n "$ps_out" ]]; then
+    while IFS=$'\t' read -r pid name exe args; do
+        [[ -z "$pid" ]] && continue
+        vigil_refcount_touch "$name" "$pid" "$exe"
+    done < <(printf '%s\n' "$ps_out" | vigil_detect_all -)
 fi
-# Wipe any stale wrapper PID files older than 60s (from prior crashed wrappers).
 vigil_refcount_gc
+startup_claude_active=0;  vigil_agent_is_active claude  && startup_claude_active=1
+startup_codex_active=0;   vigil_agent_is_active codex   && startup_codex_active=1
+startup_copilot_active=0; vigil_agent_is_active copilot && startup_copilot_active=1
+startup_count=$(vigil_refcount_count "$startup_claude_active" "$startup_codex_active" "$startup_copilot_active")
+startup_can_hold=1
+vigil_thermal_should_cut && startup_can_hold=0 || true
+vigil_battery_should_cut && startup_can_hold=0 || true
+if [[ -f "$VIGIL_BASELINE_FILE" ]]; then
+    if vigil_pmset_recover_startup "$startup_count" "$startup_can_hold"; then
+        DAEMON_ENGAGED=1
+    fi
+fi
 
 log INFO "vigil-daemon started (tick=${VIGIL_TICK_SECS}s, lock=$VIGIL_LOCK_FILE, repo=$VIGIL_REPO_ROOT)"
 
@@ -135,6 +149,8 @@ while true; do
         if vigil_pmset_engage; then
             DAEMON_ENGAGED=1
         fi
+    elif (( desired == 1 && DAEMON_ENGAGED == 1 )); then
+        vigil_pmset_reconcile_engaged || DAEMON_ENGAGED=0
     elif (( desired == 0 && DAEMON_ENGAGED == 1 )); then
         if (( cut_thermal == 1 )); then
             log WARN "release — thermal cutoff (cooldown ${VIGIL_THERMAL_COOLDOWN_SECS}s)"

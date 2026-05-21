@@ -42,6 +42,8 @@ Two signals, one source of truth (the daemon's refcount):
 The daemon counts files in `state/active/`. Transition rules:
 
 - **0 → >0**: Snapshot the current `SleepDisabled` value into `state/baseline.json`. Run `sudo -n pmset -a disablesleep 1`. Spawn `caffeinate -di &` and store its PID.
+- **>0 steady state**: Verify every tick that `SleepDisabled=1` and the recorded
+  `caffeinate` child is still alive. If either drifted, reassert immediately.
 - **>0 → 0**: Read `state/baseline.json`, run `sudo -n pmset -a disablesleep <baseline>`, kill the caffeinate child, delete `baseline.json`.
 
 Stale PID files are GC'd when (a) the PID is dead, (b) the on-disk start_ts doesn't match the live PID's start time (PID reuse), or (c) the file is older than 30s and the PID's CPU is below 0.5%.
@@ -64,6 +66,14 @@ To reset the baseline back to `0`-state — i.e., to make vigil release all the 
 - `vigil uninstall && vigil setup` — uninstall restores baseline and clears state; setup starts fresh.
 
 If another tool (Amphetamine, an open `caffeinate -di` shell, etc.) is the *reason* `SleepDisabled=1` keeps coming back, vigil cannot fix that — the other tool will re-assert. Quit the other tool first.
+
+## Crash recovery
+
+If the daemon restarts and finds `baseline.json`, it refreshes live process
+evidence before deciding what to do. If active agent or wrapper refs still
+exist and thermal/battery guards allow holding sleep, vigil keeps the captured
+baseline and reasserts `SleepDisabled=1` plus `caffeinate -di`. If no active
+work remains, it restores the captured baseline and clears the stale state.
 
 ## Why `caffeinate -di` and not `-dimsu`
 
