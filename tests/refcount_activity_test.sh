@@ -33,6 +33,19 @@ test_count_with_claude_active_only() {
     rm -rf "$VIGIL_STATE_DIR"
 }
 
+test_count_with_app_codex_gated_on_codex_flag() {
+    # Phase-3: app-codex is the Codex.app host process. It must contribute
+    # to the refcount iff `codex_active=1`, mirroring cli-codex. An idle
+    # Codex.app open in the background must not hold sleep.
+    local active; active=$(_setup_active_dir)
+    _make_pidfile "$active" "app-codex-2700"
+    _make_pidfile "$active" "cli-claude-1001"
+    assert_eq "$(vigil_refcount_count 1 0 0)" "1" "codex idle: only cli-claude counts (app-codex gated out)"
+    assert_eq "$(vigil_refcount_count 1 1 0)" "2" "codex active: app-codex joins the refcount"
+    assert_eq "$(vigil_refcount_count 0 1 0)" "1" "claude idle, codex active: only app-codex"
+    rm -rf "$VIGIL_STATE_DIR"
+}
+
 test_count_when_all_idle() {
     local active; active=$(_setup_active_dir)
     _make_pidfile "$active" "cli-claude-1001"
@@ -47,18 +60,22 @@ test_list_state_column_matches_flags() {
     local active; active=$(_setup_active_dir)
     _make_pidfile "$active" "cli-claude-1001"
     _make_pidfile "$active" "cli-codex-1002"
+    _make_pidfile "$active" "app-codex-2700"
     _make_pidfile "$active" "wrapper-1003"
     local out; out=$(vigil_refcount_list 1 0 0)
     assert_contains "$out" "1001	cli-claude" "claude row present"
     assert_contains "$out" "1002	cli-codex"  "codex row present"
+    assert_contains "$out" "2700	app-codex"  "app-codex row present"
     assert_contains "$out" "1003	wrapper"    "wrapper row present"
     # Each row's last column should match its expected state.
-    local claude_row;  claude_row=$(echo  "$out" | awk -F'\t' '$2=="cli-claude"')
-    local codex_row;   codex_row=$(echo   "$out" | awk -F'\t' '$2=="cli-codex"')
-    local wrapper_row; wrapper_row=$(echo "$out" | awk -F'\t' '$2=="wrapper"')
-    assert_eq "$(echo "$claude_row"  | awk -F'\t' '{print $NF}')" "active" "claude row state"
-    assert_eq "$(echo "$codex_row"   | awk -F'\t' '{print $NF}')" "idle"   "codex row state"
-    assert_eq "$(echo "$wrapper_row" | awk -F'\t' '{print $NF}')" "active" "wrapper row state"
+    local claude_row;    claude_row=$(echo    "$out" | awk -F'\t' '$2=="cli-claude"')
+    local codex_row;     codex_row=$(echo     "$out" | awk -F'\t' '$2=="cli-codex"')
+    local app_codex_row; app_codex_row=$(echo "$out" | awk -F'\t' '$2=="app-codex"')
+    local wrapper_row;   wrapper_row=$(echo   "$out" | awk -F'\t' '$2=="wrapper"')
+    assert_eq "$(echo "$claude_row"    | awk -F'\t' '{print $NF}')" "active" "claude row state"
+    assert_eq "$(echo "$codex_row"     | awk -F'\t' '{print $NF}')" "idle"   "codex row state"
+    assert_eq "$(echo "$app_codex_row" | awk -F'\t' '{print $NF}')" "idle"   "app-codex row state mirrors codex flag"
+    assert_eq "$(echo "$wrapper_row"   | awk -F'\t' '{print $NF}')" "active" "wrapper row state"
     rm -rf "$VIGIL_STATE_DIR"
 }
 
@@ -67,9 +84,10 @@ test_filename_parser_handles_all_prefixes() {
     _make_pidfile "$active" "cli-claude-1"
     _make_pidfile "$active" "cli-codex-2"
     _make_pidfile "$active" "cli-copilot-3"
-    _make_pidfile "$active" "wrapper-4"
-    # All four counted when every flag is on.
-    assert_eq "$(vigil_refcount_count 1 1 1)" "4" "all four prefixes count when active"
+    _make_pidfile "$active" "app-codex-4"
+    _make_pidfile "$active" "wrapper-5"
+    # All five counted when every flag is on.
+    assert_eq "$(vigil_refcount_count 1 1 1)" "5" "all five prefixes count when active"
     rm -rf "$VIGIL_STATE_DIR"
 }
 

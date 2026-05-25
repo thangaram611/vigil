@@ -545,3 +545,5 @@
 24577 -zsh
 24579 /Users/thanga-5521/.cache/gitstatus/gitstatusd-darwin-arm64 -G v1.5.4 -s -1 -u -1 -d -1 -c -1 -m -1 -v FATAL -t 16
 85972 claude --dangerously-skip-permissions --chrome --plugin-dir /Users/thanga-5521/Documents/projects/personal/copilot-companion
+87838 /Users/thanga-5521/Library/Application Support/Claude/claude-code/2.1.142/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format stream-json --effort xhigh --model claude-opus-4-7
+31322 /Users/thanga-5521/.vscode-insiders/extensions/openai.chatgpt-26.5519.32039-darwin-arm64/bin/macos-aarch64/codex app-server --analytics-default-enabled

@@ -77,13 +77,10 @@ trap cleanup_and_exit INT TERM
 # Crash-recovery: refresh current process evidence before deciding what to do
 # with a leftover baseline. If active work is still present, keep the original
 # baseline and reassert instead of briefly allowing sleep during daemon restart.
-ps_out=$(ps -axww -o pid= -o command= 2>/dev/null || true)
-if [[ -n "$ps_out" ]]; then
-    while IFS=$'\t' read -r pid name exe args; do
-        [[ -z "$pid" ]] && continue
-        vigil_refcount_touch "$name" "$pid" "$exe"
-    done < <(printf '%s\n' "$ps_out" | vigil_detect_all -)
-fi
+while IFS=$'\t' read -r pid name exe args; do
+    [[ -z "$pid" ]] && continue
+    vigil_refcount_touch "$name" "$pid" "$exe"
+done < <(vigil_detect_all)
 vigil_refcount_gc
 startup_claude_active=0;  vigil_agent_is_active claude  && startup_claude_active=1
 startup_codex_active=0;   vigil_agent_is_active codex   && startup_codex_active=1
@@ -104,15 +101,15 @@ log INFO "vigil-daemon started (tick=${VIGIL_TICK_SECS}s, lock=$VIGIL_LOCK_FILE,
 
 while true; do
     # 1. Detect — write/refresh PID files for every CLI agent currently running.
-    ps_out=$(ps -axww -o pid= -o command= 2>/dev/null || true)
-    if [[ -n "$ps_out" ]]; then
-        # Detect via stdin so we don't redundantly call ps.
-        while IFS=$'\t' read -r pid name exe args; do
-            [[ -z "$pid" ]] && continue
-            # Wrappers handle their own PID files via the wrapper script's trap.
-            vigil_refcount_touch "$name" "$pid" "$exe"
-        done < <(printf '%s\n' "$ps_out" | vigil_detect_all -)
-    fi
+    # vigil_detect_all (no arg) calls `ps -o comm=` and `ps -o command=` and
+    # joins by pid. Two ps invocations per tick — necessary because BSD ps
+    # doesn't quote spaced exe paths in command=, so we use comm= for the
+    # space-safe basename and command= for path-based exclusions.
+    while IFS=$'\t' read -r pid name exe args; do
+        [[ -z "$pid" ]] && continue
+        # Wrappers handle their own PID files via the wrapper script's trap.
+        vigil_refcount_touch "$name" "$pid" "$exe"
+    done < <(vigil_detect_all)
 
     # 2. GC stale entries.
     vigil_refcount_gc

@@ -67,7 +67,11 @@ vigil_refcount_touch_wrapper() {
 # Activity-filtered refcount. Args: <claude_active> <codex_active> <copilot_active>.
 # Each arg is 0|1. A PID file contributes iff:
 #   - its prefix is `wrapper` (always counts; wrappers are explicit user opt-ins), or
-#   - its prefix is `cli-<agent>` and the corresponding flag is 1.
+#   - its prefix is `cli-<agent>` and the corresponding flag is 1, or
+#   - its prefix is `app-<agent>` (phase-3 desktop apps) and the
+#     corresponding flag is 1 — `app-codex` is gated on `codex_active`,
+#     same probe as `cli-codex`, since Codex.app shares
+#     `~/.codex/sessions/` with the CLI.
 vigil_refcount_count() {
     local claude_active="$1" codex_active="$2" copilot_active="$3"
     local n=0
@@ -80,6 +84,7 @@ vigil_refcount_count() {
             cli-claude)  (( claude_active ))  && n=$((n+1)) ;;
             cli-codex)   (( codex_active ))   && n=$((n+1)) ;;
             cli-copilot) (( copilot_active )) && n=$((n+1)) ;;
+            app-codex)   (( codex_active ))   && n=$((n+1)) ;;
             wrapper)     n=$((n+1)) ;;
         esac
     done < <(find "$VIGIL_ACTIVE_DIR" -maxdepth 1 -type f -name '*.pid' 2>/dev/null)
@@ -113,6 +118,7 @@ vigil_refcount_list() {
             cli-claude)  (( claude_active ))  && state="active" ;;
             cli-codex)   (( codex_active ))   && state="active" ;;
             cli-copilot) (( copilot_active )) && state="active" ;;
+            app-codex)   (( codex_active ))   && state="active" ;;
             wrapper)     state="active" ;;
         esac
         printf '%s\t%s\t%s\t%s\n' "$pid" "$name" "$((now - mtime))" "$state"
