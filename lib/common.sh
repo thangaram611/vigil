@@ -47,6 +47,25 @@ VIGIL_STALE_AGE_SECS="${VIGIL_STALE_AGE_SECS:-30}"
 VIGIL_STALE_CPU_PCT="${VIGIL_STALE_CPU_PCT:-0.5}"
 VIGIL_THERMAL_COOLDOWN_SECS="${VIGIL_THERMAL_COOLDOWN_SECS:-60}"
 VIGIL_BATTERY_FLOOR_PCT="${VIGIL_BATTERY_FLOOR_PCT:-20}"
+# Agent state roots. These mirror each provider's documented home override:
+#   Claude Code: CLAUDE_CONFIG_DIR replaces ~/.claude
+#   Codex:       CODEX_HOME replaces ~/.codex
+#   Copilot CLI: COPILOT_HOME replaces ~/.copilot
+_VIGIL_CLAUDE_HOME_AUTO=0
+_VIGIL_CODEX_HOME_AUTO=0
+_VIGIL_COPILOT_HOME_AUTO=0
+if [[ -z "${VIGIL_CLAUDE_HOME+x}" ]]; then
+    _VIGIL_CLAUDE_HOME_AUTO=1
+    VIGIL_CLAUDE_HOME="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+fi
+if [[ -z "${VIGIL_CODEX_HOME+x}" ]]; then
+    _VIGIL_CODEX_HOME_AUTO=1
+    VIGIL_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+fi
+if [[ -z "${VIGIL_COPILOT_HOME+x}" ]]; then
+    _VIGIL_COPILOT_HOME_AUTO=1
+    VIGIL_COPILOT_HOME="${COPILOT_HOME:-$HOME/.copilot}"
+fi
 # Idle window: a CLI agent only counts toward the refcount if its session
 # storage was modified within this many seconds. BSD `find -mmin` rounds up
 # to whole minutes, so values < 60s silently floor to 60s.
@@ -112,9 +131,24 @@ sudo_n_pmset_disablesleep() {
 # ---- config file ------------------------------------------------------------
 
 vigil_load_config() {
+    local auto_claude_home="$VIGIL_CLAUDE_HOME"
+    local auto_codex_home="$VIGIL_CODEX_HOME"
+    local auto_copilot_home="$VIGIL_COPILOT_HOME"
     if [[ -f "$VIGIL_CONFIG_FILE" ]]; then
         # shellcheck source=/dev/null
         source "$VIGIL_CONFIG_FILE"
+    fi
+    # Re-derive auto provider homes after config sourcing. This lets a
+    # vigil.conf set CODEX_HOME / CLAUDE_CONFIG_DIR / COPILOT_HOME directly,
+    # while still preserving explicit VIGIL_*_HOME overrides.
+    if (( _VIGIL_CLAUDE_HOME_AUTO == 1 )) && [[ "$VIGIL_CLAUDE_HOME" == "$auto_claude_home" ]]; then
+        VIGIL_CLAUDE_HOME="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    fi
+    if (( _VIGIL_CODEX_HOME_AUTO == 1 )) && [[ "$VIGIL_CODEX_HOME" == "$auto_codex_home" ]]; then
+        VIGIL_CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
+    fi
+    if (( _VIGIL_COPILOT_HOME_AUTO == 1 )) && [[ "$VIGIL_COPILOT_HOME" == "$auto_copilot_home" ]]; then
+        VIGIL_COPILOT_HOME="${COPILOT_HOME:-$HOME/.copilot}"
     fi
     # Derive VIGIL_LOG_FILE AFTER config sourcing so a vigil.conf that sets
     # only VIGIL_LOG_DIR correctly re-derives the log file path. Unconditional

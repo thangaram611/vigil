@@ -87,6 +87,42 @@ cmd_render_newsyslog() {
         "$in"
 }
 
+cmd_provider_roots_json() {
+    local sep="" agent home dir exists age age_json
+    printf '{'
+    for agent in claude codex copilot; do
+        home=$(vigil_agent_home_for "$agent")
+        dir=$(vigil_session_dir_for_agent "$agent")
+        exists=false
+        [[ -d "$dir" ]] && exists=true
+        age=$(vigil_agent_latest_activity_age_secs "$agent" 2>/dev/null || true)
+        if [[ "$age" =~ ^-?[0-9]+$ ]]; then
+            age_json="$age"
+        else
+            age_json="null"
+        fi
+        printf '%s"%s":{"home":"%s","session_dir":"%s","exists":%s,"latest_activity_age_secs":%s}' \
+            "$sep" "$agent" "$(vigil_json_escape "$home")" "$(vigil_json_escape "$dir")" "$exists" "$age_json"
+        sep=","
+    done
+    printf '}'
+}
+
+cmd_provider_roots_text() {
+    local agent home dir exists age latest
+    for agent in claude codex copilot; do
+        home=$(vigil_agent_home_for "$agent")
+        dir=$(vigil_session_dir_for_agent "$agent")
+        exists="no"
+        [[ -d "$dir" ]] && exists="yes"
+        age=$(vigil_agent_latest_activity_age_secs "$agent" 2>/dev/null || true)
+        latest="-"
+        [[ "$age" =~ ^-?[0-9]+$ ]] && latest="${age}s ago"
+        printf '  %-7s home=%s\n' "$agent" "$home"
+        printf '          session=%s exists=%s latest=%s\n' "$dir" "$exists" "$latest"
+    done
+}
+
 cmd_setup_dry_run() {
     echo "vigil: setup dry run (no changes will be made)"
     echo "  state dir:        $VIGIL_STATE_DIR"
@@ -176,6 +212,7 @@ cmd_status_json() {
     printf '  "idle_window_minutes": %s,\n' "$idle_min"
     printf '  "agents": {"claude":"%s","codex":"%s","copilot":"%s"},\n' \
         "$(vigil_agent_state claude)" "$(vigil_agent_state codex)" "$(vigil_agent_state copilot)"
+    printf '  "provider_roots": %s,\n' "$(cmd_provider_roots_json)"
     printf '  "pmset_disablesleep": %s,\n' "$sd"
     printf '  "baseline": %s,\n' "$baseline_json"
     printf '  "caffeinate_pid": %s,\n' "$caff_json"
@@ -209,6 +246,9 @@ cmd_doctor_power() {
     printf '  sudo -n pmset:      %s\n' "$(sudo_n_pmset_check && echo ok || echo FAIL)"
     printf '  thermal:            %s\n' "$(vigil_thermal_summary)"
     printf '  battery:            %s\n' "$(vigil_battery_summary)"
+    echo
+    echo '  provider roots:'
+    cmd_provider_roots_text | sed 's/^/  /'
     echo
     echo '  power assertions:'
     local assertions_out; assertions_out=$(vigil_assertions_summary)
@@ -407,6 +447,8 @@ cmd_status() {
     printf 'refcount:          %s active / %s total   (idle window %sm)\n' "$active" "$total" "$idle_min"
     printf 'agents:            claude=%s  codex=%s  copilot=%s\n' \
         "$(vigil_agent_state claude)" "$(vigil_agent_state codex)" "$(vigil_agent_state copilot)"
+    echo 'provider roots:'
+    cmd_provider_roots_text
     printf 'pmset disablesleep: %s   (baseline=%s)\n' "$sd" "$baseline"
     printf 'caffeinate pid:    %s\n' "$caff"
     printf 'thermal:           %s\n' "$(vigil_thermal_summary)"
@@ -596,6 +638,9 @@ cmd_doctor() {
         printf '  log dir:            MISSING\n'
         errs=$((errs+1))
     fi
+    echo
+    echo 'provider roots:'
+    cmd_provider_roots_text
 
     echo
     if (( errs == 0 )); then

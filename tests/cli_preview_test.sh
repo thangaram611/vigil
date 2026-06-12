@@ -11,7 +11,12 @@ _setup_cli_fake_env() {
     export VIGIL_LOG_DIR="$root/logs"
     export VIGIL_CONFIG_FILE="$root/no.conf"
     export HOME="$root/home"
+    export VIGIL_CLAUDE_HOME="$HOME/provider/claude"
+    export VIGIL_CODEX_HOME="$HOME/provider/codex"
+    export VIGIL_COPILOT_HOME="$HOME/provider/copilot"
     mkdir -p "$root/bin" "$HOME" "$VIGIL_STATE_DIR/active" "$VIGIL_LOG_DIR"
+    mkdir -p "$VIGIL_CODEX_HOME/sessions/2026/06/12"
+    : > "$VIGIL_CODEX_HOME/sessions/2026/06/12/rollout-2026-06-12T00-00-00-test.jsonl"
     printf '1\n' > "$VIGIL_FAKE_SLEEP_FILE"
 
     cat > "$root/bin/sudo" <<'FAKE_SUDO'
@@ -64,10 +69,25 @@ test_status_json_reports_machine_readable_power_state() {
     assert_contains "$out" '"launchd_loaded": false' "launchd false in fake env"
     assert_contains "$out" '"pmset_disablesleep": 1' "SleepDisabled surfaced"
     assert_contains "$out" '"sudoers_ok": true' "sudoers check surfaced"
+    assert_contains "$out" '"provider_roots": {' "provider roots surfaced"
+    assert_contains "$out" "\"home\":\"$VIGIL_CODEX_HOME\"" "codex provider home surfaced"
+    assert_contains "$out" '"exists":true' "existing provider session dir surfaced"
     assert_contains "$out" '"power_assertions_state": "none"' "assertion state surfaced"
     if command -v python3 >/dev/null 2>&1; then
         printf '%s\n' "$out" | python3 -c 'import json,sys; json.load(sys.stdin)' || {
             echo "    FAIL: status --json did not parse as JSON"
+            rm -rf "$VIGIL_FAKE_ROOT"
+            return 1
+        }
+        printf '%s\n' "$out" | VIGIL_EXPECT_CODEX_HOME="$VIGIL_CODEX_HOME" python3 -c '
+import json, os, sys
+data = json.load(sys.stdin)
+codex = data["provider_roots"]["codex"]
+assert codex["home"] == os.environ["VIGIL_EXPECT_CODEX_HOME"]
+assert codex["exists"] is True
+assert isinstance(codex["latest_activity_age_secs"], int)
+' || {
+            echo "    FAIL: status --json provider_roots fields were invalid"
             rm -rf "$VIGIL_FAKE_ROOT"
             return 1
         }
