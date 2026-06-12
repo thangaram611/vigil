@@ -105,6 +105,8 @@ To wrap your existing `claudex` alias, edit `~/.zshrc`:
 
 - Normal runtime does not execute `sudo`. The user LaunchAgent requests `engage`, `release`, or `status` from the installed root helper.
 - The root helper has a narrow command surface and runs only fixed `/usr/bin/pmset -a disablesleep 0|1` argv. Request files are validated for action, type, owner, and permissions before the helper acts.
+- `vigil setup` and `vigil uninstall` are the only admin paths. They refuse test mode and refuse environment-overridden privileged install paths before running any `sudo` command.
+- `./tests/run.sh` prepends a failing `sudo` guard and sets `VIGIL_TEST_NO_ADMIN=1`, so repeated development test runs cannot prompt for admin access.
 - Tradeoff: this removes repeated runtime sudo, but Vigil now owns a persistent privileged component. Treat the helper boundary as a real privilege boundary.
 - Thermal and battery cut-offs are conservative by default. Override only via the `VIGIL_FORCE=1` env var on a single invocation.
 

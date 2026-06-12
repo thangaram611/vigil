@@ -49,15 +49,75 @@ VIGIL_VERSION="0.1.0-dev"
 
 # ---- helpers -----------------------------------------------------------------
 
+cmd_sed_escape_replacement() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//&/\\&}"
+    value="${value//|/\\|}"
+    printf '%s' "$value"
+}
+
+cmd_xml_escape() {
+    local value="$1"
+    value="${value//&/&amp;}"
+    value="${value//</&lt;}"
+    value="${value//>/&gt;}"
+    value="${value//\"/&quot;}"
+    value="${value//\'/&apos;}"
+    printf '%s' "$value"
+}
+
+cmd_plist_escape() {
+    cmd_sed_escape_replacement "$(cmd_xml_escape "$1")"
+}
+
+cmd_require_admin_allowed() {
+    if [[ "${VIGIL_TEST_NO_ADMIN:-0}" == "1" ]]; then
+        die "admin operation blocked by VIGIL_TEST_NO_ADMIN"
+    fi
+}
+
+cmd_assert_vigil_tree_path() {
+    local label="$1" path="$2" base
+    [[ "$path" == /* ]] || die "refusing unsafe $label path (not absolute): $path"
+    [[ "$path" != *$'\n'* && "$path" != *$'\r'* ]] || die "refusing unsafe $label path containing a newline"
+    [[ "$path" != "/" ]] || die "refusing unsafe $label path: /"
+    [[ "$path" != "$HOME" ]] || die "refusing unsafe $label path equal to HOME: $path"
+    base="${path##*/}"
+    [[ "$base" == "vigil" ]] || die "refusing unsafe $label path (must end in /vigil): $path"
+}
+
+cmd_assert_standard_privileged_paths() {
+    local root="/Library/Application Support/vigil"
+    [[ "$VIGIL_ROOT_DIR" == "$root" ]] || die "refusing non-standard VIGIL_ROOT_DIR for privileged operation: $VIGIL_ROOT_DIR"
+    [[ "$VIGIL_ROOT_BIN_DIR" == "$root/bin" ]] || die "refusing non-standard VIGIL_ROOT_BIN_DIR for privileged operation: $VIGIL_ROOT_BIN_DIR"
+    [[ "$VIGIL_ROOT_HELPER" == "$root/bin/vigil-root-helper" ]] || die "refusing non-standard VIGIL_ROOT_HELPER for privileged operation: $VIGIL_ROOT_HELPER"
+    [[ "$VIGIL_POWER_HELPER_DIR" == "$root/helper" ]] || die "refusing non-standard VIGIL_POWER_HELPER_DIR for privileged operation: $VIGIL_POWER_HELPER_DIR"
+    [[ "$VIGIL_POWER_REQUEST_BASE" == "$root/helper/requests" ]] || die "refusing non-standard VIGIL_POWER_REQUEST_BASE for privileged operation: $VIGIL_POWER_REQUEST_BASE"
+    [[ "$VIGIL_POWER_RESPONSE_BASE" == "$root/helper/responses" ]] || die "refusing non-standard VIGIL_POWER_RESPONSE_BASE for privileged operation: $VIGIL_POWER_RESPONSE_BASE"
+    [[ "$VIGIL_POWER_REQUEST_DIR" == "$root/helper/requests/$(id -u)" ]] || die "refusing non-standard VIGIL_POWER_REQUEST_DIR for privileged operation: $VIGIL_POWER_REQUEST_DIR"
+    [[ "$VIGIL_POWER_RESPONSE_DIR" == "$root/helper/responses/$(id -u)" ]] || die "refusing non-standard VIGIL_POWER_RESPONSE_DIR for privileged operation: $VIGIL_POWER_RESPONSE_DIR"
+    [[ "$VIGIL_POWER_STATE_DIR" == "$root/helper/state" ]] || die "refusing non-standard VIGIL_POWER_STATE_DIR for privileged operation: $VIGIL_POWER_STATE_DIR"
+    [[ "$VIGIL_POWER_LOG_DIR" == "$root/helper/logs" ]] || die "refusing non-standard VIGIL_POWER_LOG_DIR for privileged operation: $VIGIL_POWER_LOG_DIR"
+    [[ "$VIGIL_POWER_LOG_FILE" == "$root/helper/logs/helper.log" ]] || die "refusing non-standard VIGIL_POWER_LOG_FILE for privileged operation: $VIGIL_POWER_LOG_FILE"
+    [[ "$VIGIL_HELPER_PLIST" == "/Library/LaunchDaemons/${VIGIL_HELPER_LABEL}.plist" ]] || die "refusing non-standard helper plist path: $VIGIL_HELPER_PLIST"
+    [[ "$VIGIL_NEWSYSLOG_FILE" == "/etc/newsyslog.d/vigil.conf" ]] || die "refusing non-standard newsyslog path: $VIGIL_NEWSYSLOG_FILE"
+    [[ "$VIGIL_LEGACY_SUDOERS_FILE" == "/etc/sudoers.d/vigil" ]] || die "refusing non-standard legacy sudoers path: $VIGIL_LEGACY_SUDOERS_FILE"
+}
+
 cmd_render_plist() {
     # Substitute placeholders in the plist template. The daemon path points to
     # $VIGIL_INSTALL_DIR (NOT the source repo) — see the TCC note in common.sh.
     local in="$VIGIL_REPO_ROOT/etc/com.thangaram.vigil.plist.in"
     local daemon="$VIGIL_INSTALL_DIR/bin/vigil-daemon"
+    local daemon_xml log_dir_xml state_dir_xml
+    daemon_xml=$(cmd_plist_escape "$daemon")
+    log_dir_xml=$(cmd_plist_escape "$VIGIL_LOG_DIR")
+    state_dir_xml=$(cmd_plist_escape "$VIGIL_STATE_DIR")
     sed \
-        -e "s|@VIGIL_DAEMON_PATH@|$daemon|g" \
-        -e "s|@VIGIL_LOG_DIR@|$VIGIL_LOG_DIR|g" \
-        -e "s|@VIGIL_STATE_DIR@|$VIGIL_STATE_DIR|g" \
+        -e "s|@VIGIL_DAEMON_PATH@|$daemon_xml|g" \
+        -e "s|@VIGIL_LOG_DIR@|$log_dir_xml|g" \
+        -e "s|@VIGIL_STATE_DIR@|$state_dir_xml|g" \
         "$in"
 }
 
@@ -88,14 +148,14 @@ cmd_render_helper_plist() {
     user=$(id -un)
     uid=$(id -u)
     sed \
-        -e "s|@VIGIL_ROOT_HELPER@|$VIGIL_ROOT_HELPER|g" \
-        -e "s|@VIGIL_POWER_REQUEST_DIR@|$VIGIL_POWER_REQUEST_DIR|g" \
-        -e "s|@VIGIL_POWER_RESPONSE_DIR@|$VIGIL_POWER_RESPONSE_DIR|g" \
-        -e "s|@VIGIL_POWER_STATE_DIR@|$VIGIL_POWER_STATE_DIR|g" \
-        -e "s|@VIGIL_POWER_LOG_DIR@|$VIGIL_POWER_LOG_DIR|g" \
-        -e "s|@VIGIL_POWER_LOG_FILE@|$VIGIL_POWER_LOG_FILE|g" \
+        -e "s|@VIGIL_ROOT_HELPER@|$(cmd_plist_escape "$VIGIL_ROOT_HELPER")|g" \
+        -e "s|@VIGIL_POWER_REQUEST_DIR@|$(cmd_plist_escape "$VIGIL_POWER_REQUEST_DIR")|g" \
+        -e "s|@VIGIL_POWER_RESPONSE_DIR@|$(cmd_plist_escape "$VIGIL_POWER_RESPONSE_DIR")|g" \
+        -e "s|@VIGIL_POWER_STATE_DIR@|$(cmd_plist_escape "$VIGIL_POWER_STATE_DIR")|g" \
+        -e "s|@VIGIL_POWER_LOG_DIR@|$(cmd_plist_escape "$VIGIL_POWER_LOG_DIR")|g" \
+        -e "s|@VIGIL_POWER_LOG_FILE@|$(cmd_plist_escape "$VIGIL_POWER_LOG_FILE")|g" \
         -e "s|@VIGIL_ALLOWED_UID@|$uid|g" \
-        -e "s|@VIGIL_ALLOWED_USER@|$user|g" \
+        -e "s|@VIGIL_ALLOWED_USER@|$(cmd_plist_escape "$user")|g" \
         "$in"
 }
 
@@ -114,6 +174,8 @@ cmd_render_newsyslog() {
 
 cmd_install_root_helper() {
     local user group tmp_plist
+    cmd_require_admin_allowed
+    cmd_assert_standard_privileged_paths
     user=$(id -un)
     group=$(id -gn)
     tmp_plist=$(mktemp -t vigil-helper-plist)
@@ -141,6 +203,8 @@ cmd_install_root_helper() {
 }
 
 cmd_remove_root_helper() {
+    cmd_require_admin_allowed
+    cmd_assert_standard_privileged_paths
     echo "  removing root helper and LaunchDaemon — sudo prompt"
     sudo launchctl bootout "system/$VIGIL_HELPER_LABEL" >/dev/null 2>&1 || true
     [[ -f "$VIGIL_HELPER_PLIST" ]] && sudo rm -f "$VIGIL_HELPER_PLIST"
@@ -375,6 +439,10 @@ cmd_setup() {
         return 0
     fi
 
+    cmd_require_admin_allowed
+    cmd_assert_standard_privileged_paths
+    cmd_assert_vigil_tree_path "install dir" "$VIGIL_INSTALL_DIR"
+
     echo "vigil: setting up..."
 
     vigil_ensure_dirs
@@ -424,6 +492,10 @@ cmd_setup() {
 }
 
 cmd_uninstall() {
+    cmd_require_admin_allowed
+    cmd_assert_standard_privileged_paths
+    cmd_assert_vigil_tree_path "install dir" "$VIGIL_INSTALL_DIR"
+
     echo "vigil: uninstalling..."
 
     # Stop the daemon if it's running so it can release its hold cleanly.

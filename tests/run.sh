@@ -13,6 +13,23 @@ set -uo pipefail
 PASS=0
 FAIL=0
 FILTER="${1:-}"
+TEST_TMP_ROOT=$(mktemp -d -t vigil-tests-XXXXXX)
+TEST_GUARD_BIN="$TEST_TMP_ROOT/bin"
+TEST_NO_SUDO_LOG="$TEST_TMP_ROOT/sudo-attempts.log"
+mkdir -p "$TEST_GUARD_BIN"
+cat > "$TEST_GUARD_BIN/sudo" <<'EOF'
+#!/usr/bin/env bash
+printf 'ERROR: tests must not invoke sudo: sudo %s\n' "$*" >&2
+if [[ -n "${VIGIL_TEST_NO_SUDO_LOG:-}" ]]; then
+    printf 'sudo %s\n' "$*" >> "$VIGIL_TEST_NO_SUDO_LOG"
+fi
+exit 97
+EOF
+chmod +x "$TEST_GUARD_BIN/sudo"
+export VIGIL_TEST_NO_ADMIN=1
+export VIGIL_TEST_NO_SUDO_LOG="$TEST_NO_SUDO_LOG"
+export PATH="$TEST_GUARD_BIN:$PATH"
+trap 'rm -rf "$TEST_TMP_ROOT"' EXIT
 
 # shellcheck source=lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -55,5 +72,10 @@ for f in "$repo_root"/tests/*_test.sh; do
 done
 
 echo
+if [[ -s "$TEST_NO_SUDO_LOG" ]]; then
+    echo "sudo attempts were blocked during tests:"
+    sed 's/^/  /' "$TEST_NO_SUDO_LOG"
+    FAIL=$((FAIL + 1))
+fi
 printf 'pass=%s fail=%s\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

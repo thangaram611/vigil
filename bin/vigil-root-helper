@@ -35,7 +35,11 @@ helper_log() {
 }
 
 helper_die() {
-    helper_log ERROR "$*"
+    local log_dir
+    if [[ -n "${HELPER_LOG_FILE:-}" ]]; then
+        log_dir="$(dirname "$HELPER_LOG_FILE")"
+        [[ ! -L "$log_dir" ]] && helper_log ERROR "$*"
+    fi
     printf 'vigil-root-helper: %s\n' "$*" >&2
     exit 1
 }
@@ -220,6 +224,29 @@ helper_validate_request_dir() {
     return 0
 }
 
+helper_validate_root_dir() {
+    local label="$1" path="$2" uid mode
+    if [[ -L "$path" ]]; then
+        helper_log ERROR "$label=$path reason=symlink"
+        return 1
+    fi
+    if [[ ! -d "$path" ]]; then
+        helper_log ERROR "$label=$path reason=not_directory"
+        return 1
+    fi
+    uid=$(helper_stat_uid "$path") || return 1
+    if [[ "$uid" != "0" ]]; then
+        helper_log ERROR "$label=$path uid=$uid expected_uid=0 reason=owner"
+        return 1
+    fi
+    mode=$(helper_stat_mode "$path") || return 1
+    if helper_mode_group_or_other_writable "$mode"; then
+        helper_log ERROR "$label=$path mode=$mode reason=group_or_other_writable"
+        return 1
+    fi
+    return 0
+}
+
 helper_reject_processed() {
     local path="$1" id="${2:-unknown}" reason="$3" action="${4:-unknown}"
     helper_log WARN "reject request path=$path uid=${HELPER_ALLOWED_UID:-?} action=$action reason=$reason"
@@ -312,8 +339,14 @@ helper_validate_config() {
     [[ "$HELPER_ALLOWED_UID" =~ ^[0-9]+$ ]] || helper_die "missing/invalid --allowed-uid"
     [[ -n "$HELPER_ALLOWED_USER" ]] || helper_die "missing --allowed-user"
     mkdir -p "$HELPER_RESPONSE_DIR" "$HELPER_STATE_DIR" "$(dirname "$HELPER_LOG_FILE")"
+    [[ ! -L "$HELPER_RESPONSE_DIR" ]] || helper_die "invalid response directory"
+    [[ ! -L "$HELPER_STATE_DIR" ]] || helper_die "invalid state directory"
+    [[ ! -L "$(dirname "$HELPER_LOG_FILE")" ]] || helper_die "invalid log directory"
     chmod 0755 "$HELPER_RESPONSE_DIR" 2>/dev/null || true
     chmod 0700 "$HELPER_STATE_DIR" 2>/dev/null || true
+    helper_validate_root_dir "response_dir" "$HELPER_RESPONSE_DIR" || helper_die "invalid response directory"
+    helper_validate_root_dir "state_dir" "$HELPER_STATE_DIR" || helper_die "invalid state directory"
+    helper_validate_root_dir "log_dir" "$(dirname "$HELPER_LOG_FILE")" || helper_die "invalid log directory"
 }
 
 helper_parse_args() {
@@ -336,10 +369,11 @@ helper_parse_args() {
 
 helper_main() {
     helper_parse_args "$@"
-    helper_validate_config
     if [[ "${VIGIL_ROOT_HELPER_TESTING:-0}" != "1" && "$(id -u)" != "0" ]]; then
-        helper_die "must run as root"
+        printf 'vigil-root-helper: must run as root\n' >&2
+        exit 1
     fi
+    helper_validate_config
     helper_log INFO "started request_dir=$HELPER_REQUEST_DIR response_dir=$HELPER_RESPONSE_DIR state_dir=$HELPER_STATE_DIR allowed_uid=$HELPER_ALLOWED_UID allowed_user=$HELPER_ALLOWED_USER once=$HELPER_ONCE"
     if (( HELPER_ONCE == 1 )); then
         helper_process_pending || true

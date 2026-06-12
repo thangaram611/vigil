@@ -65,11 +65,13 @@ The helper boundary is intentionally narrow:
 
 - request actions are only `engage`, `release`, and `status`;
 - the helper rejects symlinks, non-regular files, unexpected owners, group/other-writable request files, unknown actions, and extra request content;
+- request files with multiple hard links are rejected, and the request directory itself must be owned by the configured user and not group/other writable;
+- helper response, state, and log directories must be root-owned and not group/other writable; the user daemon also rejects helper response files that are not regular, root-owned files;
 - the helper runs only fixed `/usr/bin/pmset -a disablesleep 1` and `/usr/bin/pmset -a disablesleep 0|1` argv;
 - the helper tracks active engagement separately from the retained baseline, so each fresh engage re-captures current system state and idle releases do not run `pmset`;
 - setup/uninstall may still prompt for admin access to install, bootstrap, bootout, or remove root-owned files.
 
-This reduces noisy repeated sudo execution but increases responsibility: Vigil owns a persistent privileged component, so the request queue is treated as a real privilege boundary.
+This reduces noisy repeated sudo execution but increases responsibility: Vigil owns a persistent privileged component, so the request queue is treated as a real privilege boundary. Development tests reinforce that boundary by setting `VIGIL_TEST_NO_ADMIN=1` and putting a failing `sudo` shim first in `PATH`; test runs must not exercise admin paths.
 
 ## Why baseline restoration matters
 

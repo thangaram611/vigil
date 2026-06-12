@@ -50,7 +50,13 @@ FAKE_LAUNCHCTL
 exit 0
 FAKE_VISUDO
 
-    chmod +x "$root/bin/pmset" "$root/bin/launchctl" "$root/bin/visudo"
+    cat > "$root/bin/sudo" <<'FAKE_SUDO'
+#!/usr/bin/env bash
+printf 'sudo %s\n' "$*" >> "$VIGIL_FAKE_ROOT/sudo.log"
+exit 97
+FAKE_SUDO
+
+    chmod +x "$root/bin/pmset" "$root/bin/launchctl" "$root/bin/visudo" "$root/bin/sudo"
     export PATH="$root/bin:$PATH"
 }
 
@@ -88,6 +94,32 @@ assert isinstance(codex["latest_activity_age_secs"], int)
     rm -rf "$VIGIL_FAKE_ROOT"
 }
 
+test_setup_non_dry_run_is_blocked_under_test_no_admin() {
+    _setup_cli_fake_env
+
+    local out status
+    out=$(VIGIL_TEST_NO_ADMIN=1 "$VIGIL_REPO_ROOT/bin/vigil" setup 2>&1)
+    status=$?
+    assert_not_eq "$status" "0" "setup must fail when admin is blocked"
+    assert_contains "$out" "admin operation blocked by VIGIL_TEST_NO_ADMIN" "blocked before admin path"
+    assert_file_absent "$VIGIL_FAKE_ROOT/sudo.log" "blocked setup must not invoke sudo"
+
+    rm -rf "$VIGIL_FAKE_ROOT"
+}
+
+test_setup_refuses_overridden_privileged_paths_before_sudo() {
+    _setup_cli_fake_env
+
+    local out status
+    out=$(VIGIL_TEST_NO_ADMIN=0 VIGIL_ROOT_DIR="$VIGIL_FAKE_ROOT/root-override" "$VIGIL_REPO_ROOT/bin/vigil" setup 2>&1)
+    status=$?
+    assert_not_eq "$status" "0" "setup must fail for non-standard privileged root path"
+    assert_contains "$out" "refusing non-standard VIGIL_ROOT_DIR" "privileged path guard"
+    assert_file_absent "$VIGIL_FAKE_ROOT/sudo.log" "path guard must fire before sudo"
+
+    rm -rf "$VIGIL_FAKE_ROOT"
+}
+
 test_setup_dry_run_previews_privileged_files_without_installing() {
     _setup_cli_fake_env
 
@@ -100,4 +132,17 @@ test_setup_dry_run_previews_privileged_files_without_installing() {
     assert_file_absent "$HOME/Library/LaunchAgents/com.thangaram.vigil.plist" "dry-run must not write plist"
 
     rm -rf "$VIGIL_FAKE_ROOT"
+}
+
+test_setup_dry_run_escapes_plist_values() {
+    local root home out
+    root=$(mktemp -d -t vigil-cli-xml-XXXXXX)
+    home="$root/home & <vigil>"
+    mkdir -p "$home"
+
+    out=$(HOME="$home" VIGIL_CONFIG_FILE="$root/no.conf" "$VIGIL_REPO_ROOT/bin/vigil" setup --dry-run)
+    assert_contains "$out" "home &amp; &lt;vigil&gt;" "plist XML escapes path values"
+    assert_contains "$out" "LaunchDaemon helper plist (preview)" "dry-run still renders helper plist"
+
+    rm -rf "$root"
 }

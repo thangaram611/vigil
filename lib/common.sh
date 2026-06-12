@@ -122,6 +122,41 @@ vigil_power_response_field() {
     printf '%s\n' "$response" | awk -F= -v k="$field" '$1 == k { sub(/^[^=]*=/, ""); print; exit }'
 }
 
+vigil_power_stat_uid() {
+    stat -f '%u' "$1" 2>/dev/null || stat -c '%u' "$1"
+}
+
+vigil_power_stat_mode() {
+    stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
+}
+
+vigil_power_group_or_other_writable() {
+    local mode="$1" group_digit other_digit
+    group_digit="${mode: -2:1}"
+    other_digit="${mode: -1:1}"
+    [[ "$group_digit" =~ ^[0-7]$ && "$other_digit" =~ ^[0-7]$ ]] || return 0
+    (( (10#$group_digit & 2) != 0 || (10#$other_digit & 2) != 0 ))
+}
+
+vigil_power_response_file_ok() {
+    local path="$1" uid mode
+    if [[ -L "$path" || ! -f "$path" ]]; then
+        log ERROR "root helper response is not a regular file: $path"
+        return 1
+    fi
+    uid=$(vigil_power_stat_uid "$path") || return 1
+    if [[ "$uid" != "0" ]]; then
+        log ERROR "root helper response has unexpected owner uid=$uid path=$path"
+        return 1
+    fi
+    mode=$(vigil_power_stat_mode "$path") || return 1
+    if vigil_power_group_or_other_writable "$mode"; then
+        log ERROR "root helper response is group/other writable mode=$mode path=$path"
+        return 1
+    fi
+    return 0
+}
+
 vigil_power_helper_request() {
     local action="$1"
     case "$action" in engage|release|status) ;; *) log ERROR "invalid power helper action: $action"; return 2 ;; esac
@@ -147,6 +182,7 @@ vigil_power_helper_request() {
     max_ticks=$(( VIGIL_POWER_HELPER_TIMEOUT_SECS * 10 ))
     while (( waited < max_ticks )); do
         if [[ -f "$resp_file" ]]; then
+            vigil_power_response_file_ok "$resp_file" || return 1
             response=$(cat "$resp_file" 2>/dev/null || true)
             status=$(vigil_power_response_field status "$response")
             if [[ "$status" == "ok" ]]; then
