@@ -16,6 +16,16 @@ _setup_fake_base() {
     export VIGIL_LOCK_MAX_SECS="28800"
     mkdir -p "$VIGIL_STATE_DIR" "$VIGIL_LOG_DIR" "$VIGIL_INSTALL_DIR/bin" "$root/bin"
     : > "$VIGIL_CONFIG_FILE"
+    cat > "$root/bin/caffeinate" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "-i" ]]; then
+    shift
+    exec "$@"
+fi
+printf 'unexpected caffeinate args: %s\n' "$*" >&2
+exit 64
+EOF
+    chmod +x "$root/bin/caffeinate"
     export PATH="$root/bin:$PATH"
 }
 
@@ -197,6 +207,7 @@ EOF
     assert_contains "$freeze_line" "--max-secs 42" "max secs passed from config"
     assert_contains "$out" "lock combo:  cmd+alt+shift+ctrl+x" "lock command displays config-combo"
     assert_contains "$out" "max seconds: 42" "lock command displays config max secs"
+    assert_contains "$out" "sleep hold:  best effort" "lock command documents best-effort sleep hold"
 
     _cleanup_fake_lock_env
 }

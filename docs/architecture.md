@@ -17,7 +17,7 @@
    │  ├─ thermal: pmset -g therm                            │
    │  ├─ battery: pmset -g ps                               │
    │  ├─ on first acquire: snapshot baseline SleepDisabled  │
-   │  ├─ helper engage: pmset disablesleep 1+caffeinate -di │
+   │  ├─ helper engage: pmset disablesleep 1+caffeinate -i  │
    │  └─ on full release: restore baseline + kill caffeinate│
    └────────────────────────────────────────────────────────┘
                                │
@@ -50,16 +50,15 @@ Two signals, one source of truth (the daemon's refcount):
 
 The daemon counts files in `state/active/`. Transition rules:
 
-- **0 → >0**: Snapshot the current `SleepDisabled` value into `state/baseline.json`. Submit an `engage` request to the root helper, which captures its own root-owned baseline if needed and runs `/usr/bin/pmset -a disablesleep 1`. Spawn `caffeinate -di &` and store its PID.
-- **>0 steady state**: Verify every tick that `SleepDisabled=1` and the recorded
-  `caffeinate` child is still alive. If either drifted, reassert immediately.
+- **0 → >0**: Snapshot the current `SleepDisabled` value into `state/baseline.json`. Submit an `engage` request to the root helper, which captures its own root-owned baseline if needed and runs `/usr/bin/pmset -a disablesleep 1`. Spawn `caffeinate -i &` and store its PID.
+- **>0 steady state**: Verify every tick that `SleepDisabled=1` and the recorded `caffeinate` child is still alive. If either drifted, reassert immediately.
 - **>0 → 0**: Submit a `release` request to the root helper, which restores its captured baseline with `/usr/bin/pmset -a disablesleep <baseline>` while marked engaged. Idle release requests are no-ops, so a stale retained helper baseline cannot clobber a later third-party sleep setting. Kill the caffeinate child and delete the user-visible `baseline.json`.
 
 Stale PID files are GC'd when (a) the PID is dead, (b) the on-disk start_ts doesn't match the live PID's start time (PID reuse), or (c) the file is older than 30s and the PID's CPU is below 0.5%.
 
 ## Why a root helper instead of runtime sudo
 
-The daemon runs under user-domain `launchd` with no controlling tty. Runtime `sudo` either needs a brittle `NOPASSWD` rule or risks blocking with no password prompt. Vigil now installs one root LaunchDaemon helper during `vigil setup`; normal runtime does not execute `sudo`.
+The daemon runs under user-domain `launchd` with no controlling tty. Runtime `sudo` either needs a brittle `NOPASSWD` rule or risks blocking with no password prompt. Vigil installs one root LaunchDaemon helper during `vigil setup`; normal runtime does not execute `sudo`.
 
 The helper boundary is intentionally narrow:
 
@@ -75,7 +74,7 @@ This reduces noisy repeated sudo execution but increases responsibility: Vigil o
 
 ## Why baseline restoration matters
 
-If you have Amphetamine or another tool already holding `disablesleep=1` when vigil engages, the original draft would have set it back to `0` on release — clobbering the other tool's setting. Vigil snapshots the prior value at the first acquire and restores exactly that on the last release.
+If you have Amphetamine or another tool already holding `disablesleep=1` when Vigil engages, the original draft would have set it back to `0` on release — clobbering the other tool's setting. Vigil snapshots the prior value at the first acquire and restores exactly that on the last release.
 
 ### Baseline stickiness: `SleepDisabled=1` is captured and re-captured
 
@@ -86,27 +85,32 @@ To reset the baseline back to `0`-state — i.e., to make vigil release all the 
 - While vigil is **idle** (refcount = 0, no `baseline.json` on disk): release the other sleep-prevention tool, or intentionally reset `SleepDisabled` as an admin outside Vigil. The next vigil engage will then capture `0`, and the next release will go back to `0`.
 - `vigil uninstall && vigil setup` — uninstall restores baseline and clears state; setup starts fresh.
 
-If another tool (Amphetamine, an open `caffeinate -di` shell, etc.) is the *reason* `SleepDisabled=1` keeps coming back, vigil cannot fix that — the other tool will re-assert. Quit the other tool first.
+If another tool (Amphetamine, an open `caffeinate` shell, etc.) is the *reason* `SleepDisabled=1` keeps coming back, Vigil cannot fix that — the other tool will re-assert. Quit the other tool first.
 
 ## Crash recovery
 
 If the daemon restarts and finds `baseline.json`, it refreshes live process
 evidence before deciding what to do. If active agent or wrapper refs still
 exist and thermal/battery guards allow holding sleep, vigil keeps the captured
-baseline and reasserts `SleepDisabled=1` plus `caffeinate -di`. If no active
+baseline and reasserts `SleepDisabled=1` plus `caffeinate -i`. If no active
 work remains, it restores the captured baseline and clears the stale state.
 
-## Why `caffeinate -di` and not `-dimsu`
+## Why `caffeinate -i`
 
 Reading `man caffeinate`:
 
-- `-d`: prevent display sleep. Useful.
+- `-d`: prevent display sleep. Deliberately not used by default; Vigil should
+  allow display sleep and native lock.
 - `-i`: prevent system idle sleep. Useful.
 - `-m`: prevent disk idle sleep. Cosmetic — doesn't affect agent runtime.
 - `-s`: prevent system sleep. **Only effective on AC power**; no-op on battery.
 - `-u`: declare user active. **Requires `-t <timeout>`** to be useful — without it, the assertion times out in 5 seconds.
 
-For a daemon that doesn't have an enclosing command lifetime, `-d` and `-i` are the only flags that do real work. `pmset disablesleep` covers the closed-lid / system-sleep half. The original draft's `-dimsu` was misleading.
+For Vigil's unified mode, `pmset disablesleep` is the strongest available
+best-effort lever for system/lid sleep, and `-i` is the correct narrow
+caffeinate assertion: it prevents idle system sleep while allowing display
+sleep. The original draft's `-dimsu` and later `-di` defaults were too broad
+because `-d` kept the display awake.
 
 ## Why per-user state and log paths
 

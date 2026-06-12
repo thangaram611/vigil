@@ -12,9 +12,33 @@ Per-platform sleep prevention (mirrors `keepawake-rs` architecture; current
 reference version from the 2026-06 research pass is `keepawake 0.6.0`, which
 uses `objc2-io-kit`, `zbus`, and the `windows` crate):
 
-- **macOS**: IOKit `IOPMAssertionCreateWithName` for idle/display assertions. `IOPMSetSystemPowerSetting(kIOPMSleepDisabledKey, true)` for closed-lid (same lever as phase 1's `pmset disablesleep`). `keepawake-rs` covers the assertion half, not the closed-lid `SleepDisabled` lever, so Vigil still needs a macOS-specific branch.
-- **Linux**: D-Bus to `org.freedesktop.login1.Manager.Inhibit` for `idle:sleep` in `block` mode. Do **not** request `shutdown` by default; systemd 257 strengthened regular `block` inhibitors, and Vigil should not block shutdown unless the user explicitly opts into that behavior. Keep the returned FD alive for the whole hold. `org.freedesktop.ScreenSaver.Lock` remains the likely lock path.
-- **Windows**: `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)` for sleep prevention. `LockWorkStation()` for lock. **Note:** this cannot prevent user-initiated sleep, `LockWorkStation()` requires an interactive desktop, and `ES_AWAYMODE_REQUIRED` is a narrow media/background option rather than a default Vigil behavior.
+- **Invariant:** default Vigil holds prevent system sleep / suspend of
+  CPU-network-process execution as strongly as the OS reasonably allows,
+  including best-effort lid-close sleep prevention where an OS exposes it. They
+  must not hold display-awake assertions and must not suppress the native OS
+  lock screen.
+- **macOS**: IOKit `IOPMAssertionCreateWithName` with
+  `kIOPMAssertionTypePreventUserIdleSystemSleep` (phase-1 shell equivalent:
+  `caffeinate -i`). Do not request `PreventUserIdleDisplaySleep` by default.
+  Also use `IOPMSetSystemPowerSetting(kIOPMSleepDisabledKey, true)` for
+  best-effort closed-lid/system sleep prevention (same lever as phase 1's
+  `pmset disablesleep`). `keepawake-rs` covers the assertion half, not the
+  closed-lid `SleepDisabled` lever, so Vigil still needs a macOS-specific
+  branch.
+- **Linux**: D-Bus to `org.freedesktop.login1.Manager.Inhibit` for `sleep:idle`
+  in `block` mode. Do **not** request `shutdown` by default, and do not inhibit
+  the compositor's screen locker/screensaver. systemd 257 strengthened regular
+  `block` inhibitors, and Vigil should not block shutdown unless the user
+  explicitly opts into that behavior. Keep the returned FD alive for the whole
+  hold. `org.freedesktop.login1.Manager.LockSessions` / desktop-specific
+  screensaver lock APIs remain separate from sleep inhibition.
+- **Windows**: `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)` for
+  default sleep prevention. Do **not** include `ES_DISPLAY_REQUIRED` unless a
+  future explicit "keep display awake" mode is added. `LockWorkStation()` is a
+  separate native-lock action. **Note:** this cannot prevent user-initiated
+  sleep, `LockWorkStation()` requires an interactive desktop, and
+  `ES_AWAYMODE_REQUIRED` is a narrow media/background option rather than a
+  default Vigil behavior.
 
 Process detection per-platform:
 

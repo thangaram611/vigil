@@ -86,7 +86,7 @@ _cleanup_fake_power_env() {
     rm -rf "${VIGIL_FAKE_ROOT:-}"
 }
 
-test_engage_and_release_restore_baseline() {
+test_engage_and_release_restore_baseline_with_best_effort_hold() {
     _setup_fake_power_env
 
     vigil_pmset_engage
@@ -94,6 +94,8 @@ test_engage_and_release_restore_baseline() {
     assert_eq "$(vigil_pmset_baseline_value)" "0" "baseline captured before engage"
     assert_file_exists "$VIGIL_CAFFEINATE_PIDFILE" "engage writes caffeinate pidfile"
     vigil_pmset_caffeinate_alive
+    assert_contains "$(cat "$VIGIL_FAKE_EVENTS")" "helper engage" "engage requests helper engage"
+    assert_contains "$(cat "$VIGIL_FAKE_EVENTS")" "caffeinate -i" "engage uses idle-system assertion without display hold"
 
     vigil_pmset_release
     assert_eq "$(cat "$VIGIL_FAKE_SLEEP_FILE")" "0" "release restores baseline"
@@ -108,6 +110,7 @@ test_release_uses_helper_release_when_baseline_is_one() {
 
     printf '1\n' > "$VIGIL_FAKE_SLEEP_FILE"
     vigil_pmset_engage
+    assert_eq "$(cat "$VIGIL_FAKE_SLEEP_FILE")" "1" "engage sets SleepDisabled=1"
     assert_eq "$(vigil_pmset_baseline_value)" "1" "baseline captures pre-existing SleepDisabled=1"
 
     vigil_pmset_release

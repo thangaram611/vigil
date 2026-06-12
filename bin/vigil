@@ -28,6 +28,8 @@ VIGIL_LIB_DIR="$VIGIL_REPO_ROOT/lib"
 source "$VIGIL_LIB_DIR/common.sh"
 # shellcheck source=../lib/refcount.sh
 source "$VIGIL_LIB_DIR/refcount.sh"
+# shellcheck source=../lib/detect.sh
+source "$VIGIL_LIB_DIR/detect.sh"
 # shellcheck source=../lib/activity.sh
 source "$VIGIL_LIB_DIR/activity.sh"
 # shellcheck source=../lib/pmset.sh
@@ -139,14 +141,14 @@ cmd_sync_install() {
     mkdir -p "$VIGIL_INSTALL_DIR/bin" "$VIGIL_INSTALL_DIR/lib"
     install -m 0755 "$VIGIL_REPO_ROOT/bin/vigil-daemon" "$VIGIL_INSTALL_DIR/bin/vigil-daemon"
     install -m 0644 "$VIGIL_REPO_ROOT/lib/"*.sh "$VIGIL_INSTALL_DIR/lib/"
-    echo "  installed daemon to $VIGIL_INSTALL_DIR/bin/vigil-daemon"
+    echo "  daemon: installed to $VIGIL_INSTALL_DIR/bin/vigil-daemon"
 
     if [[ "$(uname -s)" == "Darwin" ]]; then
         local cargo_toml="$VIGIL_REPO_ROOT/native/vigil-lock-helper/Cargo.toml"
         local target_dir build_bin
         target_dir=$(cmd_cargo_target_dir "$cargo_toml") || return 1
         build_bin="$target_dir/release/vigil-lock-helper"
-        if ! cargo build --release --manifest-path "$cargo_toml"; then
+        if ! cargo build --quiet --release --manifest-path "$cargo_toml"; then
             echo "  failed to build vigil-lock-helper (see above)"
             return 1
         fi
@@ -155,7 +157,7 @@ cmd_sync_install() {
             return 1
         fi
         install -m 0755 "$build_bin" "$VIGIL_INSTALL_DIR/bin/vigil-lock-helper"
-        echo "  installed helper to $VIGIL_INSTALL_DIR/bin/vigil-lock-helper"
+        echo "  lock helper: installed to $VIGIL_INSTALL_DIR/bin/vigil-lock-helper"
     fi
 }
 
@@ -199,7 +201,7 @@ cmd_install_root_helper() {
     cmd_render_helper_plist > "$tmp_plist"
     chmod 0644 "$tmp_plist"
 
-    echo "  installing root helper and LaunchDaemon — sudo prompt"
+    echo "     root helper: installing LaunchDaemon (sudo may prompt)"
     sudo install -d -m 0755 -o root -g wheel "$VIGIL_ROOT_DIR"
     sudo install -d -m 0755 -o root -g wheel "$VIGIL_ROOT_BIN_DIR"
     sudo install -d -m 0755 -o root -g wheel "$VIGIL_POWER_HELPER_DIR"
@@ -216,13 +218,13 @@ cmd_install_root_helper() {
     sudo launchctl bootout "system/$VIGIL_HELPER_LABEL" >/dev/null 2>&1 || true
     sudo launchctl bootstrap system "$VIGIL_HELPER_PLIST"
     sudo launchctl enable "system/$VIGIL_HELPER_LABEL" 2>/dev/null || true
-    echo "  helper launchd: bootstrapped $VIGIL_HELPER_LABEL"
+    echo "     root helper: bootstrapped $VIGIL_HELPER_LABEL"
 }
 
 cmd_remove_root_helper() {
     cmd_require_admin_allowed
     cmd_assert_standard_privileged_paths
-    echo "  removing root helper and LaunchDaemon — sudo prompt"
+    echo "     root helper: removing LaunchDaemon and helper files (sudo may prompt)"
     sudo launchctl bootout "system/$VIGIL_HELPER_LABEL" >/dev/null 2>&1 || true
     [[ -f "$VIGIL_HELPER_PLIST" ]] && sudo rm -f "$VIGIL_HELPER_PLIST"
     [[ -d "$VIGIL_POWER_HELPER_DIR" ]] && sudo rm -rf "$VIGIL_POWER_HELPER_DIR"
@@ -294,43 +296,229 @@ cmd_provider_roots_json() {
 }
 
 cmd_provider_roots_text() {
-    local agent home dir exists age latest
+    local agent home dir exists state
     for agent in claude codex copilot; do
         home=$(vigil_agent_home_for "$agent")
         dir=$(vigil_session_dir_for_agent "$agent")
         exists="no"
         [[ -d "$dir" ]] && exists="yes"
-        age=$(vigil_agent_latest_activity_age_secs "$agent" 2>/dev/null || true)
-        latest="-"
-        [[ "$age" =~ ^-?[0-9]+$ ]] && latest="${age}s ago"
+        state=$(vigil_agent_state "$agent")
         printf '  %-7s home=%s\n' "$agent" "$home"
-        printf '          session=%s exists=%s latest=%s\n' "$dir" "$exists" "$latest"
+        printf '          session=%s exists=%s state=%s\n' "$dir" "$exists" "$state"
     done
 }
 
+cmd_agent_states_line() {
+    printf 'claude=%s  codex=%s  copilot=%s  vscode_copilot_chat=%s\n' \
+        "$(vigil_agent_state claude)" "$(vigil_agent_state codex)" "$(vigil_agent_state copilot)" "$(vigil_vscode_copilot_chat_state)"
+}
+
+cmd_agent_state_from_flag() {
+    local agent="$1" active="$2" dir
+    dir=$(vigil_session_dir_for_agent "$agent") || { printf 'none\n'; return 0; }
+    [[ -d "$dir" ]] || { printf 'none\n'; return 0; }
+    if (( active == 1 )); then
+        printf 'active\n'
+    else
+        printf 'idle\n'
+    fi
+}
+
+cmd_vscode_state_from_flag() {
+    local active="$1"
+    if (( active == 1 )); then
+        printf 'active\n'
+    elif vigil_vscode_host_running; then
+        printf 'idle\n'
+    else
+        printf 'none\n'
+    fi
+}
+
+cmd_agent_states_line_from_flags() {
+    local claude_active="$1" codex_active="$2" copilot_active="$3" vscode_copilot_active="$4"
+    printf 'claude=%s  codex=%s  copilot=%s  vscode_copilot_chat=%s\n' \
+        "$(cmd_agent_state_from_flag claude "$claude_active")" \
+        "$(cmd_agent_state_from_flag codex "$codex_active")" \
+        "$(cmd_agent_state_from_flag copilot "$copilot_active")" \
+        "$(cmd_vscode_state_from_flag "$vscode_copilot_active")"
+}
+
+cmd_helper_launchd_status() {
+    if launchctl print "system/$VIGIL_HELPER_LABEL" >/dev/null 2>&1; then
+        printf 'loaded\n'
+    else
+        printf 'not loaded\n'
+    fi
+}
+
+cmd_power_assertions_summary_line() {
+    local assertions_out="$1"
+    if [[ "$assertions_out" == "(none)" ]]; then
+        printf 'none\n'
+        return 0
+    fi
+    if [[ "$assertions_out" == "(parse-failed;"* ]]; then
+        printf 'parse failed\n'
+        return 0
+    fi
+
+    local total=0 vigil_total=0 marker
+    while IFS=$'\t' read -r _pid _proc _atype marker; do
+        [[ -z "${_pid:-}" ]] && continue
+        total=$((total+1))
+        [[ "${marker:-}" == *vigil* ]] && vigil_total=$((vigil_total+1))
+    done <<< "$assertions_out"
+    if (( total == 0 )); then
+        printf 'none\n'
+    elif (( vigil_total > 0 )); then
+        printf '%s active (%s vigil)\n' "$total" "$vigil_total"
+    else
+        printf '%s active\n' "$total"
+    fi
+}
+
+cmd_power_hold_summary_line() {
+    local sd="$1" baseline="$2" caff_pid="$3"
+    local caff_alive="no" hold="released"
+    vigil_pmset_caffeinate_alive && caff_alive="yes"
+    if vigil_pmset_hold_engaged; then
+        hold="engaged"
+    fi
+    printf 'hold=%s  mode=%s  disablesleep=%s  baseline=%s  caffeinate=%s' "$hold" "$(vigil_pmset_active_mode)" "$sd" "$baseline" "$caff_alive"
+    if [[ "$caff_pid" != "-" ]]; then
+        printf ' pid=%s' "$caff_pid"
+    fi
+    printf '\n'
+}
+
+cmd_daemon_tick_field() {
+    local field="$1"
+    [[ -f "$VIGIL_DAEMON_TICK_FILE" ]] || return 1
+    awk -F= -v k="$field" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$VIGIL_DAEMON_TICK_FILE"
+}
+
+cmd_daemon_scan_info() {
+    local loaded="$1" daemon_pid="$2"
+    if [[ "$loaded" != "yes" ]]; then
+        printf 'unloaded\t-\tnot running\n'
+        return 0
+    fi
+    if [[ ! "$daemon_pid" =~ ^[0-9]+$ ]]; then
+        printf 'starting\t-\tstarting (pid pending)\n'
+        return 0
+    fi
+
+    local tick_pid updated
+    tick_pid=$(cmd_daemon_tick_field pid 2>/dev/null || true)
+    updated=$(cmd_daemon_tick_field updated_at 2>/dev/null || true)
+    if [[ "$tick_pid" != "$daemon_pid" || ! "$updated" =~ ^[0-9]+$ ]]; then
+        local pid_mtime now pid_age wait_secs missing_after
+        pid_mtime=$(stat -f %m "$VIGIL_DAEMON_PIDFILE" 2>/dev/null || echo 0)
+        if [[ "$pid_mtime" =~ ^[0-9]+$ && "$pid_mtime" != "0" ]]; then
+            now=$(vigil_now_unix)
+            pid_age=$(( now - pid_mtime ))
+            (( pid_age < 0 )) && pid_age=0
+            wait_secs="${VIGIL_START_WAIT_SECS:-6}"
+            case "$wait_secs" in ''|*[!0-9]*) wait_secs=6 ;; esac
+            missing_after=$(( wait_secs + VIGIL_TICK_SECS + 3 ))
+            (( missing_after < 10 )) && missing_after=10
+            if (( pid_age > missing_after )); then
+                printf 'missing\t-\tscan snapshot missing (run '\''vigil reload'\'')\n'
+                return 0
+            fi
+        fi
+        printf 'pending\t-\tpending first scan\n'
+        return 0
+    fi
+
+    local now age tick_secs stale_after
+    now=$(vigil_now_unix)
+    age=$(( now - updated ))
+    (( age < 0 )) && age=0
+    tick_secs=$(cmd_daemon_tick_field tick_secs 2>/dev/null || true)
+    [[ "$tick_secs" =~ ^[0-9]+$ ]] || tick_secs="$VIGIL_TICK_SECS"
+    stale_after=$(( tick_secs * 2 + 5 ))
+    (( stale_after < 15 )) && stale_after=15
+    if (( age > stale_after )); then
+        printf 'stale\t%s\tstale (%ss ago)\n' "$age" "$age"
+    else
+        printf 'fresh\t%s\t%ss ago\n' "$age" "$age"
+    fi
+}
+
+cmd_live_active_match_count() {
+    local claude_active="$1" codex_active="$2" copilot_active="$3" vscode_copilot_active="$4"
+    local count=0 pid name exe args
+    while IFS=$'\t' read -r pid name exe args; do
+        [[ -z "${pid:-}" ]] && continue
+        case "$name" in
+            cli-claude)  (( claude_active ))  && count=$((count+1)) ;;
+            cli-codex|app-codex) (( codex_active )) && count=$((count+1)) ;;
+            cli-copilot) (( copilot_active )) && count=$((count+1)) ;;
+            app-vscode-copilot-chat) (( vscode_copilot_active )) && count=$((count+1)) ;;
+        esac
+    done < <(vigil_detect_all 2>/dev/null || true)
+    printf '%s\n' "$count"
+}
+
+cmd_wait_for_lock_power_hold() {
+    local domain="gui/$(id -u)"
+    launchctl print "$domain/$VIGIL_LABEL" >/dev/null 2>&1 || return 0
+
+    local wait_secs="${VIGIL_START_WAIT_SECS:-6}"
+    case "$wait_secs" in ''|*[!0-9]*) wait_secs=6 ;; esac
+    local max_ticks=$(( wait_secs * 10 ))
+    local i active engaged cut_thermal cut_battery cooling
+    for i in $(seq 1 "$max_ticks"); do
+        active=$(cmd_daemon_tick_field refcount_active 2>/dev/null || true)
+        engaged=$(cmd_daemon_tick_field engaged 2>/dev/null || true)
+        cut_thermal=$(cmd_daemon_tick_field thermal_cut 2>/dev/null || true)
+        cut_battery=$(cmd_daemon_tick_field battery_cut 2>/dev/null || true)
+        cooling=$(cmd_daemon_tick_field cooling 2>/dev/null || true)
+        if [[ "$active" =~ ^[0-9]+$ ]] && (( active > 0 )); then
+            if [[ "$engaged" == "1" || "$cut_thermal" == "1" || "$cut_battery" == "1" || "$cooling" == "1" ]]; then
+                return 0
+            fi
+        fi
+        sleep 0.1
+    done
+    return 0
+}
+
 cmd_setup_dry_run() {
+    local verbose="${1:-0}"
     echo "vigil: setup dry run (no changes will be made)"
-    echo "  state dir:        $VIGIL_STATE_DIR"
-    echo "  log dir:          $VIGIL_LOG_DIR"
-    echo "  install dir:      $VIGIL_INSTALL_DIR"
-    echo "  plist target:     $VIGIL_PLIST"
-    echo "  helper plist:     $VIGIL_HELPER_PLIST"
-    echo "  helper binary:    $VIGIL_ROOT_HELPER"
-    echo "  helper requests:  $VIGIL_POWER_REQUEST_DIR"
-    echo "  helper responses: $VIGIL_POWER_RESPONSE_DIR"
-    echo "  newsyslog target: $VIGIL_NEWSYSLOG_FILE"
-
     echo
-    echo "  newsyslog (preview):"
-    cmd_render_newsyslog | sed 's/^/    /'
-
+    echo "  user:"
+    echo "    state dir:        $VIGIL_STATE_DIR"
+    echo "    log dir:          $VIGIL_LOG_DIR"
+    echo "    install dir:      $VIGIL_INSTALL_DIR"
+    echo "    LaunchAgent:      $VIGIL_PLIST"
     echo
-    echo "  LaunchAgent plist (preview):"
-    cmd_render_plist | sed 's/^/    /'
+    echo "  root:"
+    echo "    helper binary:    $VIGIL_ROOT_HELPER"
+    echo "    LaunchDaemon:     $VIGIL_HELPER_PLIST"
+    echo "    helper requests:  $VIGIL_POWER_REQUEST_DIR"
+    echo "    helper responses: $VIGIL_POWER_RESPONSE_DIR"
+    echo "    newsyslog:        $VIGIL_NEWSYSLOG_FILE"
 
-    echo
-    echo "  LaunchDaemon helper plist (preview):"
-    cmd_render_helper_plist | sed 's/^/    /'
+    if (( verbose == 1 )); then
+        echo
+        echo "  newsyslog (preview):"
+        cmd_render_newsyslog | sed 's/^/    /'
+
+        echo
+        echo "  LaunchAgent plist (preview):"
+        cmd_render_plist | sed 's/^/    /'
+
+        echo
+        echo "  LaunchDaemon helper plist (preview):"
+        cmd_render_helper_plist | sed 's/^/    /'
+    else
+        echo
+        echo "  generated file previews: hidden (use --verbose to print plist/newsyslog contents)"
+    fi
 
     echo
     echo "vigil: dry run complete. No files were installed and launchd was not changed."
@@ -338,14 +526,22 @@ cmd_setup_dry_run() {
 
 cmd_status_json() {
     local domain="gui/$(id -u)"
-    local loaded=false
-    launchctl print "$domain/$VIGIL_LABEL" >/dev/null 2>&1 && loaded=true
+    local loaded=false loaded_text="no"
+    if launchctl print "$domain/$VIGIL_LABEL" >/dev/null 2>&1; then
+        loaded=true
+        loaded_text="yes"
+    fi
 
+    local daemon_pid="-"
     local daemon_pid_json="null"
     if [[ -f "$VIGIL_DAEMON_PIDFILE" ]]; then
-        local daemon_pid; daemon_pid=$(cat "$VIGIL_DAEMON_PIDFILE" 2>/dev/null)
+        daemon_pid=$(cat "$VIGIL_DAEMON_PIDFILE" 2>/dev/null)
         [[ "$daemon_pid" =~ ^[0-9]+$ ]] && daemon_pid_json="$daemon_pid"
     fi
+    local scan_state scan_age scan_text
+    IFS=$'\t' read -r scan_state scan_age scan_text < <(cmd_daemon_scan_info "$loaded_text" "$daemon_pid")
+    local scan_age_json="null"
+    [[ "$scan_age" =~ ^[0-9]+$ ]] && scan_age_json="$scan_age"
 
     local claude_active=0;  vigil_agent_is_active claude  && claude_active=1
     local codex_active=0;   vigil_agent_is_active codex   && codex_active=1
@@ -353,6 +549,10 @@ cmd_status_json() {
     local vscode_copilot_active=0; vigil_vscode_copilot_chat_is_active && vscode_copilot_active=1
     local active; active=$(vigil_refcount_count "$claude_active" "$codex_active" "$copilot_active" "$vscode_copilot_active")
     local total; total=$(vigil_refcount_count_total)
+    local pending_active_matches=0
+    if (( active == 0 && (claude_active || codex_active || copilot_active || vscode_copilot_active) )) && [[ "$loaded_text" == "yes" ]]; then
+        pending_active_matches=$(cmd_live_active_match_count "$claude_active" "$codex_active" "$copilot_active" "$vscode_copilot_active")
+    fi
     local idle_min=$(( (VIGIL_IDLE_AFTER_SEC + 59) / 60 ))
     local sd; sd=$(vigil_read_sleepdisabled)
     local baseline_json="null"
@@ -386,12 +586,16 @@ cmd_status_json() {
     printf '{\n'
     printf '  "launchd_loaded": %s,\n' "$loaded"
     printf '  "daemon_pid": %s,\n' "$daemon_pid_json"
+    printf '  "daemon_scan_state": "%s",\n' "$(vigil_json_escape "$scan_state")"
+    printf '  "daemon_scan_age_secs": %s,\n' "$scan_age_json"
     printf '  "refcount_active": %s,\n' "$active"
     printf '  "refcount_total": %s,\n' "$total"
+    printf '  "pending_active_matches": %s,\n' "$pending_active_matches"
     printf '  "idle_window_minutes": %s,\n' "$idle_min"
     printf '  "agents": {"claude":"%s","codex":"%s","copilot":"%s","vscode_copilot_chat":"%s"},\n' \
         "$(vigil_agent_state claude)" "$(vigil_agent_state codex)" "$(vigil_agent_state copilot)" "$(vigil_vscode_copilot_chat_state)"
     printf '  "provider_roots": %s,\n' "$(cmd_provider_roots_json)"
+    printf '  "power_hold_mode": "%s",\n' "$(vigil_json_escape "$(vigil_pmset_active_mode)")"
     printf '  "pmset_disablesleep": %s,\n' "$sd"
     printf '  "baseline": %s,\n' "$baseline_json"
     printf '  "caffeinate_pid": %s,\n' "$caff_json"
@@ -405,6 +609,8 @@ cmd_status_json() {
 }
 
 cmd_doctor_power() {
+    local verbose="${1:-0}"
+    local errs=0
     echo "vigil power doctor"
     echo
     local arch; arch=$(uname -m)
@@ -412,8 +618,20 @@ cmd_doctor_power() {
     if [[ "$arch" == "arm64" ]]; then
         echo "                      Apple Silicon: closed-lid operation is best-effort unless clamshell requirements are met."
     fi
-    printf '  pmset:              %s\n' "$(command -v pmset 2>/dev/null || echo MISSING)"
-    printf '  caffeinate:         %s\n' "$(command -v caffeinate 2>/dev/null || echo MISSING)"
+    if command -v pmset >/dev/null 2>&1; then
+        printf '  pmset:              %s\n' "$(command -v pmset)"
+    else
+        printf '  pmset:              MISSING\n'
+        errs=$((errs+1))
+    fi
+    if command -v caffeinate >/dev/null 2>&1; then
+        printf '  caffeinate:         %s\n' "$(command -v caffeinate)"
+    else
+        printf '  caffeinate:         MISSING\n'
+        errs=$((errs+1))
+    fi
+    printf '  power hold mode:    best-effort\n'
+    printf '  display sleep:      allowed (pmset disablesleep + caffeinate -i, no -d)\n'
     printf '  pmset disablesleep: %s\n' "$(vigil_read_sleepdisabled)"
     local baseline="-"
     [[ -f "$VIGIL_BASELINE_FILE" ]] && baseline=$(vigil_pmset_baseline_value)
@@ -422,37 +640,58 @@ cmd_doctor_power() {
     [[ -f "$VIGIL_CAFFEINATE_PIDFILE" ]] && caff=$(vigil_pmset_caffeinate_pid 2>/dev/null || echo "-")
     printf '  caffeinate pid:     %s\n' "$caff"
     printf '  caffeinate alive:   %s\n' "$(vigil_pmset_caffeinate_alive && echo yes || echo no)"
-    printf '  root helper:        %s\n' "$(vigil_power_helper_check && echo ok || echo FAIL)"
+    if vigil_power_helper_check; then
+        printf '  root helper:        ok\n'
+    else
+        printf '  root helper:        FAIL\n'
+        errs=$((errs+1))
+    fi
     printf '  thermal:            %s\n' "$(vigil_thermal_summary)"
     printf '  battery:            %s\n' "$(vigil_battery_summary)"
-    echo
-    echo '  provider roots:'
-    cmd_provider_roots_text | sed 's/^/  /'
-    echo
-    echo '  power assertions:'
     local assertions_out; assertions_out=$(vigil_assertions_summary)
-    if [[ "$assertions_out" == '('* ]]; then
-        printf '%s\n' "$assertions_out" | sed 's/^/    /'
+    printf '  power assertions:   %s\n' "$(cmd_power_assertions_summary_line "$assertions_out")"
+    if (( verbose == 1 )); then
+        echo
+        echo '  provider roots:'
+        cmd_provider_roots_text | sed 's/^/  /'
+        echo
+        echo '  power assertions:'
+        if [[ "$assertions_out" == '('* ]]; then
+            printf '%s\n' "$assertions_out" | sed 's/^/    /'
+        else
+            printf '%s\n' "$assertions_out" | LC_ALL=C awk -F'\t' '
+                NF == 0 { next }
+                { printf "    pid=%-7s %-28s %-32s %s\n", $1, $2, $3, $4 }
+            '
+        fi
     else
-        printf '%s\n' "$assertions_out" | LC_ALL=C awk -F'\t' '
-            NF == 0 { next }
-            { printf "    pid=%-7s %-28s %-32s %s\n", $1, $2, $3, $4 }
-        '
+        echo
+        echo "  detail: use 'vigil doctor --power --verbose' for provider paths and assertion rows"
     fi
+
+    echo
+    if (( errs == 0 )); then
+        echo "result: power path checks passed"
+        return 0
+    fi
+    echo "result: $errs power path check(s) failed"
+    echo "next:   vigil setup"
+    return 1
 }
 
 # ---- subcommands -------------------------------------------------------------
 
 cmd_setup() {
-    local dry_run=0
-    case "${1:-}" in
-        --dry-run) dry_run=1; shift ;;
-        "") ;;
-        *) die "usage: vigil setup [--dry-run]" ;;
-    esac
-    [[ $# -eq 0 ]] || die "usage: vigil setup [--dry-run]"
+    local dry_run=0 verbose=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run) dry_run=1; shift ;;
+            --verbose) verbose=1; shift ;;
+            *) die "usage: vigil setup [--dry-run] [--verbose]" ;;
+        esac
+    done
     if (( dry_run == 1 )); then
-        cmd_setup_dry_run
+        cmd_setup_dry_run "$verbose"
         return 0
     fi
 
@@ -460,23 +699,34 @@ cmd_setup() {
     cmd_assert_standard_privileged_paths
     cmd_assert_vigil_tree_path "install dir" "$VIGIL_INSTALL_DIR"
 
-    echo "vigil: setting up..."
+    echo "vigil: setting up"
 
+    echo
+    echo "  1. preparing user directories"
     vigil_ensure_dirs
-    echo "  state dir: $VIGIL_STATE_DIR"
-    echo "  log dir:   $VIGIL_LOG_DIR"
+    echo "     state dir: $VIGIL_STATE_DIR"
+    echo "     log dir:   $VIGIL_LOG_DIR"
 
     # If a previous daemon is loaded, boot it out before we replace its binary.
     cmd_stop >/dev/null 2>&1 || true
 
     # 0. Sync daemon + libs into the install dir (must not be ~/Documents/).
+    echo
+    echo "  2. installing user daemon"
     cmd_sync_install
 
     # 1. Privileged helper LaunchDaemon. Runtime pmset transitions go through
     # this helper instead of repeated sudo from the user daemon.
-    echo "  helper plist (preview):"
-    cmd_render_helper_plist | sed 's/^/    /'
     echo
+    echo "  3. installing privileged power helper"
+    if (( verbose == 1 )); then
+        echo "     LaunchDaemon plist preview:"
+        cmd_render_helper_plist | sed 's/^/       /'
+        echo
+    else
+        echo "     LaunchDaemon: $VIGIL_HELPER_PLIST"
+        echo "     binary:       $VIGIL_ROOT_HELPER"
+    fi
     cmd_install_root_helper
     if [[ -f "$VIGIL_LEGACY_SUDOERS_FILE" ]]; then
         echo "  removing legacy sudoers file: $VIGIL_LEGACY_SUDOERS_FILE"
@@ -488,67 +738,96 @@ cmd_setup() {
     local tmp_newsyslog; tmp_newsyslog=$(mktemp -t vigil-newsyslog)
     cmd_render_newsyslog > "$tmp_newsyslog"
     chmod 0644 "$tmp_newsyslog"
-    echo "  newsyslog (preview):"
-    sed 's/^/    /' "$tmp_newsyslog"
     echo
-    echo "  installing $VIGIL_NEWSYSLOG_FILE"
+    echo "  4. installing log rotation"
+    if (( verbose == 1 )); then
+        echo "     newsyslog preview:"
+        sed 's/^/       /' "$tmp_newsyslog"
+    else
+        echo "     newsyslog: $VIGIL_NEWSYSLOG_FILE"
+    fi
     sudo install -m 0644 -o root -g wheel "$tmp_newsyslog" "$VIGIL_NEWSYSLOG_FILE"
     rm -f "$tmp_newsyslog"
-    echo "  newsyslog ok: $VIGIL_NEWSYSLOG_FILE"
+    echo "  newsyslog: installed"
 
     # 3. LaunchAgent plist
+    echo
+    echo "  5. loading user LaunchAgent"
     mkdir -p "$(dirname "$VIGIL_PLIST")"
     cmd_render_plist > "$VIGIL_PLIST"
-    echo "  plist: $VIGIL_PLIST"
+    echo "     plist: $VIGIL_PLIST"
 
     # 4. Bootstrap the LaunchAgent
     cmd_start
 
     echo
-    echo "vigil: setup complete. Run 'vigil status' to verify."
+    echo "vigil: setup complete"
+    echo "  next: vigil status"
 }
 
 cmd_uninstall() {
+    [[ $# -eq 0 ]] || die "usage: vigil uninstall"
     cmd_require_admin_allowed
     cmd_assert_standard_privileged_paths
     cmd_assert_vigil_tree_path "install dir" "$VIGIL_INSTALL_DIR"
 
-    echo "vigil: uninstalling..."
+    echo "vigil: uninstalling"
 
     # Stop the daemon if it's running so it can release its hold cleanly.
+    echo
+    echo "  1. stopping user LaunchAgent"
     cmd_stop || true
 
-    # Ask the root helper to restore the pmset baseline before removing it.
-    vigil_power_helper_request release >/dev/null 2>&1 || true
+    # Release any best-effort pmset/caffeinate hold before removing installed files.
+    echo
+    echo "  2. releasing power hold"
+    vigil_pmset_release >/dev/null 2>&1 || true
+    echo "     power hold: released if active"
 
     # Remove plist
+    echo
+    echo "  3. removing user LaunchAgent"
     if [[ -f "$VIGIL_PLIST" ]]; then
         rm -f "$VIGIL_PLIST"
-        echo "  removed $VIGIL_PLIST"
+        echo "     removed: $VIGIL_PLIST"
+    else
+        echo "     already absent: $VIGIL_PLIST"
     fi
 
     # Remove root-owned files — needs sudo.
+    echo
+    echo "  4. removing privileged helper and log rotation"
     if [[ -f "$VIGIL_NEWSYSLOG_FILE" || -f "$VIGIL_LEGACY_SUDOERS_FILE" || -f "$VIGIL_HELPER_PLIST" || -d "$VIGIL_POWER_HELPER_DIR" || -f "$VIGIL_ROOT_HELPER" ]]; then
-        [[ -f "$VIGIL_NEWSYSLOG_FILE" ]] && { echo "  removing $VIGIL_NEWSYSLOG_FILE — sudo prompt"; sudo rm -f "$VIGIL_NEWSYSLOG_FILE"; }
-        [[ -f "$VIGIL_LEGACY_SUDOERS_FILE" ]] && { echo "  removing legacy $VIGIL_LEGACY_SUDOERS_FILE"; sudo rm -f "$VIGIL_LEGACY_SUDOERS_FILE"; }
+        [[ -f "$VIGIL_NEWSYSLOG_FILE" ]] && { echo "     removing newsyslog: $VIGIL_NEWSYSLOG_FILE (sudo may prompt)"; sudo rm -f "$VIGIL_NEWSYSLOG_FILE"; }
+        [[ -f "$VIGIL_LEGACY_SUDOERS_FILE" ]] && { echo "     removing legacy sudoers: $VIGIL_LEGACY_SUDOERS_FILE"; sudo rm -f "$VIGIL_LEGACY_SUDOERS_FILE"; }
         if [[ -f "$VIGIL_HELPER_PLIST" || -d "$VIGIL_POWER_HELPER_DIR" || -f "$VIGIL_ROOT_HELPER" ]]; then
             cmd_remove_root_helper
         fi
+    else
+        echo "     no root-owned Vigil files found"
     fi
 
     # Restore baseline if any (e.g., daemon crashed mid-engagement)
+    echo
+    echo "  5. clearing local state"
     if [[ -f "$VIGIL_BASELINE_FILE" ]]; then
-        echo "  clearing local baseline state"
         rm -f "$VIGIL_BASELINE_FILE"
+        echo "     baseline state: removed"
+    else
+        echo "     baseline state: already clear"
     fi
 
     # Wipe state + installed daemon copy. Keep logs (handy for post-mortem).
     if [[ -d "$VIGIL_INSTALL_DIR" ]]; then
         rm -rf "$VIGIL_INSTALL_DIR"
-        echo "  wiped $VIGIL_INSTALL_DIR"
+        echo "     install dir: removed $VIGIL_INSTALL_DIR"
+    else
+        echo "     install dir: already absent $VIGIL_INSTALL_DIR"
     fi
 
-    echo "vigil: uninstall complete. Logs preserved at $VIGIL_LOG_DIR."
+    echo
+    echo "vigil: uninstall complete"
+    echo "  logs preserved: $VIGIL_LOG_DIR"
 }
 
 cmd_start() {
@@ -563,6 +842,7 @@ cmd_start() {
     launchctl bootstrap "$domain" "$VIGIL_PLIST"
     launchctl enable "$domain/$VIGIL_LABEL" 2>/dev/null || true
     echo "  launchd: bootstrapped $VIGIL_LABEL"
+    cmd_wait_for_daemon_scan "$domain" || true
 }
 
 cmd_stop() {
@@ -582,13 +862,43 @@ cmd_stop() {
             launchctl print "$domain/$VIGIL_LABEL" >/dev/null 2>&1 || break
             sleep 0.1
         done
+        rm -f "$VIGIL_DAEMON_TICK_FILE"
         echo "  launchd: booted out $VIGIL_LABEL"
     else
+        rm -f "$VIGIL_DAEMON_TICK_FILE" 2>/dev/null || true
         echo "  launchd: not loaded"
     fi
 }
 
+cmd_wait_for_daemon_scan() {
+    local domain="$1"
+    local wait_secs="${VIGIL_START_WAIT_SECS:-6}"
+    case "$wait_secs" in ''|*[!0-9]*) wait_secs=6 ;; esac
+    (( wait_secs < 1 )) && return 0
+
+    local max_ticks=$(( wait_secs * 10 ))
+    local i daemon_pid scan_state scan_age scan_text
+    for i in $(seq 1 "$max_ticks"); do
+        daemon_pid="-"
+        [[ -f "$VIGIL_DAEMON_PIDFILE" ]] && daemon_pid=$(cat "$VIGIL_DAEMON_PIDFILE" 2>/dev/null)
+        IFS=$'\t' read -r scan_state scan_age scan_text < <(cmd_daemon_scan_info "yes" "$daemon_pid")
+        if [[ "$scan_state" == "fresh" ]]; then
+            echo "  daemon scan: ready ($scan_text)"
+            return 0
+        fi
+        if ! launchctl print "$domain/$VIGIL_LABEL" >/dev/null 2>&1; then
+            echo "  daemon scan: service not running"
+            return 1
+        fi
+        sleep 0.1
+    done
+
+    echo "  daemon scan: pending (run 'vigil status' for details)"
+    return 0
+}
+
 cmd_status() {
+    local verbose=0
     case "${1:-}" in
         --json)
             shift
@@ -596,12 +906,17 @@ cmd_status() {
             cmd_status_json
             return 0
             ;;
+        --verbose)
+            verbose=1
+            shift
+            ;;
         "")
             ;;
         *)
-            die "usage: vigil status [--json]"
+            die "usage: vigil status [--json|--verbose]"
             ;;
     esac
+    [[ $# -eq 0 ]] || die "usage: vigil status [--json|--verbose]"
 
     local domain="gui/$(id -u)"
     local loaded="no"
@@ -609,6 +924,8 @@ cmd_status() {
 
     local daemon_pid="-"
     [[ -f "$VIGIL_DAEMON_PIDFILE" ]] && daemon_pid=$(cat "$VIGIL_DAEMON_PIDFILE" 2>/dev/null)
+    local scan_state scan_age scan_text
+    IFS=$'\t' read -r scan_state scan_age scan_text < <(cmd_daemon_scan_info "$loaded" "$daemon_pid")
 
     # Per-agent activity, computed once for both the count and the per-row state.
     local claude_active=0;  vigil_agent_is_active claude  && claude_active=1
@@ -618,6 +935,10 @@ cmd_status() {
 
     local active; active=$(vigil_refcount_count "$claude_active" "$codex_active" "$copilot_active" "$vscode_copilot_active")
     local total;  total=$(vigil_refcount_count_total)
+    local pending_active_matches=0
+    if (( active == 0 && (claude_active || codex_active || copilot_active || vscode_copilot_active) )) && [[ "$loaded" == "yes" ]]; then
+        pending_active_matches=$(cmd_live_active_match_count "$claude_active" "$codex_active" "$copilot_active" "$vscode_copilot_active")
+    fi
     local idle_min=$(( (VIGIL_IDLE_AFTER_SEC + 59) / 60 ))
     local sd; sd=$(vigil_read_sleepdisabled)
     local baseline="-"
@@ -625,43 +946,88 @@ cmd_status() {
     local caff="-"
     [[ -f "$VIGIL_CAFFEINATE_PIDFILE" ]] && caff=$(vigil_pmset_caffeinate_pid 2>/dev/null || echo "-")
 
-    printf 'launchd loaded:    %s\n' "$loaded"
-    printf 'daemon pid:        %s\n' "$daemon_pid"
-    printf 'refcount:          %s active / %s total   (idle window %sm)\n' "$active" "$total" "$idle_min"
-    printf 'agents:            claude=%s  codex=%s  copilot=%s  vscode_copilot_chat=%s\n' \
-        "$(vigil_agent_state claude)" "$(vigil_agent_state codex)" "$(vigil_agent_state copilot)" "$(vigil_vscode_copilot_chat_state)"
-    echo 'provider roots:'
-    cmd_provider_roots_text
-    printf 'pmset disablesleep: %s   (baseline=%s)\n' "$sd" "$baseline"
-    printf 'caffeinate pid:    %s\n' "$caff"
-    printf 'thermal:           %s\n' "$(vigil_thermal_summary)"
-    printf 'battery:           %s\n' "$(vigil_battery_summary)"
-    printf 'root helper ok:    %s\n' "$(vigil_power_helper_check && echo yes || echo no)"
-    if (( total > 0 )); then
-        echo
-        echo 'active matches:'
-        vigil_refcount_list "$claude_active" "$codex_active" "$copilot_active" "$vscode_copilot_active" \
-            | awk -F'\t' '{printf "  pid=%-7s name=%-15s age=%-5s %s\n", $1, $2, $3"s", $4}'
+    local helper_status; helper_status=$(cmd_helper_launchd_status)
+    local assertions_out; assertions_out=$(vigil_assertions_summary)
+    local hold_engaged=0
+    if [[ "$sd" == "1" ]] || vigil_pmset_caffeinate_alive; then
+        hold_engaged=1
+    fi
+    local cut_thermal=0 cut_battery=0
+    vigil_thermal_should_cut && cut_thermal=1 || true
+    vigil_battery_should_cut && cut_battery=1 || true
+    local expected_hold=""
+    if (( (active > 0 || pending_active_matches > 0) && hold_engaged == 0 )); then
+        if (( cut_thermal == 1 )); then
+            expected_hold="blocked by thermal cutoff"
+        elif (( cut_battery == 1 )); then
+            expected_hold="blocked by battery floor"
+        elif [[ "$loaded" != "yes" ]]; then
+            expected_hold="pending (LaunchAgent is not loaded)"
+        elif [[ "$scan_state" == "starting" || "$scan_state" == "pending" ]]; then
+            expected_hold="pending (daemon first scan has not completed)"
+        elif [[ "$scan_state" == "stale" || "$scan_state" == "missing" ]]; then
+            expected_hold="pending (daemon scan is unavailable; try 'vigil reload')"
+        elif (( pending_active_matches > 0 )); then
+            expected_hold="pending (live matches are waiting for the next daemon scan)"
+        else
+            expected_hold="pending (daemon/helper transition in progress)"
+        fi
     fi
 
+    echo "vigil status"
     echo
-    echo 'power assertions:'
-    # vigil_assertions_summary emits either:
-    #   - a literal "(none)" or "(parse-failed; raw output:)..." block, OR
-    #   - one or more TSV rows: <pid>\t<process>\t<atype>[\t← vigil]
-    # The first-char `(` is the discriminator. Tab-delimited rows get formatted;
-    # parens-bracketed status passes through unchanged.
-    local assertions_out; assertions_out=$(vigil_assertions_summary)
-    if [[ "$assertions_out" == '('* ]]; then
-        printf '%s\n' "$assertions_out" | sed 's/^/  /'
+    echo "  service"
+    printf '    launchd:      %s\n' "$loaded"
+    printf '    daemon pid:    %s\n' "$daemon_pid"
+    printf '    scan:          %s\n' "$scan_text"
+    printf '    root helper:   %s\n' "$helper_status"
+    echo
+    echo "  activity"
+    printf '    refcount:      %s active / %s total (idle window %sm)\n' "$active" "$total" "$idle_min"
+    printf '    agents:        %s\n' "$(cmd_agent_states_line_from_flags "$claude_active" "$codex_active" "$copilot_active" "$vscode_copilot_active")"
+    if (( pending_active_matches > 0 )); then
+        printf '    pending scan:  %s live match(es) not counted yet\n' "$pending_active_matches"
+    fi
+    if (( total > 0 )); then
+        echo "    tracked matches:"
+        vigil_refcount_list "$claude_active" "$codex_active" "$copilot_active" "$vscode_copilot_active" \
+            | awk -F'\t' '{printf "      pid=%-7s name=%-15s age=%-5s %s\n", $1, $2, $3"s", $4}'
+    fi
+    echo
+    echo "  power"
+    printf '    %s\n' "$(cmd_power_hold_summary_line "$sd" "$baseline" "$caff")"
+    if [[ -n "$expected_hold" ]]; then
+        printf '    expected hold: %s\n' "$expected_hold"
+    fi
+    printf '    thermal:       %s\n' "$(vigil_thermal_summary)"
+    printf '    battery:       %s\n' "$(vigil_battery_summary)"
+    printf '    assertions:    %s\n' "$(cmd_power_assertions_summary_line "$assertions_out")"
+
+    if (( verbose == 1 )); then
+        echo
+        echo '  provider roots:'
+        cmd_provider_roots_text | sed 's/^/    /'
+        echo
+        echo '  power assertions:'
+        # vigil_assertions_summary emits either:
+        #   - a literal "(none)" or "(parse-failed; raw output:)..." block, OR
+        #   - one or more TSV rows: <pid>\t<process>\t<atype>[\t← vigil]
+        # The first-char `(` is the discriminator. Tab-delimited rows get formatted;
+        # parens-bracketed status passes through unchanged.
+        if [[ "$assertions_out" == '('* ]]; then
+            printf '%s\n' "$assertions_out" | sed 's/^/    /'
+        else
+            # LC_ALL=C — see the note in vigil_assertions_summary; we never touch
+            # the assertion-name strings here (just pid/process/atype which are
+            # ASCII-only) but the safety belt costs nothing.
+            printf '%s\n' "$assertions_out" | LC_ALL=C awk -F'\t' '
+                NF == 0 { next }
+                { printf "    pid=%-7s %-28s %-32s %s\n", $1, $2, $3, $4 }
+            '
+        fi
     else
-        # LC_ALL=C — see the note in vigil_assertions_summary; we never touch
-        # the assertion-name strings here (just pid/process/atype which are
-        # ASCII-only) but the safety belt costs nothing.
-        printf '%s\n' "$assertions_out" | LC_ALL=C awk -F'\t' '
-            NF == 0 { next }
-            { printf "  pid=%-7s %-28s %-32s %s\n", $1, $2, $3, $4 }
-        '
+        echo
+        echo "  detail: use 'vigil status --verbose' for provider paths and assertion rows"
     fi
 }
 
@@ -799,11 +1165,20 @@ cmd_lock() {
         return 1
     fi
 
+    vigil_ensure_dirs
+    vigil_refcount_touch_wrapper "$$" "vigil lock"
+    local lock_pidfile="$VIGIL_ACTIVE_DIR/wrapper-$$.pid"
+    # shellcheck disable=SC2064
+    trap "rm -f '$lock_pidfile'" EXIT INT TERM HUP
+    cmd_wait_for_lock_power_hold
+
     echo "  lock combo:  $combo"
     echo "  max seconds: ${max_secs} (0 = no timeout)"
     echo "  helper:      $VIGIL_LOCK_HELPER"
+    echo "  sleep hold:  best effort; display sleep and macOS Lock Screen are allowed"
     echo "  recover:     pkill -TERM vigil-lock-helper"
     echo "  This is a local freeze guard, not the macOS Lock Screen."
+    echo "  If macOS locks first, login input is allowed; the combo is still required after login."
     for delay in 3 2 1; do
         printf '  starting in %ss...\n' "$delay"
         sleep 1
@@ -900,127 +1275,171 @@ cmd_reload() {
 }
 
 cmd_doctor() {
-    case "${1:-}" in
-        --power)
-            shift
-            [[ $# -eq 0 ]] || die "usage: vigil doctor [--power]"
-            cmd_doctor_power
+    local power=0 verbose=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --power) power=1; shift ;;
+            --verbose) verbose=1; shift ;;
+            *) die "usage: vigil doctor [--power] [--verbose]" ;;
+        esac
+    done
+    if (( power == 1 )); then
+        if cmd_doctor_power "$verbose"; then
             return 0
-            ;;
-        "")
-            ;;
-        *)
-            die "usage: vigil doctor [--power]"
-            ;;
-    esac
+        fi
+        return 1
+    fi
 
-    local errs=0
+    local errs=0 warns=0 install_markers=0
     echo "vigil doctor"
     echo
 
-    # 1. arch
+    echo "  platform"
     local arch; arch=$(uname -m)
-    printf '  cpu arch:           %s\n' "$arch"
+    printf '    cpu arch:      %s\n' "$arch"
     if [[ "$arch" == "arm64" ]]; then
-        echo "                      ⚠ Apple Silicon: lid-closed sleep prevention is best-effort."
-        echo "                        See docs/apple-silicon-lid-closed.md."
+        echo "    note:          Apple Silicon closed-lid sleep prevention is best-effort"
+        echo "                   See docs/apple-silicon-lid-closed.md"
     fi
 
-    # 2. caffeinate
+    echo
+    echo "  dependencies"
     if command -v caffeinate >/dev/null 2>&1; then
-        printf '  caffeinate:         ok\n'
+        printf '    caffeinate:    ok\n'
     else
-        printf '  caffeinate:         MISSING (expected /usr/bin/caffeinate)\n'
+        printf '    caffeinate:    missing (expected /usr/bin/caffeinate)\n'
         errs=$((errs+1))
     fi
-
-    # 3. pmset
     if command -v pmset >/dev/null 2>&1; then
-        printf '  pmset:              ok\n'
+        printf '    pmset:         ok\n'
     else
-        printf '  pmset:              MISSING\n'
+        printf '    pmset:         missing\n'
         errs=$((errs+1))
     fi
 
-    # 4. privileged power helper
+    echo
+    echo "  privileged helper"
+    printf '    power mode:    best-effort\n'
     if [[ -x "$VIGIL_ROOT_HELPER" ]]; then
-        printf '  root helper binary: %s\n' "$VIGIL_ROOT_HELPER"
+        printf '    binary:        ok\n'
     else
-        printf '  root helper binary: MISSING — run vigil setup\n'
+        printf '    binary:        missing (run vigil setup)\n'
         errs=$((errs+1))
     fi
     if [[ -f "$VIGIL_HELPER_PLIST" ]]; then
-        printf '  helper plist:       %s\n' "$VIGIL_HELPER_PLIST"
+        printf '    LaunchDaemon:  ok\n'
     else
-        printf '  helper plist:       MISSING — run vigil setup\n'
+        printf '    LaunchDaemon:  missing (run vigil setup)\n'
         errs=$((errs+1))
     fi
     if vigil_power_helper_check; then
-        printf '  root helper IPC:    ok\n'
+        printf '    IPC:           ok\n'
     else
-        printf '  root helper IPC:    FAIL — helper unavailable\n'
+        printf '    IPC:           fail (helper unavailable)\n'
         errs=$((errs+1))
     fi
-
-    # 4b. newsyslog rotation drop-in
     if [[ -f "$VIGIL_NEWSYSLOG_FILE" ]]; then
-        printf '  newsyslog file:     %s\n' "$VIGIL_NEWSYSLOG_FILE"
+        printf '    log rotation:  ok\n'
     else
-        printf '  newsyslog file:     MISSING — run vigil setup\n'
+        printf '    log rotation:  missing (run vigil setup)\n'
         errs=$((errs+1))
     fi
 
-    # 5. plist + installed daemon
+    echo
+    echo "  user agent"
     if [[ -f "$VIGIL_PLIST" ]]; then
-        printf '  plist:              %s\n' "$VIGIL_PLIST"
+        install_markers=$((install_markers+1))
+        printf '    LaunchAgent:   ok\n'
     else
-        printf '  plist:              MISSING — run vigil setup\n'
+        printf '    LaunchAgent:   missing (run vigil setup)\n'
         errs=$((errs+1))
     fi
     if [[ -x "$VIGIL_INSTALL_DIR/bin/vigil-daemon" ]]; then
-        printf '  installed daemon:   %s\n' "$VIGIL_INSTALL_DIR/bin/vigil-daemon"
+        install_markers=$((install_markers+1))
+        printf '    daemon:        ok\n'
     else
-        printf '  installed daemon:   MISSING — run vigil setup\n'
+        printf '    daemon:        missing (run vigil setup)\n'
         errs=$((errs+1))
     fi
     if [[ -x "$VIGIL_INSTALL_DIR/bin/vigil-lock-helper" ]]; then
-        printf '  lock helper: %s\n' "$VIGIL_INSTALL_DIR/bin/vigil-lock-helper"
+        printf '    lock helper:   ok\n'
     else
-        printf '  lock helper: MISSING (run vigil setup/reload if using phase 4)\n'
+        printf '    lock helper:   missing (run vigil setup/reload before using vigil lock)\n'
+        warns=$((warns+1))
     fi
 
     local domain="gui/$(id -u)"
     if launchctl print "$domain/$VIGIL_LABEL" >/dev/null 2>&1; then
-        printf '  launchd:            loaded\n'
+        printf '    launchd:       loaded\n'
     else
-        printf '  launchd:            not loaded\n'
-        # Not a hard error — user may have manually stopped.
+        printf '    launchd:       not loaded (run vigil start if intentionally stopped)\n'
     fi
 
-    # 6. dirs
     if [[ -d "$VIGIL_STATE_DIR" ]]; then
+        install_markers=$((install_markers+1))
         local mode; mode=$(stat -f %Lp "$VIGIL_STATE_DIR" 2>/dev/null)
-        printf '  state dir:          %s (mode %s)\n' "$VIGIL_STATE_DIR" "$mode"
+        printf '    state dir:     ok (mode %s)\n' "$mode"
     else
-        printf '  state dir:          MISSING\n'
+        printf '    state dir:     missing\n'
         errs=$((errs+1))
     fi
     if [[ -d "$VIGIL_LOG_DIR" ]]; then
-        printf '  log dir:            %s\n' "$VIGIL_LOG_DIR"
+        printf '    log dir:       ok\n'
     else
-        printf '  log dir:            MISSING\n'
+        printf '    log dir:       missing\n'
         errs=$((errs+1))
     fi
-    echo
-    echo 'provider roots:'
-    cmd_provider_roots_text
 
     echo
-    if (( errs == 0 )); then
-        echo "all checks passed"
+    echo "  providers"
+    printf '    agents:        %s\n' "$(cmd_agent_states_line)"
+
+    if (( verbose == 1 )); then
+        echo
+        echo "  paths"
+        printf '    root helper:   %s\n' "$VIGIL_ROOT_HELPER"
+        printf '    LaunchDaemon:  %s\n' "$VIGIL_HELPER_PLIST"
+        printf '    newsyslog:     %s\n' "$VIGIL_NEWSYSLOG_FILE"
+        printf '    LaunchAgent:   %s\n' "$VIGIL_PLIST"
+        printf '    install dir:   %s\n' "$VIGIL_INSTALL_DIR"
+        printf '    state dir:     %s\n' "$VIGIL_STATE_DIR"
+        printf '    log dir:       %s\n' "$VIGIL_LOG_DIR"
+
+        echo
+        echo '  provider roots:'
+        cmd_provider_roots_text | sed 's/^/    /'
     else
-        echo "$errs check(s) failed"
-        exit 1
+        echo
+        echo "  detail: use 'vigil doctor --verbose' for install paths and provider roots"
+    fi
+
+    echo
+    local doctor_state="not installed"
+    if (( errs == 0 )); then
+        if (( warns > 0 )); then
+            doctor_state="ready with warnings"
+        else
+            doctor_state="ready"
+        fi
+    elif (( install_markers > 0 )); then
+        doctor_state="needs repair"
+    fi
+    printf 'state:  %s\n' "$doctor_state"
+    if (( errs == 0 )); then
+        if (( warns > 0 )); then
+            echo "result: required checks passed with $warns warning(s)"
+        else
+            echo "result: all checks passed"
+        fi
+        echo "next:   vigil status"
+    elif [[ "$doctor_state" == "not installed" ]]; then
+        echo "result: setup required ($errs required check(s) missing)"
+        echo "next:   vigil setup"
+        return 1
+    else
+        echo "result: $errs required check(s) failed"
+        echo "next:   vigil setup"
+        return 1
     fi
 }
 
@@ -1030,12 +1449,16 @@ vigil — keep Mac awake while AI agents are working
 
 Usage:
   vigil setup        Install root helper + newsyslog entry, create state/log dirs, load LaunchAgent
-  vigil setup --dry-run
-                     Preview install paths and root-owned files without changing the system
+  vigil setup --dry-run [--verbose]
+                     Preview install plan without changing the system
+  vigil setup --verbose
+                     Print generated plist/newsyslog previews during setup
   vigil uninstall    Remove helper + newsyslog entry, plist, restore baseline state, wipe state
   vigil start        Bootstrap the LaunchAgent
   vigil stop         Boot out the LaunchAgent
-  vigil status       Show daemon state, refcount, pmset baseline, thermal, battery, power assertions
+  vigil status       Show service, activity, and power state
+  vigil status --verbose
+                     Include provider paths and raw power assertion rows
   vigil status --json
                      Print machine-readable daemon and power state
   vigil log [-f]     cat / tail -f the daemon log
@@ -1044,8 +1467,9 @@ Usage:
   vigil lock         Freeze input until configured combo, then continue
   vigil lock --help  Show lock mode usage
   vigil lock doctor  Run macOS permission smoke test for the lock helper
-  vigil doctor       Diagnose installation
-  vigil doctor --power
+  vigil doctor [--verbose]
+                     Diagnose installation
+  vigil doctor --power [--verbose]
                      Focused power-path diagnostics and assertion summary
   vigil --version    Print version
   vigil --help       Show this help

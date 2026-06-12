@@ -7,20 +7,22 @@
 
 ## Why
 
-Today vigil engages unconditionally whenever its refcount transitions from 0
-to ≥1: `pmset -a disablesleep 1` plus `caffeinate -di`. The baseline-stickiness
-design (see `docs/architecture.md` → "Why baseline restoration matters")
-correctly handles the *release* side when another tool was already holding
-`SleepDisabled=1` — we restore to the captured value and don't clobber it.
+Today Vigil's hold engages unconditionally whenever its refcount transitions
+from 0 to ≥1: `pmset -a disablesleep 1` plus `caffeinate -i`. The
+baseline-stickiness design (see `docs/architecture.md` → "Why baseline
+restoration matters") correctly handles the `disablesleep` *release* side when
+another tool was already holding `SleepDisabled=1` — we restore to the captured
+value and don't clobber it.
 
 But the *engage* side has no conflict awareness:
 
-- If Amphetamine is already preventing sleep, vigil still spawns a second
-  `caffeinate -di` child for the same effect. Redundant, but harmless.
-- If another `caffeinate -di` is already in flight (e.g. from a user's shell
+- If Amphetamine is already preventing system idle sleep, Vigil still spawns a
+  second `caffeinate -i` child for the same effect. Redundant, but harmless.
+- If another `caffeinate -i` is already in flight (e.g. from a user's shell
   alias), same redundancy.
 - If a system process — `powerd`, `bluetoothd`, `sharingd`, `loginwindow` — is
-  holding the equivalent IOKit assertion, vigil's caffeinate adds nothing.
+  holding the equivalent system-idle IOKit assertion, Vigil's caffeinate adds
+  nothing.
 
 Phase 1 added `vigil_assertions_summary` (parses `pmset -g assertions`,
 tags vigil's own caffeinate with `← vigil`). That parser is the building
@@ -34,10 +36,9 @@ Two complementary behaviors:
 
 1. **Engage-time skip.** On the 0 → ≥1 refcount transition:
    - Run `vigil_assertions_summary`.
-   - If any non-vigil holder asserts `PreventUserIdleSystemSleep` AND
-     `PreventUserIdleDisplaySleep` (i.e. equivalent to our `caffeinate -di`
-     bundle), record the holders in `state/conflict.json` and skip the
-     caffeinate spawn for this engage cycle.
+   - If any non-Vigil holder asserts `PreventUserIdleSystemSleep` (i.e.
+     equivalent to default `caffeinate -i`), record the holders in
+     `state/conflict.json` and skip the caffeinate spawn for this engage cycle.
    - Still flip `pmset -a disablesleep 1` ourselves — that's a separate lever
      from IOKit caffeinate assertions and not all tools touch both.
 2. **Release-time deferral.** On the ≥1 → 0 refcount transition:
@@ -55,10 +56,10 @@ Two complementary behaviors:
 ## Open questions
 
 - **Equivalence rule.** Which assertion combinations count as "covers what our
-  caffeinate would have provided"? `PreventUserIdleSystemSleep` alone? Both
-  System + Display? Should we also consider `PreventSystemSleep` (which only
-  works on AC) as an equivalent? Answer probably depends on whether the
-  refcounted agent is doing CPU work, display-active work, or background work.
+  caffeinate would have provided"? `PreventUserIdleSystemSleep` is the default
+  match. Should we also consider `PreventSystemSleep` (which only works on AC)
+  as an equivalent? Answer probably depends on whether the refcounted agent is
+  doing CPU work or background/network work.
 - **Detection cost.** `pmset -g assertions` spawns an external binary and
   parses unstable output. Running it every tick (5s) adds 12 spawns/min just
   for conflict awareness. Acceptable, but worth measuring.
@@ -67,7 +68,7 @@ Two complementary behaviors:
   caffeinate. Mitigation: detect missing-but-expected caffeinate at tick
   boundaries and spawn one then. Or accept the race as benign (next tick
   catches it; max one tick of missing prevention).
-- **External tool semantics.** Amphetamine and `caffeinate -di` users likely
+- **External tool semantics.** Amphetamine and `caffeinate -i` users likely
   don't expect another tool to piggyback. If vigil skips its caffeinate, the
   user closes Amphetamine, vigil now has refcount ≥1 but no caffeinate —
   detection must catch this. (See "Race window" above.)

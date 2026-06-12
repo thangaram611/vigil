@@ -51,6 +51,7 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 echo $$ > "$LOCK_DIR/pid"
 echo $$ > "$VIGIL_DAEMON_PIDFILE"
+rm -f "$VIGIL_DAEMON_TICK_FILE"
 
 # ---- pre-flight: root helper wired up? ---------------------------------------
 if ! vigil_power_helper_check; then
@@ -59,8 +60,25 @@ if ! vigil_power_helper_check; then
 fi
 
 # ---- transition state --------------------------------------------------------
-DAEMON_ENGAGED=0           # 1 iff vigil currently holds disablesleep=1 + caffeinate
+DAEMON_ENGAGED=0           # 1 iff vigil currently holds the configured power assertion
 COOLDOWN_UNTIL=0           # epoch ts; while now < COOLDOWN_UNTIL, refuse to engage
+
+daemon_write_tick() {
+    local now="$1" count="$2" desired="$3" engaged="$4" cut_thermal="$5" cut_battery="$6" cooling="$7"
+    local tmp="$VIGIL_DAEMON_TICK_FILE.$$"
+    {
+        printf 'pid=%s\n' "$$"
+        printf 'updated_at=%s\n' "$now"
+        printf 'tick_secs=%s\n' "$VIGIL_TICK_SECS"
+        printf 'refcount_active=%s\n' "$count"
+        printf 'desired_hold=%s\n' "$desired"
+        printf 'engaged=%s\n' "$engaged"
+        printf 'thermal_cut=%s\n' "$cut_thermal"
+        printf 'battery_cut=%s\n' "$cut_battery"
+        printf 'cooling=%s\n' "$cooling"
+    } > "$tmp"
+    mv "$tmp" "$VIGIL_DAEMON_TICK_FILE"
+}
 
 # ---- cleanup on exit ---------------------------------------------------------
 cleanup_and_exit() {
@@ -68,7 +86,7 @@ cleanup_and_exit() {
     if (( DAEMON_ENGAGED == 1 )); then
         vigil_pmset_release || true
     fi
-    rm -f "$VIGIL_DAEMON_PIDFILE"
+    rm -f "$VIGIL_DAEMON_PIDFILE" "$VIGIL_DAEMON_TICK_FILE"
     rm -rf "$LOCK_DIR"
     exit 0
 }
@@ -166,6 +184,8 @@ while true; do
             DAEMON_ENGAGED=0
         fi
     fi
+
+    daemon_write_tick "$now" "$count" "$desired" "$DAEMON_ENGAGED" "$cut_thermal" "$cut_battery" "$cooling"
 
     sleep "$VIGIL_TICK_SECS"
 done

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# lib/pmset.sh — capture/restore baseline SleepDisabled, plus enable/disable transitions.
+# lib/pmset.sh — sleep-prevention transitions.
 #
-# Why baseline state matters: if Amphetamine or anything else already had
-# disablesleep=1 when vigil engages, we must not clobber it back to 0 on release.
-# We snapshot the prior value at first acquire and restore exactly that on last release.
+# Vigil's macOS hold is intentionally unified:
+#   - pmset disablesleep=1 for best-effort system/lid sleep prevention
+#   - caffeinate -i for user-idle system sleep
+#   - no display assertion, so native lock and display sleep remain undisturbed
 
 # shellcheck source=common.sh
 source "${VIGIL_LIB_DIR:-$(dirname "${BASH_SOURCE[0]}")}/common.sh"
@@ -39,6 +40,10 @@ vigil_pmset_baseline_value() {
     printf '0\n'
 }
 
+vigil_pmset_active_mode() {
+    printf 'best-effort\n'
+}
+
 vigil_pmset_clear_baseline() {
     rm -f "$VIGIL_BASELINE_FILE"
 }
@@ -60,17 +65,31 @@ vigil_pmset_caffeinate_alive() {
     [[ -n "$cmd" ]] || return 1
     exe="${cmd%% *}"
     base="${exe##*/}"
-    [[ "$base" == "caffeinate" ]]
+    [[ "$base" == "caffeinate" ]] || return 1
+    # Older Vigil used `caffeinate -di`, which held a display assertion. Treat
+    # any display-holding caffeinate as stale so the next reconcile replaces it.
+    [[ ! "$cmd" =~ (^|[[:space:]])-[A-Za-z]*d[A-Za-z]*($|[[:space:]]) ]]
 }
 
 vigil_pmset_spawn_caffeinate() {
     if vigil_pmset_caffeinate_alive; then
         return 0
     fi
+    local old_pid="" old_cmd="" old_exe="" old_base=""
+    old_pid=$(vigil_pmset_caffeinate_pid 2>/dev/null || true)
+    if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+        old_cmd=$(ps -p "$old_pid" -o command= 2>/dev/null | sed 's/^ *//' || true)
+        old_exe="${old_cmd%% *}"
+        old_base="${old_exe##*/}"
+        if [[ "$old_base" == "caffeinate" ]]; then
+            kill "$old_pid" 2>/dev/null || true
+            log INFO "replaced stale/display-holding caffeinate pid=$old_pid"
+        fi
+    fi
     rm -f "$VIGIL_CAFFEINATE_PIDFILE"
-    caffeinate -di &
+    caffeinate -i &
     echo $! > "$VIGIL_CAFFEINATE_PIDFILE"
-    log INFO "spawned caffeinate -di pid=$(cat "$VIGIL_CAFFEINATE_PIDFILE")"
+    log INFO "spawned caffeinate -i pid=$(cat "$VIGIL_CAFFEINATE_PIDFILE")"
 }
 
 # Reassert the live engaged state after drift. This is used while already
@@ -93,7 +112,11 @@ vigil_pmset_reconcile_engaged() {
 # Returns 0 when the caller should treat the daemon as engaged, 1 otherwise.
 vigil_pmset_recover_startup() {
     local active_count="$1" can_hold="${2:-1}"
-    [[ -f "$VIGIL_BASELINE_FILE" ]] || return 1
+    [[ -f "$VIGIL_BASELINE_FILE" || -f "$VIGIL_CAFFEINATE_PIDFILE" ]] || return 1
+    if [[ ! -f "$VIGIL_BASELINE_FILE" && -f "$VIGIL_CAFFEINATE_PIDFILE" ]]; then
+        log WARN "caffeinate pidfile present without baseline — recapturing baseline"
+        vigil_pmset_capture_baseline
+    fi
     if (( active_count > 0 && can_hold == 1 )); then
         log WARN "baseline.json present at startup and active refs remain — recovering engaged state"
         vigil_pmset_reconcile_engaged || return 1
@@ -104,7 +127,8 @@ vigil_pmset_recover_startup() {
     return 1
 }
 
-# 0 → >0 transition. Captures baseline, sets disablesleep=1, spawns caffeinate -di.
+# 0 → >0 transition. Captures baseline, sets SleepDisabled=1, and spawns
+# caffeinate -i without holding the display awake.
 vigil_pmset_engage() {
     vigil_pmset_capture_baseline
     if ! vigil_power_engage; then
@@ -114,7 +138,8 @@ vigil_pmset_engage() {
     vigil_pmset_spawn_caffeinate
 }
 
-# >0 → 0 transition. Restores baseline value, kills caffeinate child.
+# >0 → 0 transition. Restores baseline SleepDisabled, then kills the
+# caffeinate child.
 vigil_pmset_release() {
     local target; target=$(vigil_pmset_baseline_value)
     if ! vigil_power_release; then
@@ -123,7 +148,7 @@ vigil_pmset_release() {
     fi
     if [[ -f "$VIGIL_CAFFEINATE_PIDFILE" ]]; then
         local cpid; cpid=$(vigil_pmset_caffeinate_pid 2>/dev/null || true)
-        if [[ -n "$cpid" ]] && vigil_pmset_caffeinate_alive; then
+        if [[ -n "$cpid" ]] && kill -0 "$cpid" 2>/dev/null; then
             kill "$cpid" 2>/dev/null || true
             log INFO "killed caffeinate pid=$cpid"
         fi
@@ -140,9 +165,17 @@ vigil_pmset_soft_release() {
     vigil_power_release || log WARN "soft release failed — pmset rejected disablesleep=$target"
     if [[ -f "$VIGIL_CAFFEINATE_PIDFILE" ]]; then
         local cpid; cpid=$(vigil_pmset_caffeinate_pid 2>/dev/null || true)
-        [[ -n "$cpid" ]] && vigil_pmset_caffeinate_alive && kill "$cpid" 2>/dev/null || true
+        [[ -n "$cpid" ]] && kill -0 "$cpid" 2>/dev/null && kill "$cpid" 2>/dev/null || true
         rm -f "$VIGIL_CAFFEINATE_PIDFILE"
     fi
+}
+
+vigil_pmset_hold_engaged() {
+    vigil_pmset_caffeinate_alive && return 0
+    if [[ -f "$VIGIL_BASELINE_FILE" ]]; then
+        [[ "$(vigil_read_sleepdisabled)" == "1" ]] && return 0
+    fi
+    return 1
 }
 
 # ---- power assertions summary -------------------------------------------------

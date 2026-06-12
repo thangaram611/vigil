@@ -6,9 +6,9 @@ use crate::combo::{self, RequiredFlags};
 use crate::{EXIT_INVALID_ARGS, EXIT_OK, EXIT_TAP_FAIL, EXIT_WATCHDOG_FAIL};
 use core_foundation::base::TCFType;
 use core_foundation::boolean::CFBoolean;
-use core_foundation::dictionary::CFDictionary;
+use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
 use core_foundation::mach_port::CFMachPortRef;
-use core_foundation::runloop::{kCFRunLoopCommonModes, CFRunLoop};
+use core_foundation::runloop::{kCFRunLoopCommonModes, kCFRunLoopDefaultMode, CFRunLoop};
 use core_foundation::string::{CFString, CFStringRef};
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
@@ -18,6 +18,7 @@ use libc::{c_int, c_void};
 
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
+    fn CGSessionCopyCurrentDictionary() -> CFDictionaryRef;
     fn CGPreflightListenEventAccess() -> bool;
     fn CGRequestListenEventAccess() -> bool;
     fn CGPreflightPostEventAccess() -> bool;
@@ -131,6 +132,28 @@ fn install_signal_handlers() {
     }
 }
 
+fn event_tap_source_mode() -> CFStringRef {
+    unsafe { kCFRunLoopCommonModes }
+}
+
+fn event_tap_run_mode() -> CFStringRef {
+    unsafe { kCFRunLoopDefaultMode }
+}
+
+fn session_screen_is_locked() -> bool {
+    let session = unsafe { CGSessionCopyCurrentDictionary() };
+    if session.is_null() {
+        return false;
+    }
+
+    let dict: CFDictionary<CFString, CFBoolean> =
+        unsafe { TCFType::wrap_under_create_rule(session) };
+    let key = CFString::from_static_string("CGSSessionScreenIsLocked");
+    dict.find(&key)
+        .map(|locked| locked.clone() == CFBoolean::true_value())
+        .unwrap_or(false)
+}
+
 fn create_doctor_tap() -> bool {
     let callback =
         |_proxy: CGEventTapProxy, event_type: CGEventType, _event: &CGEvent| match event_type {
@@ -158,20 +181,16 @@ fn create_doctor_tap() -> bool {
     };
 
     let run_loop = CFRunLoop::get_current();
-    run_loop.add_source(&loop_source, unsafe { kCFRunLoopCommonModes });
+    run_loop.add_source(&loop_source, event_tap_source_mode());
     unsafe {
         CGEventTapEnable(tap.mach_port().as_concrete_TypeRef(), true);
     }
-    CFRunLoop::run_in_mode(
-        unsafe { kCFRunLoopCommonModes },
-        Duration::from_millis(40),
-        false,
-    );
+    CFRunLoop::run_in_mode(event_tap_run_mode(), Duration::from_millis(40), false);
     let enabled = unsafe { CGEventTapIsEnabled(tap.mach_port().as_concrete_TypeRef()) };
     unsafe {
         CGEventTapEnable(tap.mach_port().as_concrete_TypeRef(), false);
     }
-    run_loop.remove_source(&loop_source, unsafe { kCFRunLoopCommonModes });
+    run_loop.remove_source(&loop_source, event_tap_source_mode());
     enabled
 }
 
@@ -204,6 +223,10 @@ fn callback_for_freeze(
         let debug_sleep_ms = DEBUG_SLEEP_MS.load(Ordering::SeqCst);
         if debug_sleep_ms > 0 {
             std::thread::sleep(Duration::from_millis(debug_sleep_ms as u64));
+        }
+
+        if session_screen_is_locked() {
+            return CallbackResult::Keep;
         }
 
         match event_type {
@@ -295,14 +318,14 @@ pub fn freeze(combo: &str, max_secs: u64, debug_sleep_ms: Option<u64>) -> Result
         .map_err(|_| EXIT_TAP_FAIL)?;
 
     let run_loop = CFRunLoop::get_current();
-    run_loop.add_source(&loop_source, unsafe { kCFRunLoopCommonModes });
+    run_loop.add_source(&loop_source, event_tap_source_mode());
     unsafe {
         CGEventTapEnable(tap.mach_port().as_concrete_TypeRef(), true);
     }
 
     let result = loop {
         let _ = CFRunLoop::run_in_mode(
-            unsafe { kCFRunLoopCommonModes },
+            event_tap_run_mode(),
             Duration::from_millis(LOOP_TICK_MS),
             false,
         );
@@ -338,7 +361,7 @@ pub fn freeze(combo: &str, max_secs: u64, debug_sleep_ms: Option<u64>) -> Result
     unsafe {
         CGEventTapEnable(tap.mach_port().as_concrete_TypeRef(), false);
     }
-    run_loop.remove_source(&loop_source, unsafe { kCFRunLoopCommonModes });
+    run_loop.remove_source(&loop_source, event_tap_source_mode());
     result
 }
 
@@ -367,5 +390,10 @@ mod tests {
         assert!(is_supported_event_type(CGEventType::LeftMouseDragged));
         assert!(is_supported_event_type(CGEventType::ScrollWheel));
         assert!(!is_supported_event_type(CGEventType::Null));
+    }
+
+    #[test]
+    fn run_loop_uses_specific_mode_not_common_modes_sentinel() {
+        assert_ne!(event_tap_run_mode(), event_tap_source_mode());
     }
 }

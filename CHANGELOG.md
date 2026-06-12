@@ -10,6 +10,14 @@
 - Phase 1 hardening (non-roadmap): newsyslog.d log rotation, `power assertions:` block in `vigil status`, plist `ExitTimeOut`/`ThrottleInterval`, baseline-stickiness docs, fixed `VIGIL_LOG_FILE` init-order so `vigil.conf` overrides of `VIGIL_LOG_DIR` are honored.
 - Privilege hardening (non-roadmap): replaced repeated runtime `sudo -n /usr/bin/pmset ...` with a once-installed root LaunchDaemon helper. The user LaunchAgent now requests `engage`, `release`, or `status`; the helper validates request files and runs only fixed `/usr/bin/pmset -a disablesleep 0|1` argv. `vigil setup` still prompts for installation, and uninstall removes legacy `/etc/sudoers.d/vigil` if present.
 - Test/admin hardening (non-roadmap): `./tests/run.sh` blocks accidental `sudo`, setup/uninstall refuse test mode before admin work, privileged install paths are fixed to the standard root-owned layout, plist rendering escapes XML values, and helper IPC now validates hard links, root-owned directories, and root-owned response files.
+- CLI UX polish (non-roadmap): `setup`, `uninstall`, `status`, and `doctor` now default to concise, grouped output with explicit steps or next actions. Raw plist/newsyslog previews, provider roots, and detailed assertion rows moved to `--verbose` views.
+- Status settling UX (non-roadmap): the daemon writes a per-scan snapshot, `start`/`reload` wait briefly for the first scan, and `vigil status` now explains pending first-scan / pending-hold states instead of briefly showing active work with no context.
+- Doctor exit-code contract (non-roadmap): `vigil doctor` and `vigil doctor --power` return `0` only when required readiness checks pass and `1` when setup or repair is needed. Human output now distinguishes `state: not installed` from `state: needs repair`.
+- Power policy change (non-roadmap): runtime hold remains best-effort
+  closed-lid/system-sleep prevention (`pmset disablesleep=1`) but no longer
+  holds a display-awake assertion. Vigil now pairs `pmset disablesleep` with
+  `caffeinate -i`, so macOS can lock naturally and displays can sleep while
+  agent CPU/network/process execution continues.
 
 ### Phase 4 (lock feature)
 
@@ -27,6 +35,12 @@
   - `VIGIL_LOCK_MAX_SECS`
   - `VIGIL_LOCK_HELPER`
 - Documented recovery and TCC guidance; lock remains a local freeze guard (not the OS lock screen).
+- Fixed the helper run loop to run in `kCFRunLoopDefaultMode` while scheduling
+  the tap source in common modes, avoiding CoreFoundation's invalid
+  `kCFRunLoopCommonModes` execution-mode warning.
+- `vigil lock` now runs its helper under `caffeinate -i`, allows display sleep
+  and native macOS Lock Screen activation, and passes events through while
+  macOS reports the screen is locked so the OS login flow remains usable.
 
 ### Phase 2 (audited — no code change needed)
 
