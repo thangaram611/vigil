@@ -52,9 +52,9 @@ fi
 echo $$ > "$LOCK_DIR/pid"
 echo $$ > "$VIGIL_DAEMON_PIDFILE"
 
-# ---- pre-flight: sudoers wired up? -------------------------------------------
-if ! sudo_n_pmset_check; then
-    log ERROR "non-interactive sudo for /usr/bin/pmset is not configured — run 'vigil setup' or 'vigil doctor'"
+# ---- pre-flight: root helper wired up? ---------------------------------------
+if ! vigil_power_helper_check; then
+    log ERROR "root helper is not available — run 'vigil setup' or 'vigil doctor'"
     exit 1
 fi
 

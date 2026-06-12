@@ -80,7 +80,7 @@ vigil_pmset_reconcile_engaged() {
     local sd; sd=$(vigil_read_sleepdisabled)
     if [[ "$sd" != "1" ]]; then
         log WARN "SleepDisabled drifted to $sd while engaged — reasserting"
-        sudo_n_pmset_disablesleep 1 || return 1
+        vigil_power_engage || return 1
     fi
     if ! vigil_pmset_caffeinate_alive; then
         log WARN "caffeinate assertion missing while engaged — restarting"
@@ -107,7 +107,7 @@ vigil_pmset_recover_startup() {
 # 0 → >0 transition. Captures baseline, sets disablesleep=1, spawns caffeinate -di.
 vigil_pmset_engage() {
     vigil_pmset_capture_baseline
-    if ! sudo_n_pmset_disablesleep 1; then
+    if ! vigil_power_engage; then
         log ERROR "engage failed — pmset rejected disablesleep=1"
         return 1
     fi
@@ -117,7 +117,7 @@ vigil_pmset_engage() {
 # >0 → 0 transition. Restores baseline value, kills caffeinate child.
 vigil_pmset_release() {
     local target; target=$(vigil_pmset_baseline_value)
-    if ! sudo_n_pmset_disablesleep "$target"; then
+    if ! vigil_power_release; then
         log ERROR "release failed — pmset rejected disablesleep=$target"
         # Don't return early — still try to clean up caffeinate child.
     fi
@@ -137,7 +137,7 @@ vigil_pmset_release() {
 # the original state.
 vigil_pmset_soft_release() {
     local target; target=$(vigil_pmset_baseline_value)
-    sudo_n_pmset_disablesleep "$target" || true
+    vigil_power_release || log WARN "soft release failed — pmset rejected disablesleep=$target"
     if [[ -f "$VIGIL_CAFFEINATE_PIDFILE" ]]; then
         local cpid; cpid=$(vigil_pmset_caffeinate_pid 2>/dev/null || true)
         [[ -n "$cpid" ]] && vigil_pmset_caffeinate_alive && kill "$cpid" 2>/dev/null || true

@@ -17,8 +17,17 @@
    │  ├─ thermal: pmset -g therm                            │
    │  ├─ battery: pmset -g ps                               │
    │  ├─ on first acquire: snapshot baseline SleepDisabled  │
-   │  ├─ enable: sudo -n pmset disablesleep 1+caffeinate -di│
+   │  ├─ helper engage: pmset disablesleep 1+caffeinate -di │
    │  └─ on full release: restore baseline + kill caffeinate│
+   └────────────────────────────────────────────────────────┘
+                               │
+                    engage/release/status request files
+                               ▼
+   ┌────────────────────────────────────────────────────────┐
+   │ root LaunchDaemon: com.thangaram.vigil.helper          │
+   │  ├─ validates request file type, owner, mode, content   │
+   │  ├─ accepts only: engage / release / status             │
+   │  └─ runs fixed /usr/bin/pmset -a disablesleep 0|1 argv  │
    └────────────────────────────────────────────────────────┘
                                ▲
               writes PID files │
@@ -41,16 +50,26 @@ Two signals, one source of truth (the daemon's refcount):
 
 The daemon counts files in `state/active/`. Transition rules:
 
-- **0 → >0**: Snapshot the current `SleepDisabled` value into `state/baseline.json`. Run `sudo -n pmset -a disablesleep 1`. Spawn `caffeinate -di &` and store its PID.
+- **0 → >0**: Snapshot the current `SleepDisabled` value into `state/baseline.json`. Submit an `engage` request to the root helper, which captures its own root-owned baseline if needed and runs `/usr/bin/pmset -a disablesleep 1`. Spawn `caffeinate -di &` and store its PID.
 - **>0 steady state**: Verify every tick that `SleepDisabled=1` and the recorded
   `caffeinate` child is still alive. If either drifted, reassert immediately.
-- **>0 → 0**: Read `state/baseline.json`, run `sudo -n pmset -a disablesleep <baseline>`, kill the caffeinate child, delete `baseline.json`.
+- **>0 → 0**: Submit a `release` request to the root helper, which restores its captured baseline with `/usr/bin/pmset -a disablesleep <baseline>` while marked engaged. Idle release requests are no-ops, so a stale retained helper baseline cannot clobber a later third-party sleep setting. Kill the caffeinate child and delete the user-visible `baseline.json`.
 
 Stale PID files are GC'd when (a) the PID is dead, (b) the on-disk start_ts doesn't match the live PID's start time (PID reuse), or (c) the file is older than 30s and the PID's CPU is below 0.5%.
 
-## Why `sudo -n` everywhere
+## Why a root helper instead of runtime sudo
 
-The daemon runs under `launchd` with no controlling tty. A plain `sudo` call would block waiting for password input and either hang the daemon or — worse — silently fail. All `pmset` calls go through a `sudo_n_pmset()` helper that uses `sudo -n` and aborts loudly if non-interactive sudo isn't available.
+The daemon runs under user-domain `launchd` with no controlling tty. Runtime `sudo` either needs a brittle `NOPASSWD` rule or risks blocking with no password prompt. Vigil now installs one root LaunchDaemon helper during `vigil setup`; normal runtime does not execute `sudo`.
+
+The helper boundary is intentionally narrow:
+
+- request actions are only `engage`, `release`, and `status`;
+- the helper rejects symlinks, non-regular files, unexpected owners, group/other-writable request files, unknown actions, and extra request content;
+- the helper runs only fixed `/usr/bin/pmset -a disablesleep 1` and `/usr/bin/pmset -a disablesleep 0|1` argv;
+- the helper tracks active engagement separately from the retained baseline, so each fresh engage re-captures current system state and idle releases do not run `pmset`;
+- setup/uninstall may still prompt for admin access to install, bootstrap, bootout, or remove root-owned files.
+
+This reduces noisy repeated sudo execution but increases responsibility: Vigil owns a persistent privileged component, so the request queue is treated as a real privilege boundary.
 
 ## Why baseline restoration matters
 
@@ -62,7 +81,7 @@ If `SleepDisabled=1` is the value vigil captures on its first engage — because
 
 To reset the baseline back to `0`-state — i.e., to make vigil release all the way to sleep-enabled on the next quiet window — do one of:
 
-- While vigil is **idle** (refcount = 0, no `baseline.json` on disk): `sudo /usr/bin/pmset -a disablesleep 0`. The next vigil engage will then capture `0`, and the next release will go back to `0`.
+- While vigil is **idle** (refcount = 0, no `baseline.json` on disk): release the other sleep-prevention tool, or intentionally reset `SleepDisabled` as an admin outside Vigil. The next vigil engage will then capture `0`, and the next release will go back to `0`.
 - `vigil uninstall && vigil setup` — uninstall restores baseline and clears state; setup starts fresh.
 
 If another tool (Amphetamine, an open `caffeinate -di` shell, etc.) is the *reason* `SleepDisabled=1` keeps coming back, vigil cannot fix that — the other tool will re-assert. Quit the other tool first.

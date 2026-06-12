@@ -70,12 +70,12 @@ path and root-owned file without changing the system.
 
 `vigil setup` does four things, each prompting only what's strictly needed:
 
-1. Writes `/etc/sudoers.d/vigil` (validated with `visudo -c` first) — exact-argv `NOPASSWD` only for `pmset -a disablesleep 0` and `pmset -a disablesleep 1`.
+1. Installs a root LaunchDaemon helper at `/Library/LaunchDaemons/com.thangaram.vigil.helper.plist`. The helper owns the privileged `pmset -a disablesleep 0|1` transitions and accepts only `engage`, `release`, and `status` requests through its filesystem queue.
 2. Writes `/etc/newsyslog.d/vigil.conf` — rotates `~/Library/Logs/vigil/daemon.log` at 1 MiB, keeps 5 gzipped generations. Standard macOS log-rotation pattern, evaluated hourly by `com.apple.newsyslog`.
 3. Creates `~/Library/Application Support/vigil/state/` (mode 0700) and `~/Library/Logs/vigil/`.
 4. Installs and bootstraps `~/Library/LaunchAgents/com.thangaram.vigil.plist`.
 
-Inspect the sudoers and newsyslog entries yourself before approving — `etc/vigil.sudoers.in` and `etc/vigil.newsyslog.in` are the templates.
+Inspect the LaunchDaemon and newsyslog entries yourself before approving — `etc/com.thangaram.vigil.helper.plist.in` and `etc/vigil.newsyslog.in` are the templates.
 
 ## Usage
 
@@ -89,7 +89,7 @@ vigil lock doctor        # verify helper permissions + tap smoke test
 vigil lock doctor --prompt  # request missing prompts
 vigil doctor            # diagnose install
 vigil doctor --power    # focused pmset/caffeinate/assertion diagnostics
-vigil uninstall         # remove sudoers + newsyslog, plist, restore baseline state
+vigil uninstall         # remove helper + newsyslog, plist, restore baseline state
 ```
 
 `vigil status` includes a `power assertions:` block — a parsed view of `pmset -g assertions` that marks our own caffeinate child with `← vigil` so you can tell at a glance whether vigil or some other tool is the reason your Mac isn't sleeping.
@@ -103,8 +103,9 @@ To wrap your existing `claudex` alias, edit `~/.zshrc`:
 
 ## Safety
 
-- Sudoers rule is **exact-argv**: `pmset -a disablesleep 0` and `pmset -a disablesleep 1` only. Nothing else.
-- Daemon never invokes plain `sudo`; always `sudo -n` and aborts loudly if non-interactive sudo isn't wired up.
+- Normal runtime does not execute `sudo`. The user LaunchAgent requests `engage`, `release`, or `status` from the installed root helper.
+- The root helper has a narrow command surface and runs only fixed `/usr/bin/pmset -a disablesleep 0|1` argv. Request files are validated for action, type, owner, and permissions before the helper acts.
+- Tradeoff: this removes repeated runtime sudo, but Vigil now owns a persistent privileged component. Treat the helper boundary as a real privilege boundary.
 - Thermal and battery cut-offs are conservative by default. Override only via the `VIGIL_FORCE=1` env var on a single invocation.
 
 ## Acknowledgements

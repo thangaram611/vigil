@@ -14,7 +14,7 @@ extern IOReturn IOPMSetSystemPowerSetting(CFStringRef key, CFTypeRef value);
 extern const CFStringRef kIOPMSleepDisabledKey;  // == CFSTR("SleepDisabled")
 ```
 
-`pmset disablesleep` and Fermata's "disable lid-close sleep" feature **end up at the same kernel call with the same key**. There is no hidden private API that does more. The reason Fermata uses an SMJobBless privileged helper and vigil uses a `sudoers.d` rule is purely UX (avoiding password prompts) — not capability.
+`pmset disablesleep` and Fermata's "disable lid-close sleep" feature **end up at the same kernel call with the same key**. There is no hidden private API that does more. The reason Fermata uses an SMJobBless privileged helper and vigil uses a LaunchDaemon root helper is privilege-boundary UX — not capability.
 
 ## Why "lid closed" is fundamentally limited on Apple Silicon
 

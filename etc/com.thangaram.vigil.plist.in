@@ -21,9 +21,8 @@
 
     <!-- ExitTimeOut: seconds launchd waits between SIGTERM and SIGKILL on stop.
          Default is system-defined (~20s on recent macOS) which is tight for our
-         cleanup path: sudo pmset disablesleep, kill caffeinate, drop baseline,
-         release lock. 60s gives the SIGTERM handler comfortable headroom under
-         thermal load when sudo can stall briefly. -->
+         cleanup path: helper release, kill caffeinate, drop baseline, release
+         lock. 60s gives the SIGTERM handler comfortable headroom under load. -->
     <key>ExitTimeOut</key>
     <integer>60</integer>
 

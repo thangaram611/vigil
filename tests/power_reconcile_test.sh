@@ -17,19 +17,6 @@ _setup_fake_power_env() {
     printf '0\n' > "$VIGIL_FAKE_SLEEP_FILE"
     : > "$VIGIL_FAKE_EVENTS"
 
-    cat > "$root/bin/sudo" <<'FAKE_SUDO'
-#!/usr/bin/env bash
-printf 'sudo %s\n' "$*" >> "$VIGIL_FAKE_EVENTS"
-if [[ "$1" == "-n" && "$2" == "-l" ]]; then
-    exit 0
-fi
-if [[ "$1" == "-n" && "$2" == "/usr/bin/pmset" && "$3" == "-a" && "$4" == "disablesleep" ]]; then
-    printf '%s\n' "$5" > "$VIGIL_FAKE_SLEEP_FILE"
-    exit 0
-fi
-exit 1
-FAKE_SUDO
-
     cat > "$root/bin/pmset" <<'FAKE_PMSET'
 #!/usr/bin/env bash
 case "$1 ${2:-}" in
@@ -58,13 +45,34 @@ trap 'exit 0' TERM INT
 while true; do sleep 60 & wait $!; done
 FAKE_CAFFEINATE
 
-    chmod +x "$root/bin/sudo" "$root/bin/pmset" "$root/bin/caffeinate"
+    chmod +x "$root/bin/pmset" "$root/bin/caffeinate"
     export PATH="$root/bin:$PATH"
 
     # shellcheck source=../lib/common.sh
     source "$VIGIL_LIB_DIR/common.sh"
     # shellcheck source=../lib/pmset.sh
     source "$VIGIL_LIB_DIR/pmset.sh"
+    vigil_power_helper_request() {
+        local action="$1"
+        printf 'helper %s\n' "$action" >> "$VIGIL_FAKE_EVENTS"
+        case "$action" in
+            engage)
+                printf '1\n' > "$VIGIL_FAKE_SLEEP_FILE"
+                printf 'status=ok\naction=engage\nbaseline=0\ncurrent=1\nmessage=ok\n'
+                ;;
+            release)
+                printf '%s\n' "$(vigil_pmset_baseline_value)" > "$VIGIL_FAKE_SLEEP_FILE"
+                printf 'status=ok\naction=release\nbaseline=none\ncurrent=%s\nmessage=ok\n' "$(cat "$VIGIL_FAKE_SLEEP_FILE")"
+                ;;
+            status)
+                printf 'status=ok\naction=status\nbaseline=none\ncurrent=%s\nmessage=ok\n' "$(cat "$VIGIL_FAKE_SLEEP_FILE")"
+                ;;
+            *)
+                printf 'status=error\naction=%s\nbaseline=none\ncurrent=%s\nmessage=bad_action\n' "$action" "$(cat "$VIGIL_FAKE_SLEEP_FILE")"
+                return 1
+                ;;
+        esac
+    }
     vigil_load_config
     vigil_ensure_dirs
 }
@@ -95,6 +103,21 @@ test_engage_and_release_restore_baseline() {
     _cleanup_fake_power_env
 }
 
+test_release_uses_helper_release_when_baseline_is_one() {
+    _setup_fake_power_env
+
+    printf '1\n' > "$VIGIL_FAKE_SLEEP_FILE"
+    vigil_pmset_engage
+    assert_eq "$(vigil_pmset_baseline_value)" "1" "baseline captures pre-existing SleepDisabled=1"
+
+    vigil_pmset_release
+    assert_eq "$(cat "$VIGIL_FAKE_SLEEP_FILE")" "1" "release restores SleepDisabled=1 baseline"
+    assert_contains "$(cat "$VIGIL_FAKE_EVENTS")" "helper release" "release requests helper release"
+    assert_file_absent "$VIGIL_BASELINE_FILE" "release clears baseline when baseline is 1"
+
+    _cleanup_fake_power_env
+}
+
 test_reconcile_reasserts_sleepdisabled_drift() {
     _setup_fake_power_env
 
@@ -102,7 +125,7 @@ test_reconcile_reasserts_sleepdisabled_drift() {
     printf '0\n' > "$VIGIL_FAKE_SLEEP_FILE"
     vigil_pmset_reconcile_engaged
     assert_eq "$(cat "$VIGIL_FAKE_SLEEP_FILE")" "1" "reconcile restores SleepDisabled=1"
-    assert_contains "$(cat "$VIGIL_FAKE_EVENTS")" "pmset -a disablesleep 1" "reconcile ran pmset"
+    assert_contains "$(cat "$VIGIL_FAKE_EVENTS")" "helper engage" "reconcile requested helper engage"
 
     vigil_pmset_release
     _cleanup_fake_power_env

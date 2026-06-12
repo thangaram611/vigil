@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# lib/common.sh — paths, logging, sudo wrapper. Sourced by every other lib + bin.
+# lib/common.sh — paths, logging, root-helper IPC. Sourced by every other lib + bin.
 #
 # Conventions:
 #   - All paths derived from XDG-ish defaults but honor VIGIL_* overrides for testing.
 #   - log() writes structured lines to the daemon log AND stderr if interactive.
-#   - sudo_n_pmset() is the ONLY way the rest of the codebase calls pmset with sudo.
+#   - vigil_power_helper_request() is the ONLY runtime path for privileged pmset changes.
 
 set -euo pipefail
 
@@ -34,6 +34,18 @@ VIGIL_CAFFEINATE_PIDFILE="$VIGIL_STATE_DIR/caffeinate.pid"
 VIGIL_DAEMON_PIDFILE="$VIGIL_STATE_DIR/daemon.pid"
 VIGIL_LOCK_FILE="$VIGIL_STATE_DIR/state.lock"
 VIGIL_VSCODE_COPILOT_STATE_FILE="$VIGIL_STATE_DIR/vscode-copilot-chat.state"
+VIGIL_ROOT_DIR="${VIGIL_ROOT_DIR:-/Library/Application Support/vigil}"
+VIGIL_ROOT_BIN_DIR="${VIGIL_ROOT_BIN_DIR:-$VIGIL_ROOT_DIR/bin}"
+VIGIL_ROOT_HELPER="${VIGIL_ROOT_HELPER:-$VIGIL_ROOT_BIN_DIR/vigil-root-helper}"
+VIGIL_POWER_HELPER_DIR="${VIGIL_POWER_HELPER_DIR:-$VIGIL_ROOT_DIR/helper}"
+VIGIL_POWER_REQUEST_BASE="${VIGIL_POWER_REQUEST_BASE:-$VIGIL_POWER_HELPER_DIR/requests}"
+VIGIL_POWER_RESPONSE_BASE="${VIGIL_POWER_RESPONSE_BASE:-$VIGIL_POWER_HELPER_DIR/responses}"
+VIGIL_POWER_REQUEST_DIR="${VIGIL_POWER_REQUEST_DIR:-$VIGIL_POWER_REQUEST_BASE/$(id -u)}"
+VIGIL_POWER_RESPONSE_DIR="${VIGIL_POWER_RESPONSE_DIR:-$VIGIL_POWER_RESPONSE_BASE/$(id -u)}"
+VIGIL_POWER_STATE_DIR="${VIGIL_POWER_STATE_DIR:-$VIGIL_POWER_HELPER_DIR/state}"
+VIGIL_POWER_LOG_DIR="${VIGIL_POWER_LOG_DIR:-$VIGIL_POWER_HELPER_DIR/logs}"
+VIGIL_POWER_LOG_FILE="${VIGIL_POWER_LOG_FILE:-$VIGIL_POWER_LOG_DIR/helper.log}"
+VIGIL_POWER_HELPER_TIMEOUT_SECS="${VIGIL_POWER_HELPER_TIMEOUT_SECS:-10}"
 # System-managed log-rotation drop-in. Owned by root, installed by `vigil setup`,
 # removed by `vigil uninstall`. NOT user-overridable — newsyslog only reads
 # /etc/newsyslog.d/.
@@ -103,37 +115,76 @@ die() {
     exit 1
 }
 
-# ---- sudo discipline --------------------------------------------------------
+# ---- privileged power helper ------------------------------------------------
 
-# Verify non-interactive sudo for the EXACT whitelisted pmset commands works.
-# Returns 0 if usable, 1 otherwise. Never invokes plain `sudo` — that would
-# prompt and (under launchd) hang.
-#
-# `sudo -n -l <cmd> [args...]` doesn't run the command — it tells us whether
-# the command is allowed for this user. Output is the canonical command path
-# on success, empty + non-zero on denial / no NOPASSWD. We test BOTH whitelist
-# entries so a partial sudoers truncation doesn't silently look healthy.
-sudo_n_pmset_check() {
-    sudo -n -l /usr/bin/pmset -a disablesleep 0 >/dev/null 2>&1 || return 1
-    sudo -n -l /usr/bin/pmset -a disablesleep 1 >/dev/null 2>&1 || return 1
-    return 0
+vigil_power_response_field() {
+    local field="$1" response="$2"
+    printf '%s\n' "$response" | awk -F= -v k="$field" '$1 == k { sub(/^[^=]*=/, ""); print; exit }'
 }
 
-# Run `sudo -n /usr/bin/pmset -a disablesleep <0|1>`. Logs failure loudly.
-# Returns whatever pmset returns; 1 if non-interactive sudo isn't available.
-sudo_n_pmset_disablesleep() {
+vigil_power_helper_request() {
+    local action="$1"
+    case "$action" in engage|release|status) ;; *) log ERROR "invalid power helper action: $action"; return 2 ;; esac
+    if [[ ! -d "$VIGIL_POWER_REQUEST_DIR" || ! -d "$VIGIL_POWER_RESPONSE_DIR" ]]; then
+        log ERROR "root helper IPC dirs missing — run 'vigil setup' or 'vigil doctor'"
+        return 1
+    fi
+
+    local id req_tmp req_file resp_file response status waited max_ticks
+    id="$(id -u).$$.$(date +%s).$RANDOM$RANDOM"
+    req_tmp="$VIGIL_POWER_REQUEST_DIR/.req.$id"
+    req_file="$VIGIL_POWER_REQUEST_DIR/req.$id"
+    resp_file="$VIGIL_POWER_RESPONSE_DIR/resp.$id"
+
+    (
+        umask 077
+        printf '%s\n' "$action" > "$req_tmp"
+    ) || return 1
+    chmod 0600 "$req_tmp" 2>/dev/null || true
+    mv "$req_tmp" "$req_file"
+
+    waited=0
+    max_ticks=$(( VIGIL_POWER_HELPER_TIMEOUT_SECS * 10 ))
+    while (( waited < max_ticks )); do
+        if [[ -f "$resp_file" ]]; then
+            response=$(cat "$resp_file" 2>/dev/null || true)
+            status=$(vigil_power_response_field status "$response")
+            if [[ "$status" == "ok" ]]; then
+                printf '%s\n' "$response"
+                return 0
+            fi
+            log ERROR "root helper action=$action failed: $(vigil_power_response_field message "$response")"
+            printf '%s\n' "$response"
+            return 1
+        fi
+        sleep 0.1
+        waited=$(( waited + 1 ))
+    done
+
+    rm -f "$req_file" "$req_tmp" 2>/dev/null || true
+    log ERROR "root helper action=$action timed out after ${VIGIL_POWER_HELPER_TIMEOUT_SECS}s"
+    return 1
+}
+
+vigil_power_helper_check() {
+    vigil_power_helper_request status >/dev/null 2>&1
+}
+
+vigil_power_engage() {
+    vigil_power_helper_request engage >/dev/null
+}
+
+vigil_power_release() {
+    vigil_power_helper_request release >/dev/null
+}
+
+vigil_power_set_disablesleep() {
     local val="$1"
-    case "$val" in 0|1) ;; *) log ERROR "invalid disablesleep value: $val"; return 2 ;; esac
-    if ! sudo_n_pmset_check; then
-        log ERROR "sudo -n /usr/bin/pmset failed — sudoers.d not configured. Run 'vigil setup' or 'vigil doctor'."
-        return 1
-    fi
-    if ! sudo -n /usr/bin/pmset -a disablesleep "$val" 2>>"$VIGIL_LOG_FILE"; then
-        log ERROR "sudo -n /usr/bin/pmset -a disablesleep $val failed"
-        return 1
-    fi
-    log INFO "pmset -a disablesleep $val"
-    return 0
+    case "$val" in
+        1) vigil_power_engage ;;
+        0) vigil_power_release ;;
+        *) log ERROR "invalid disablesleep value: $val"; return 2 ;;
+    esac
 }
 
 # ---- config file ------------------------------------------------------------

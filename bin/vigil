@@ -41,8 +41,10 @@ vigil_load_config
 
 # ---- constants ---------------------------------------------------------------
 VIGIL_LABEL="com.thangaram.vigil"
+VIGIL_HELPER_LABEL="com.thangaram.vigil.helper"
 VIGIL_PLIST="$HOME/Library/LaunchAgents/${VIGIL_LABEL}.plist"
-VIGIL_SUDOERS_FILE="/etc/sudoers.d/vigil"
+VIGIL_HELPER_PLIST="/Library/LaunchDaemons/${VIGIL_HELPER_LABEL}.plist"
+VIGIL_LEGACY_SUDOERS_FILE="/etc/sudoers.d/vigil"
 VIGIL_VERSION="0.1.0-dev"
 
 # ---- helpers -----------------------------------------------------------------
@@ -80,10 +82,21 @@ cmd_sync_install() {
     fi
 }
 
-cmd_render_sudoers() {
-    local in="$VIGIL_REPO_ROOT/etc/vigil.sudoers.in"
-    local user; user=$(id -un)
-    sed -e "s|@USER@|$user|g" "$in"
+cmd_render_helper_plist() {
+    local in="$VIGIL_REPO_ROOT/etc/com.thangaram.vigil.helper.plist.in"
+    local user uid
+    user=$(id -un)
+    uid=$(id -u)
+    sed \
+        -e "s|@VIGIL_ROOT_HELPER@|$VIGIL_ROOT_HELPER|g" \
+        -e "s|@VIGIL_POWER_REQUEST_DIR@|$VIGIL_POWER_REQUEST_DIR|g" \
+        -e "s|@VIGIL_POWER_RESPONSE_DIR@|$VIGIL_POWER_RESPONSE_DIR|g" \
+        -e "s|@VIGIL_POWER_STATE_DIR@|$VIGIL_POWER_STATE_DIR|g" \
+        -e "s|@VIGIL_POWER_LOG_DIR@|$VIGIL_POWER_LOG_DIR|g" \
+        -e "s|@VIGIL_POWER_LOG_FILE@|$VIGIL_POWER_LOG_FILE|g" \
+        -e "s|@VIGIL_ALLOWED_UID@|$uid|g" \
+        -e "s|@VIGIL_ALLOWED_USER@|$user|g" \
+        "$in"
 }
 
 cmd_render_newsyslog() {
@@ -97,6 +110,48 @@ cmd_render_newsyslog() {
         -e "s|@VIGIL_LOG_FILE@|$VIGIL_LOG_FILE|g" \
         -e "s|@VIGIL_USER@|$user|g" \
         "$in"
+}
+
+cmd_install_root_helper() {
+    local user group tmp_plist
+    user=$(id -un)
+    group=$(id -gn)
+    tmp_plist=$(mktemp -t vigil-helper-plist)
+    cmd_render_helper_plist > "$tmp_plist"
+    chmod 0644 "$tmp_plist"
+
+    echo "  installing root helper and LaunchDaemon — sudo prompt"
+    sudo install -d -m 0755 -o root -g wheel "$VIGIL_ROOT_DIR"
+    sudo install -d -m 0755 -o root -g wheel "$VIGIL_ROOT_BIN_DIR"
+    sudo install -d -m 0755 -o root -g wheel "$VIGIL_POWER_HELPER_DIR"
+    sudo install -d -m 0755 -o root -g wheel "$VIGIL_POWER_REQUEST_BASE"
+    sudo install -d -m 0755 -o root -g wheel "$VIGIL_POWER_RESPONSE_BASE"
+    sudo install -d -m 0700 -o root -g wheel "$VIGIL_POWER_STATE_DIR"
+    sudo install -d -m 0755 -o root -g wheel "$VIGIL_POWER_LOG_DIR"
+    sudo install -d -m 0700 -o "$user" -g "$group" "$VIGIL_POWER_REQUEST_DIR"
+    sudo install -d -m 0755 -o root -g wheel "$VIGIL_POWER_RESPONSE_DIR"
+    sudo install -m 0755 -o root -g wheel "$VIGIL_REPO_ROOT/bin/vigil-root-helper" "$VIGIL_ROOT_HELPER"
+    sudo install -m 0644 -o root -g wheel "$tmp_plist" "$VIGIL_HELPER_PLIST"
+    rm -f "$tmp_plist"
+
+    sudo launchctl bootout "system/$VIGIL_HELPER_LABEL" >/dev/null 2>&1 || true
+    sudo launchctl bootstrap system "$VIGIL_HELPER_PLIST"
+    sudo launchctl enable "system/$VIGIL_HELPER_LABEL" 2>/dev/null || true
+    echo "  helper launchd: bootstrapped $VIGIL_HELPER_LABEL"
+}
+
+cmd_remove_root_helper() {
+    echo "  removing root helper and LaunchDaemon — sudo prompt"
+    sudo launchctl bootout "system/$VIGIL_HELPER_LABEL" >/dev/null 2>&1 || true
+    [[ -f "$VIGIL_HELPER_PLIST" ]] && sudo rm -f "$VIGIL_HELPER_PLIST"
+    [[ -d "$VIGIL_POWER_HELPER_DIR" ]] && sudo rm -rf "$VIGIL_POWER_HELPER_DIR"
+    [[ -f "$VIGIL_ROOT_HELPER" ]] && sudo rm -f "$VIGIL_ROOT_HELPER"
+    if [[ -d "$VIGIL_ROOT_BIN_DIR" ]]; then
+        sudo rmdir "$VIGIL_ROOT_BIN_DIR" >/dev/null 2>&1 || true
+    fi
+    if [[ -d "$VIGIL_ROOT_DIR" ]]; then
+        sudo rmdir "$VIGIL_ROOT_DIR" >/dev/null 2>&1 || true
+    fi
 }
 
 cmd_lock_json_field() {
@@ -178,22 +233,11 @@ cmd_setup_dry_run() {
     echo "  log dir:          $VIGIL_LOG_DIR"
     echo "  install dir:      $VIGIL_INSTALL_DIR"
     echo "  plist target:     $VIGIL_PLIST"
-    echo "  sudoers target:   $VIGIL_SUDOERS_FILE"
+    echo "  helper plist:     $VIGIL_HELPER_PLIST"
+    echo "  helper binary:    $VIGIL_ROOT_HELPER"
+    echo "  helper requests:  $VIGIL_POWER_REQUEST_DIR"
+    echo "  helper responses: $VIGIL_POWER_RESPONSE_DIR"
     echo "  newsyslog target: $VIGIL_NEWSYSLOG_FILE"
-
-    local tmp_sudoers; tmp_sudoers=$(mktemp -t vigil-sudoers)
-    cmd_render_sudoers > "$tmp_sudoers"
-    chmod 0440 "$tmp_sudoers"
-    echo
-    echo "  sudoers (preview):"
-    sed 's/^/    /' "$tmp_sudoers"
-    if visudo -c -f "$tmp_sudoers" >/dev/null; then
-        echo "  sudoers validation: ok"
-    else
-        rm -f "$tmp_sudoers"
-        die "generated sudoers file failed visudo -c"
-    fi
-    rm -f "$tmp_sudoers"
 
     echo
     echo "  newsyslog (preview):"
@@ -202,6 +246,10 @@ cmd_setup_dry_run() {
     echo
     echo "  LaunchAgent plist (preview):"
     cmd_render_plist | sed 's/^/    /'
+
+    echo
+    echo "  LaunchDaemon helper plist (preview):"
+    cmd_render_helper_plist | sed 's/^/    /'
 
     echo
     echo "vigil: dry run complete. No files were installed and launchd was not changed."
@@ -234,8 +282,8 @@ cmd_status_json() {
         [[ "$caff" =~ ^[0-9]+$ ]] && caff_json="$caff"
         vigil_pmset_caffeinate_alive && caff_alive=true
     fi
-    local sudo_ok=false
-    sudo_n_pmset_check && sudo_ok=true
+    local power_helper_ok=false
+    vigil_power_helper_check && power_helper_ok=true
 
     local assertions_out; assertions_out=$(vigil_assertions_summary)
     local assertions_state="ok" assertions_json="" sep=""
@@ -269,7 +317,7 @@ cmd_status_json() {
     printf '  "caffeinate_alive": %s,\n' "$caff_alive"
     printf '  "thermal": "%s",\n' "$(vigil_json_escape "$(vigil_thermal_summary)")"
     printf '  "battery": "%s",\n' "$(vigil_json_escape "$(vigil_battery_summary)")"
-    printf '  "sudoers_ok": %s,\n' "$sudo_ok"
+    printf '  "power_helper_ok": %s,\n' "$power_helper_ok"
     printf '  "power_assertions_state": "%s",\n' "$assertions_state"
     printf '  "power_assertions": [%s]\n' "$assertions_json"
     printf '}\n'
@@ -293,7 +341,7 @@ cmd_doctor_power() {
     [[ -f "$VIGIL_CAFFEINATE_PIDFILE" ]] && caff=$(vigil_pmset_caffeinate_pid 2>/dev/null || echo "-")
     printf '  caffeinate pid:     %s\n' "$caff"
     printf '  caffeinate alive:   %s\n' "$(vigil_pmset_caffeinate_alive && echo yes || echo no)"
-    printf '  sudo -n pmset:      %s\n' "$(sudo_n_pmset_check && echo ok || echo FAIL)"
+    printf '  root helper:        %s\n' "$(vigil_power_helper_check && echo ok || echo FAIL)"
     printf '  thermal:            %s\n' "$(vigil_thermal_summary)"
     printf '  battery:            %s\n' "$(vigil_battery_summary)"
     echo
@@ -339,26 +387,18 @@ cmd_setup() {
     # 0. Sync daemon + libs into the install dir (must not be ~/Documents/).
     cmd_sync_install
 
-    # 1. sudoers.d entry — render to a temp file, validate with visudo -c, sudo install
-    local tmp_sudoers; tmp_sudoers=$(mktemp -t vigil-sudoers)
-    cmd_render_sudoers > "$tmp_sudoers"
-    chmod 0440 "$tmp_sudoers"
-    if ! visudo -c -f "$tmp_sudoers" >/dev/null; then
-        rm -f "$tmp_sudoers"
-        die "generated sudoers file failed visudo -c"
-    fi
-    echo "  sudoers (preview):"
-    sed 's/^/    /' "$tmp_sudoers"
+    # 1. Privileged helper LaunchDaemon. Runtime pmset transitions go through
+    # this helper instead of repeated sudo from the user daemon.
+    echo "  helper plist (preview):"
+    cmd_render_helper_plist | sed 's/^/    /'
     echo
-    echo "  installing $VIGIL_SUDOERS_FILE — this prompts for your password ONCE"
-    sudo install -m 0440 -o root -g wheel "$tmp_sudoers" "$VIGIL_SUDOERS_FILE"
-    rm -f "$tmp_sudoers"
-    if ! sudo_n_pmset_check; then
-        die "after sudoers install, sudo -n /usr/bin/pmset still fails — refusing to continue"
+    cmd_install_root_helper
+    if [[ -f "$VIGIL_LEGACY_SUDOERS_FILE" ]]; then
+        echo "  removing legacy sudoers file: $VIGIL_LEGACY_SUDOERS_FILE"
+        sudo rm -f "$VIGIL_LEGACY_SUDOERS_FILE"
     fi
-    echo "  sudoers ok: $VIGIL_SUDOERS_FILE"
 
-    # 2. newsyslog.d entry — same sudo session as sudoers if the cached
+    # 2. newsyslog.d entry — same sudo session as helper install if the cached
     # credential is still valid; otherwise prompts a second time.
     local tmp_newsyslog; tmp_newsyslog=$(mktemp -t vigil-newsyslog)
     cmd_render_newsyslog > "$tmp_newsyslog"
@@ -389,24 +429,27 @@ cmd_uninstall() {
     # Stop the daemon if it's running so it can release its hold cleanly.
     cmd_stop || true
 
+    # Ask the root helper to restore the pmset baseline before removing it.
+    vigil_power_helper_request release >/dev/null 2>&1 || true
+
     # Remove plist
     if [[ -f "$VIGIL_PLIST" ]]; then
         rm -f "$VIGIL_PLIST"
         echo "  removed $VIGIL_PLIST"
     fi
 
-    # Remove sudoers + newsyslog entries — needs sudo
-    if [[ -f "$VIGIL_SUDOERS_FILE" || -f "$VIGIL_NEWSYSLOG_FILE" ]]; then
-        echo "  removing root-owned files (sudoers + newsyslog) — sudo prompt"
-        [[ -f "$VIGIL_SUDOERS_FILE"   ]] && sudo rm -f "$VIGIL_SUDOERS_FILE"
-        [[ -f "$VIGIL_NEWSYSLOG_FILE" ]] && sudo rm -f "$VIGIL_NEWSYSLOG_FILE"
+    # Remove root-owned files — needs sudo.
+    if [[ -f "$VIGIL_NEWSYSLOG_FILE" || -f "$VIGIL_LEGACY_SUDOERS_FILE" || -f "$VIGIL_HELPER_PLIST" || -d "$VIGIL_POWER_HELPER_DIR" || -f "$VIGIL_ROOT_HELPER" ]]; then
+        [[ -f "$VIGIL_NEWSYSLOG_FILE" ]] && { echo "  removing $VIGIL_NEWSYSLOG_FILE — sudo prompt"; sudo rm -f "$VIGIL_NEWSYSLOG_FILE"; }
+        [[ -f "$VIGIL_LEGACY_SUDOERS_FILE" ]] && { echo "  removing legacy $VIGIL_LEGACY_SUDOERS_FILE"; sudo rm -f "$VIGIL_LEGACY_SUDOERS_FILE"; }
+        if [[ -f "$VIGIL_HELPER_PLIST" || -d "$VIGIL_POWER_HELPER_DIR" || -f "$VIGIL_ROOT_HELPER" ]]; then
+            cmd_remove_root_helper
+        fi
     fi
 
     # Restore baseline if any (e.g., daemon crashed mid-engagement)
     if [[ -f "$VIGIL_BASELINE_FILE" ]]; then
-        local target; target=$(vigil_pmset_baseline_value)
-        echo "  baseline restore: pmset -a disablesleep=$target (requires sudo)"
-        sudo /usr/bin/pmset -a disablesleep "$target" || true
+        echo "  clearing local baseline state"
         rm -f "$VIGIL_BASELINE_FILE"
     fi
 
@@ -504,7 +547,7 @@ cmd_status() {
     printf 'caffeinate pid:    %s\n' "$caff"
     printf 'thermal:           %s\n' "$(vigil_thermal_summary)"
     printf 'battery:           %s\n' "$(vigil_battery_summary)"
-    printf 'sudoers ok:        %s\n' "$(sudo_n_pmset_check && echo yes || echo no)"
+    printf 'root helper ok:    %s\n' "$(vigil_power_helper_check && echo yes || echo no)"
     if (( total > 0 )); then
         echo
         echo 'active matches:'
@@ -810,17 +853,23 @@ cmd_doctor() {
         errs=$((errs+1))
     fi
 
-    # 4. sudoers
-    if [[ -f "$VIGIL_SUDOERS_FILE" ]]; then
-        printf '  sudoers file:       %s\n' "$VIGIL_SUDOERS_FILE"
+    # 4. privileged power helper
+    if [[ -x "$VIGIL_ROOT_HELPER" ]]; then
+        printf '  root helper binary: %s\n' "$VIGIL_ROOT_HELPER"
     else
-        printf '  sudoers file:       MISSING — run vigil setup\n'
+        printf '  root helper binary: MISSING — run vigil setup\n'
         errs=$((errs+1))
     fi
-    if sudo_n_pmset_check; then
-        printf '  sudo -n pmset:      ok\n'
+    if [[ -f "$VIGIL_HELPER_PLIST" ]]; then
+        printf '  helper plist:       %s\n' "$VIGIL_HELPER_PLIST"
     else
-        printf '  sudo -n pmset:      FAIL — non-interactive sudo not configured\n'
+        printf '  helper plist:       MISSING — run vigil setup\n'
+        errs=$((errs+1))
+    fi
+    if vigil_power_helper_check; then
+        printf '  root helper IPC:    ok\n'
+    else
+        printf '  root helper IPC:    FAIL — helper unavailable\n'
         errs=$((errs+1))
     fi
 
@@ -891,10 +940,10 @@ cmd_help() {
 vigil — keep Mac awake while AI agents are working
 
 Usage:
-  vigil setup        Install sudoers + newsyslog entries, create state/log dirs, load LaunchAgent
+  vigil setup        Install root helper + newsyslog entry, create state/log dirs, load LaunchAgent
   vigil setup --dry-run
                      Preview install paths and root-owned files without changing the system
-  vigil uninstall    Remove sudoers + newsyslog entries, plist, restore baseline state, wipe state
+  vigil uninstall    Remove helper + newsyslog entry, plist, restore baseline state, wipe state
   vigil start        Bootstrap the LaunchAgent
   vigil stop         Boot out the LaunchAgent
   vigil status       Show daemon state, refcount, pmset baseline, thermal, battery, power assertions

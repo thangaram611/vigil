@@ -8,6 +8,7 @@
 
 - Initial scaffold + roadmap.
 - Phase 1 hardening (non-roadmap): newsyslog.d log rotation, `power assertions:` block in `vigil status`, plist `ExitTimeOut`/`ThrottleInterval`, baseline-stickiness docs, fixed `VIGIL_LOG_FILE` init-order so `vigil.conf` overrides of `VIGIL_LOG_DIR` are honored.
+- Privilege hardening (non-roadmap): replaced repeated runtime `sudo -n /usr/bin/pmset ...` with a once-installed root LaunchDaemon helper. The user LaunchAgent now requests `engage`, `release`, or `status`; the helper validates request files and runs only fixed `/usr/bin/pmset -a disablesleep 0|1` argv. `vigil setup` still prompts for installation, and uninstall removes legacy `/etc/sudoers.d/vigil` if present.
 
 ### Phase 4 (lock feature)
 

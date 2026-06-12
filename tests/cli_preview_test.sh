@@ -19,14 +19,6 @@ _setup_cli_fake_env() {
     : > "$VIGIL_CODEX_HOME/sessions/2026/06/12/rollout-2026-06-12T00-00-00-test.jsonl"
     printf '1\n' > "$VIGIL_FAKE_SLEEP_FILE"
 
-    cat > "$root/bin/sudo" <<'FAKE_SUDO'
-#!/usr/bin/env bash
-if [[ "$1" == "-n" && "$2" == "-l" ]]; then
-    exit 0
-fi
-exit 1
-FAKE_SUDO
-
     cat > "$root/bin/pmset" <<'FAKE_PMSET'
 #!/usr/bin/env bash
 case "$1 ${2:-}" in
@@ -58,7 +50,7 @@ FAKE_LAUNCHCTL
 exit 0
 FAKE_VISUDO
 
-    chmod +x "$root/bin/sudo" "$root/bin/pmset" "$root/bin/launchctl" "$root/bin/visudo"
+    chmod +x "$root/bin/pmset" "$root/bin/launchctl" "$root/bin/visudo"
     export PATH="$root/bin:$PATH"
 }
 
@@ -68,7 +60,7 @@ test_status_json_reports_machine_readable_power_state() {
     local out; out=$("$VIGIL_REPO_ROOT/bin/vigil" status --json)
     assert_contains "$out" '"launchd_loaded": false' "launchd false in fake env"
     assert_contains "$out" '"pmset_disablesleep": 1' "SleepDisabled surfaced"
-    assert_contains "$out" '"sudoers_ok": true' "sudoers check surfaced"
+    assert_contains "$out" '"power_helper_ok": false' "helper check surfaced"
     assert_contains "$out" '"provider_roots": {' "provider roots surfaced"
     assert_contains "$out" "\"home\":\"$VIGIL_CODEX_HOME\"" "codex provider home surfaced"
     assert_contains "$out" '"exists":true' "existing provider session dir surfaced"
@@ -101,7 +93,8 @@ test_setup_dry_run_previews_privileged_files_without_installing() {
 
     local out; out=$("$VIGIL_REPO_ROOT/bin/vigil" setup --dry-run)
     assert_contains "$out" "setup dry run" "dry-run header"
-    assert_contains "$out" "NOPASSWD: /usr/bin/pmset -a disablesleep 0" "sudoers preview"
+    assert_contains "$out" "LaunchDaemon helper plist (preview)" "helper plist preview"
+    assert_not_contains "$out" "NOPASSWD:" "dry-run no longer previews sudoers"
     assert_contains "$out" "LaunchAgent plist (preview)" "plist preview"
     assert_contains "$out" "No files were installed" "no-change footer"
     assert_file_absent "$HOME/Library/LaunchAgents/com.thangaram.vigil.plist" "dry-run must not write plist"

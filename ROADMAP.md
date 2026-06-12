@@ -4,7 +4,7 @@ Phases ship locally, in order. **No version tag, no GitHub release, no Homebrew 
 
 | Phase | Scope | Status |
 | --- | --- | --- |
-| **1. CLI + wrapper** | Detect `claude`, `codex`, `copilot` CLIs. `vigil run <cmd>` wrapper. Bash daemon, sudoers.d, LaunchAgent, refcount, thermal/battery guards, baseline-state restore. | **in progress** |
+| **1. CLI + wrapper** | Detect `claude`, `codex`, `copilot` CLIs. `vigil run <cmd>` wrapper. Bash daemon, root LaunchDaemon helper for pmset transitions, LaunchAgent, refcount, thermal/battery guards, baseline-state restore. | **in progress** |
 | **2. copilot-companion integration** | End-to-end re-evaluation of the companion daemon. Session-aware via mtime on `~/.claude/copilot-companion/threads/*.json`. | **audited — no code change needed** ([closeout](./future/phase-2-copilot-companion.md)) |
 | **3. Desktop app detection** | Session-aware Codex.app + Claude.app LAM + VS Code OpenAI ChatGPT extension agent mode. VS Code + GitHub Copilot Chat deferred to phase 3.1. | **shipped — closeout** ([`future/phase-3-desktop-apps.md`](./future/phase-3-desktop-apps.md)) |
 | **3.1. VS Code + GitHub Copilot Chat detection** | In-process JavaScript chat: VS Code/Insiders host-process anchor plus semantic hash changes in `workspaceStorage/*/chatEditingSessions/*/state.json`. Raw mtime was rejected because VS Code rewrites the file while idle. Copilot CLI sessions are already covered by the `copilot` process + `${COPILOT_HOME:-~/.copilot}/session-state` probe. | **shipped — closeout** ([`future/phase-3.1-vscode-copilot-chat.md`](./future/phase-3.1-vscode-copilot-chat.md)) |
