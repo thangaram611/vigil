@@ -376,12 +376,13 @@ would help; per-hash workspace traversal is the cost).
 
 ## 7. Out of scope / follow-ups
 
-- **Phase 3.1 — VS Code + GitHub Copilot Chat detection.** See §5.4.
+- **Phase 3.1 — VS Code + GitHub Copilot Chat detection.** Tracked in
+  [`future/phase-3.1-vscode-copilot-chat.md`](./phase-3.1-vscode-copilot-chat.md).
   Needs a scoped activity probe under
   `~/Library/Application Support/Code{,- Insiders}/User/workspaceStorage/*/chatEditingSessions/`
-  and `…/workspaceStorage/*/GitHub.copilot-chat/debug-logs/`, plus
-  empirical validation that those paths are quiet outside an active
-  chat and stable across extension versions.
+  and `…/workspaceStorage/*/GitHub.copilot-chat/debug-logs/`, gated by a
+  VS Code host-process check. Do not rely on extension install paths because
+  Copilot Chat is now documented as built into VS Code.
 - Standalone Copilot.app (`github/app`) tech preview. Becomes its own audit
   cycle when the user installs and chooses to enable it.
 - Cursor, Windsurf, opencode. The harness in §3 is reusable; the per-app

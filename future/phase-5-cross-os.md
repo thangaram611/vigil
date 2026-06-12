@@ -8,11 +8,13 @@ Full **Rust** rewrite of the daemon and helpers, supporting Linux and Windows al
 
 ## Direction
 
-Per-platform sleep prevention (mirrors `keepawake-rs` architecture):
+Per-platform sleep prevention (mirrors `keepawake-rs` architecture; current
+reference version from the 2026-06 research pass is `keepawake 0.6.0`, which
+uses `objc2-io-kit`, `zbus`, and the `windows` crate):
 
-- **macOS**: IOKit `IOPMAssertionCreateWithName` for idle/display assertions. `IOPMSetSystemPowerSetting(kIOPMSleepDisabledKey, true)` for closed-lid (same lever as phase 1's `pmset disablesleep`).
-- **Linux**: D-Bus to `org.freedesktop.login1.Manager.Inhibit` (`sleep:idle:shutdown` + `block` mode) for sleep prevention. `org.freedesktop.ScreenSaver.Lock` for the lock feature.
-- **Windows**: `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)` for sleep prevention. `LockWorkStation()` for lock. **Note: `ES_AWAYMODE_REQUIRED` doesn't work on Windows with modern standby; document this caveat.**
+- **macOS**: IOKit `IOPMAssertionCreateWithName` for idle/display assertions. `IOPMSetSystemPowerSetting(kIOPMSleepDisabledKey, true)` for closed-lid (same lever as phase 1's `pmset disablesleep`). `keepawake-rs` covers the assertion half, not the closed-lid `SleepDisabled` lever, so Vigil still needs a macOS-specific branch.
+- **Linux**: D-Bus to `org.freedesktop.login1.Manager.Inhibit` for `idle:sleep` in `block` mode. Do **not** request `shutdown` by default; systemd 257 strengthened regular `block` inhibitors, and Vigil should not block shutdown unless the user explicitly opts into that behavior. Keep the returned FD alive for the whole hold. `org.freedesktop.ScreenSaver.Lock` remains the likely lock path.
+- **Windows**: `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED)` for sleep prevention. `LockWorkStation()` for lock. **Note:** this cannot prevent user-initiated sleep, `LockWorkStation()` requires an interactive desktop, and `ES_AWAYMODE_REQUIRED` is a narrow media/background option rather than a default Vigil behavior.
 
 Process detection per-platform:
 
@@ -24,7 +26,7 @@ Likely depend on or fork [`segevfiner/keepawake-rs`](https://github.com/segevfin
 
 ## Open questions
 
-- Stay as a daemon, or refactor into a single long-running CLI process? Daemon is more familiar; single-process is simpler on Windows where launchd-equivalent is `Task Scheduler` and is awkward.
+- Stay as a daemon, or refactor into a single long-running CLI process? Daemon is more familiar. On Windows, revisit a real service implementation (`windows-service` / `windows-services`) before defaulting to Task Scheduler; lock behavior still needs interactive-session handling.
 - Cross-platform launch infrastructure: launchd (macOS), systemd-user-units (Linux), Task Scheduler (Windows). Three install paths. Worth the complexity?
 - Distribution: `cargo install vigil` for everyone? Plus Homebrew (macOS), `apt`/`dnf` (Linux — probably skip and tell users `cargo install`), Scoop/Winget (Windows)?
 - Single binary or multi-binary? Probably one `vigil` binary with subcommands (`vigil daemon`, `vigil run`, `vigil lock`, etc.).
