@@ -2,7 +2,8 @@
 # bin/vigil — main CLI dispatcher.
 #
 # Subcommands:
-#   setup, uninstall, start, stop, status, log, run, doctor, --version
+#   setup, uninstall, start, stop, status, log, run, reload, doctor, lock,
+#   --version
 
 set -euo pipefail
 
@@ -66,6 +67,17 @@ cmd_sync_install() {
     install -m 0755 "$VIGIL_REPO_ROOT/bin/vigil-daemon" "$VIGIL_INSTALL_DIR/bin/vigil-daemon"
     install -m 0644 "$VIGIL_REPO_ROOT/lib/"*.sh "$VIGIL_INSTALL_DIR/lib/"
     echo "  installed daemon to $VIGIL_INSTALL_DIR/bin/vigil-daemon"
+
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        local cargo_toml="$VIGIL_REPO_ROOT/native/vigil-lock-helper/Cargo.toml"
+        local build_bin="$VIGIL_REPO_ROOT/native/vigil-lock-helper/target/release/vigil-lock-helper"
+        if ! cargo build --release --manifest-path "$cargo_toml"; then
+            echo "  failed to build vigil-lock-helper (see above)"
+            return 1
+        fi
+        install -m 0755 "$build_bin" "$VIGIL_INSTALL_DIR/bin/vigil-lock-helper"
+        echo "  installed helper to $VIGIL_INSTALL_DIR/bin/vigil-lock-helper"
+    fi
 }
 
 cmd_render_sudoers() {
@@ -85,6 +97,43 @@ cmd_render_newsyslog() {
         -e "s|@VIGIL_LOG_FILE@|$VIGIL_LOG_FILE|g" \
         -e "s|@VIGIL_USER@|$user|g" \
         "$in"
+}
+
+cmd_lock_json_field() {
+    local field="${1:?field required}"
+    local json="${2:-}"
+    printf '%s\n' "$json" | sed -nE "s/.*\"${field}\":(true|false).*/\\1/p"
+}
+
+cmd_lock_check_permissions_json() {
+    local prompt="${1:-0}"
+    local prompt_arg=""
+    if (( prompt == 1 )); then
+        prompt_arg="--prompt"
+    fi
+    if [[ -n "$prompt_arg" ]]; then
+        "$VIGIL_LOCK_HELPER" --check-permissions --json "$prompt_arg"
+    else
+        "$VIGIL_LOCK_HELPER" --check-permissions --json
+    fi
+}
+
+cmd_lock_require_helper() {
+    if [[ "$VIGIL_LOCK_HELPER" == */ ]]; then
+        echo "vigil lock: invalid helper path (trailing /): $VIGIL_LOCK_HELPER"
+        return 1
+    fi
+    if [[ ! -f "$VIGIL_LOCK_HELPER" ]]; then
+        echo "vigil lock: missing helper at $VIGIL_LOCK_HELPER"
+        echo "  run: vigil setup (or vigil reload) to build and install vigil-lock-helper"
+        return 1
+    fi
+    if [[ ! -x "$VIGIL_LOCK_HELPER" ]]; then
+        echo "vigil lock: helper is not executable: $VIGIL_LOCK_HELPER"
+        echo "  run: vigil setup (or vigil reload) to reinstall the helper"
+        return 1
+    fi
+    return 0
 }
 
 cmd_provider_roots_json() {
@@ -520,6 +569,185 @@ cmd_run() {
     "$@"
 }
 
+cmd_lock() {
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+        echo "vigil lock: phase-4 local lock guard is macOS-only (not yet in phase 5 scope)."
+        return 64
+    fi
+
+    case "${1:-}" in
+        doctor)
+            shift
+            cmd_lock_doctor "$@"
+            return $?
+            ;;
+        --help|-h|help)
+            echo "Usage:"
+            echo "  vigil lock [--combo <combo>] [--max-secs <seconds>]"
+            echo "  vigil lock doctor [--prompt]"
+            echo
+            echo "  --combo <combo>     Unlock combo (default: $VIGIL_LOCK_COMBO)"
+            echo "  --max-secs <secs>   Auto-stop timeout in seconds (0 = no timeout)"
+            echo
+            echo "  doctor              Run a permission and accessibility probe"
+            echo "  doctor --prompt      Show permission prompts if not yet granted"
+            return 0
+            ;;
+        "")
+            ;;
+        *)
+            if [[ "${1:-}" == --* ]]; then
+                :
+            else
+                echo "vigil lock: unknown subcommand: $1"
+                echo "  run: vigil lock --help"
+                return 64
+            fi
+            ;;
+    esac
+
+    local combo="$VIGIL_LOCK_COMBO"
+    local max_secs="$VIGIL_LOCK_MAX_SECS"
+    local saw_max=0
+    local arg
+    while [[ $# -gt 0 ]]; do
+        arg="$1"
+        case "$arg" in
+            --combo)
+                shift
+                [[ $# -ge 1 ]] || die "usage: vigil lock [--combo <combo>] [--max-secs <seconds>]"
+                combo="$1"
+                shift
+                ;;
+            --max-secs)
+                shift
+                [[ $# -ge 1 ]] || die "usage: vigil lock [--combo <combo>] [--max-secs <seconds>]"
+                if [[ "$1" == *[!0-9]* ]]; then
+                    die "max seconds must be a non-negative integer"
+                fi
+                max_secs="$1"
+                saw_max=1
+                shift
+                ;;
+            *)
+                die "usage: vigil lock [--combo <combo>] [--max-secs <seconds>]"
+                ;;
+        esac
+    done
+
+    if [[ "$max_secs" == "0" && $saw_max -eq 0 ]]; then
+        echo "vigil lock: VIGIL_LOCK_MAX_SECS=0 is only accepted when passed explicitly via --max-secs."
+        echo "  set --max-secs 0 to enable a no-timeout run, or use a non-zero default in vigil.conf."
+        return 1
+    fi
+
+    cmd_lock_require_helper || return 1
+
+    local json
+    if ! json=$(cmd_lock_check_permissions_json 0); then
+        :
+    fi
+    if [[ -z "${json:-}" ]]; then
+        echo "vigil lock: preflight doctor failed; helper did not run permission probe."
+        echo "  run: vigil lock doctor for details"
+        return 1
+    fi
+    local listen access tap
+    listen="$(cmd_lock_json_field "listen_event_access" "$json")"
+    access="$(cmd_lock_json_field "accessibility_trusted" "$json")"
+    tap="$(cmd_lock_json_field "tap_create_active_session_ok" "$json")"
+    if [[ -z "$listen" || -z "$access" || -z "$tap" ]]; then
+        echo "vigil lock: failed to parse permission JSON"
+        echo "  raw: $json"
+        return 1
+    fi
+    if [[ "$listen" != "true" || "$access" != "true" || "$tap" != "true" ]]; then
+        echo "vigil lock: doctor preflight failed; run this first:"
+        echo "  vigil lock doctor"
+        return 1
+    fi
+
+    echo "  lock combo:  $combo"
+    echo "  max seconds: ${max_secs} (0 = no timeout)"
+    echo "  helper:      $VIGIL_LOCK_HELPER"
+    echo "  recover:     pkill -TERM vigil-lock-helper"
+    echo "  This is a local freeze guard, not the macOS Lock Screen."
+    for delay in 3 2 1; do
+        printf '  starting in %ss...\n' "$delay"
+        sleep 1
+    done
+
+    "$VIGIL_LOCK_HELPER" --freeze --combo "$combo" --max-secs "$max_secs"
+}
+
+cmd_lock_doctor() {
+    if [[ "$(uname -s)" != "Darwin" ]]; then
+        echo "vigil lock doctor: phase-4 lock guard is macOS-only."
+        return 64
+    fi
+    if ! cmd_lock_require_helper; then
+        return 1
+    fi
+
+    local prompt=0
+    case "${1:-}" in
+        --prompt)
+            prompt=1
+            shift
+            ;;
+        "")
+            ;;
+        *)
+            die "usage: vigil lock doctor [--prompt]"
+            ;;
+    esac
+    [[ $# -eq 0 ]] || die "usage: vigil lock doctor [--prompt]"
+
+    local json
+    if ! json=$(cmd_lock_check_permissions_json "$prompt"); then
+        :
+    fi
+    if [[ -z "${json:-}" ]]; then
+        echo "vigil lock doctor: failed to run helper permission probe"
+        return 1
+    fi
+
+    local listen access post_event tap
+    listen=$(cmd_lock_json_field "listen_event_access" "$json")
+    access=$(cmd_lock_json_field "accessibility_trusted" "$json")
+    post_event=$(cmd_lock_json_field "post_event_access" "$json")
+    tap=$(cmd_lock_json_field "tap_create_active_session_ok" "$json")
+
+    if [[ -z "$listen" || -z "$access" || -z "$post_event" || -z "$tap" ]]; then
+        echo "vigil lock doctor: failed to parse permission JSON"
+        echo "  raw: $json"
+        return 1
+    fi
+
+    echo "vigil lock doctor"
+    echo "  listen_event_access:       $listen"
+    echo "  accessibility_trusted:     $access"
+    echo "  post_event_access:         $post_event (informational)"
+    echo "  tap_create_active_session_ok: $tap"
+    echo "  helper: $VIGIL_LOCK_HELPER"
+    echo
+    echo "System Settings > Privacy & Security > Input Monitoring"
+    echo "System Settings > Privacy & Security > Accessibility"
+    echo
+
+    if (( prompt == 1 )); then
+        echo "Prompts/permission changes are asynchronous on macOS."
+        echo "Run this doctor command again after granting access."
+    fi
+
+    if [[ "$listen" == "true" && "$access" == "true" && "$tap" == "true" ]]; then
+        echo "lock guard readiness: ready"
+        return 0
+    fi
+    echo "lock guard readiness: not ready"
+    return 1
+}
+
 cmd_reload() {
     # Re-sync daemon + libs from source repo into install dir, then bounce launchd
     # via cmd_stop (bootout+poll) + cmd_start (bootstrap).
@@ -617,6 +845,11 @@ cmd_doctor() {
         printf '  installed daemon:   MISSING — run vigil setup\n'
         errs=$((errs+1))
     fi
+    if [[ -x "$VIGIL_INSTALL_DIR/bin/vigil-lock-helper" ]]; then
+        printf '  lock helper: %s\n' "$VIGIL_INSTALL_DIR/bin/vigil-lock-helper"
+    else
+        printf '  lock helper: MISSING (run vigil setup/reload if using phase 4)\n'
+    fi
 
     local domain="gui/$(id -u)"
     if launchctl print "$domain/$VIGIL_LABEL" >/dev/null 2>&1; then
@@ -670,6 +903,9 @@ Usage:
   vigil log [-f]     cat / tail -f the daemon log
   vigil run <cmd>    Wrapper: holds sleep prevention while <cmd> runs
   vigil reload       Re-sync daemon + libs into install dir, restart launchd
+  vigil lock         Freeze input until configured combo, then continue
+  vigil lock --help  Show lock mode usage
+  vigil lock doctor  Run macOS permission smoke test for the lock helper
   vigil doctor       Diagnose installation
   vigil doctor --power
                      Focused power-path diagnostics and assertion summary
@@ -696,6 +932,7 @@ main() {
         log)              cmd_log "$@" ;;
         run)              cmd_run "$@" ;;
         reload)           cmd_reload "$@" ;;
+        lock)             cmd_lock "$@" ;;
         doctor)           cmd_doctor "$@" ;;
         --version|-V)     printf 'vigil %s\n' "$VIGIL_VERSION" ;;
         --help|-h|help)   cmd_help ;;

@@ -9,6 +9,13 @@ assert_eq() {
     fi
 }
 
+assert_not_eq() {
+    if [[ "$1" == "$2" ]]; then
+        printf '    FAIL: expected not %q, got %q  (%s)\n' "$1" "$2" "${3:-no msg}"
+        return 1
+    fi
+}
+
 assert_contains() {
     if [[ "$1" != *"$2"* ]]; then
         printf '    FAIL: expected to contain %q, got %q  (%s)\n' "$2" "$1" "${3:-no msg}"

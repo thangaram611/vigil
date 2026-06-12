@@ -48,6 +48,9 @@ VIGIL_STALE_AGE_SECS="${VIGIL_STALE_AGE_SECS:-30}"
 VIGIL_STALE_CPU_PCT="${VIGIL_STALE_CPU_PCT:-0.5}"
 VIGIL_THERMAL_COOLDOWN_SECS="${VIGIL_THERMAL_COOLDOWN_SECS:-60}"
 VIGIL_BATTERY_FLOOR_PCT="${VIGIL_BATTERY_FLOOR_PCT:-20}"
+VIGIL_LOCK_COMBO="${VIGIL_LOCK_COMBO:-ctrl+alt+shift+cmd+l}"
+VIGIL_LOCK_MAX_SECS="${VIGIL_LOCK_MAX_SECS:-28800}"
+VIGIL_LOCK_HELPER="${VIGIL_LOCK_HELPER:-$VIGIL_INSTALL_DIR/bin/vigil-lock-helper}"
 # Agent state roots. These mirror each provider's documented home override:
 #   Claude Code: CLAUDE_CONFIG_DIR replaces ~/.claude
 #   Codex:       CODEX_HOME replaces ~/.codex

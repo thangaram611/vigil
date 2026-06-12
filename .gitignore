@@ -8,9 +8,8 @@
 *.swo
 *~
 
-# Generated artifacts (none in phase 1; future Rust phases)
+# Generated artifacts
 target/
-Cargo.lock
 
 # Scratch / local-only files
 .scratch/

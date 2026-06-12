@@ -8,7 +8,7 @@ Keep your Mac awake while AI coding agents are working — including with the li
 
 [Amphetamine](https://apps.apple.com/us/app/amphetamine/id937984704) and similar tools are general-purpose and don't know when an AI agent is actively running. Vigil is purpose-built: it watches for the agents you actually use, holds sleep open while they're working, and releases as soon as they're done.
 
-## What it does today (phase 1)
+## What it does today
 
 - Watches for the **CLI** processes `claude` (Claude Code), `codex`, `copilot`. The `copilot --acp` worker that [`copilot-companion`](https://github.com/thangaram611/copilot-companion) spawns per Copilot session is the same `copilot` binary and is detected via the same path; the long-lived `node` router daemon is intentionally not detected (it does no agent work itself).
 - Watches for the **Codex.app** Electron host (`/Applications/Codex.app/Contents/MacOS/Codex`). Counts toward refcount only while Codex.app is producing rollout writes (idle-but-open is treated as idle). Coverage extends transitively to the OpenAI ChatGPT VS Code extension, which spawns the same kind of `codex` worker outside `/Applications/`. **Claude.app**'s Local Agent Mode is covered by the same `claude` basename match as the CLI (LAM spawns the bundled Claude Code binary, which writes to `~/.claude/projects/`). **VS Code + GitHub Copilot Chat** is covered via the VS Code/Insiders host process plus semantic hash changes in `workspaceStorage/*/chatEditingSessions/*/state.json`; mtime-only idle rewrites are ignored.
@@ -24,8 +24,31 @@ Keep your Mac awake while AI coding agents are working — including with the li
 What vigil **does not** do (yet) — see [`ROADMAP.md`](./ROADMAP.md):
 
 - Detect standalone GitHub Copilot.app beyond the CLI/VS Code surfaces above.
-- Lock the laptop with a key-combo unlock (phase 4).
 - Linux / Windows support (phase 5).
+
+## Local lock guard (phase 4)
+
+`vigil lock` runs a native helper that installs an active-session input tap and
+blocks mouse/keyboard/scroll input until the configured unlock chord is pressed.
+This is a local freeze guard, not the macOS login/lock screen.
+
+- `vigil lock` — arm with config defaults (`VIGIL_LOCK_COMBO`, `VIGIL_LOCK_MAX_SECS`)
+- `vigil lock --combo <combo>` — custom unlock chord
+- `vigil lock --max-secs <seconds>` — watchdog timeout (`0` means no timeout with explicit CLI override)
+- `vigil lock doctor` — print permission + tap readiness (`listen_event_access`, `accessibility_trusted`, `post_event_access`, `tap_create_active_session_ok`)
+- `vigil lock doctor --prompt` — request OS permission prompts (if needed)
+- `vigil lock --help` — full lock-mode usage
+
+Config examples:
+
+- `VIGIL_LOCK_COMBO` (default `ctrl+alt+shift+cmd+l`)
+- `VIGIL_LOCK_MAX_SECS` (default `28800`)
+- `VIGIL_LOCK_HELPER` (default `$VIGIL_INSTALL_DIR/bin/vigil-lock-helper`)
+
+Recovery:
+
+- `pkill -TERM vigil-lock-helper`
+- `vigil lock --help` prints current command text and expected recovery flow.
 
 ## The Apple Silicon lid-closed caveat
 
@@ -61,6 +84,9 @@ vigil status            # daemon state, refcount, pmset state, baseline, thermal
 vigil status --json     # same state, machine-readable for agents/scripts
 vigil log -f            # tail daemon log
 vigil run claude …      # wrap a one-off command
+vigil lock               # local input-freeze guard (macOS-only)
+vigil lock doctor        # verify helper permissions + tap smoke test
+vigil lock doctor --prompt  # request missing prompts
 vigil doctor            # diagnose install
 vigil doctor --power    # focused pmset/caffeinate/assertion diagnostics
 vigil uninstall         # remove sudoers + newsyslog, plist, restore baseline state

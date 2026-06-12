@@ -9,6 +9,23 @@
 - Initial scaffold + roadmap.
 - Phase 1 hardening (non-roadmap): newsyslog.d log rotation, `power assertions:` block in `vigil status`, plist `ExitTimeOut`/`ThrottleInterval`, baseline-stickiness docs, fixed `VIGIL_LOG_FILE` init-order so `vigil.conf` overrides of `VIGIL_LOG_DIR` are honored.
 
+### Phase 4 (lock feature)
+
+- Added a native Rust helper (`native/vigil-lock-helper`) that uses an active macOS
+  session event tap (`CGEventTapLocation::Session`, head insert, default options) to
+  drop input until a configured combo unlocks.
+- Added helper CLI:
+  - `--check-permissions --json` (optional `--prompt`)
+  - `--freeze --combo <combo> --max-secs <seconds>`
+  - hidden `--debug-sleep-in-callback-ms` for manual fail-open testing
+- Added `vigil lock`, `vigil lock --help`, and `vigil lock doctor [--prompt]`.
+- Added Bash integration for non-interactive preflight gating, helper install/reinstall
+  in setup/reload, and docs/config keys:
+  - `VIGIL_LOCK_COMBO`
+  - `VIGIL_LOCK_MAX_SECS`
+  - `VIGIL_LOCK_HELPER`
+- Documented recovery and TCC guidance; lock remains a local freeze guard (not the OS lock screen).
+
 ### Phase 2 (audited — no code change needed)
 
 - Audited copilot-companion's runtime architecture. The companion's `copilot-acp-daemon.mjs` is a long-lived router that spawns a `copilot --acp` worker per session; that worker is the real `copilot` CLI binary and writes session events to `~/.copilot/session-state/<uuid>/events.jsonl`. Phase 1's existing process match (`detect.sh`) + activity probe (`activity.sh`) already cover it correctly. Verified live: companion worker spawns → vigil's refcount tracks it → `copilot=active` while events.jsonl is written → release after 5 min of no writes.
