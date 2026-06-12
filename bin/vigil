@@ -124,6 +124,17 @@ cmd_render_plist() {
 # Sync the daemon + libs from the source repo into $VIGIL_INSTALL_DIR. This
 # is the path the LaunchAgent points at (because launchd can't execute under
 # ~/Documents/ without TCC consent).
+cmd_cargo_target_dir() {
+    local cargo_toml="$1" metadata target_dir
+    metadata=$(cargo metadata --format-version 1 --no-deps --manifest-path "$cargo_toml") || return 1
+    target_dir=$(printf '%s\n' "$metadata" | sed -nE 's/.*"target_directory":"([^"]+)".*/\1/p')
+    [[ -n "$target_dir" ]] || {
+        echo "  failed to resolve cargo target directory for $cargo_toml"
+        return 1
+    }
+    printf '%s\n' "$target_dir"
+}
+
 cmd_sync_install() {
     mkdir -p "$VIGIL_INSTALL_DIR/bin" "$VIGIL_INSTALL_DIR/lib"
     install -m 0755 "$VIGIL_REPO_ROOT/bin/vigil-daemon" "$VIGIL_INSTALL_DIR/bin/vigil-daemon"
@@ -132,9 +143,15 @@ cmd_sync_install() {
 
     if [[ "$(uname -s)" == "Darwin" ]]; then
         local cargo_toml="$VIGIL_REPO_ROOT/native/vigil-lock-helper/Cargo.toml"
-        local build_bin="$VIGIL_REPO_ROOT/native/vigil-lock-helper/target/release/vigil-lock-helper"
+        local target_dir build_bin
+        target_dir=$(cmd_cargo_target_dir "$cargo_toml") || return 1
+        build_bin="$target_dir/release/vigil-lock-helper"
         if ! cargo build --release --manifest-path "$cargo_toml"; then
             echo "  failed to build vigil-lock-helper (see above)"
+            return 1
+        fi
+        if [[ ! -x "$build_bin" ]]; then
+            echo "  failed to find built vigil-lock-helper at $build_bin"
             return 1
         fi
         install -m 0755 "$build_bin" "$VIGIL_INSTALL_DIR/bin/vigil-lock-helper"

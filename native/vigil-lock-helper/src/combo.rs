@@ -325,6 +325,7 @@ mod tests {
     }
 }
 
+#[allow(dead_code)]
 pub fn event_matches_combo(combo: &Combo, keycode: u16, flags: CGEventFlags) -> bool {
     if keycode != combo.final_keycode {
         return false;
