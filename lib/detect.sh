@@ -30,7 +30,8 @@
 #
 # Output format (tab-separated, one match per line, on stdout):
 #   <pid>\t<name>\t<exe>\t<args>
-# where <name> is one of: cli-claude, cli-codex, cli-copilot, app-codex.
+# where <name> is one of:
+#   cli-claude, cli-codex, cli-copilot, app-codex, app-vscode-copilot-chat.
 
 # shellcheck source=common.sh
 source "${VIGIL_LIB_DIR:-$(dirname "${BASH_SOURCE[0]}")}/common.sh"
@@ -104,6 +105,18 @@ vigil_detect_line() {
         printf '%s\t%s\t%s\t%s\n' "$pid" "app-codex" "$comm" "$args"
         return 0
     fi
+
+    # Phase-3.1 host anchor: VS Code / VS Code Insiders main process. This row
+    # only contributes to refcount when the hash-based Copilot Chat activity
+    # probe says a chat/editing session changed recently. We intentionally do
+    # not match Code Helper / extension-host processes.
+    case "$comm" in
+        */Visual\ Studio\ Code.app/Contents/MacOS/*|*/Visual\ Studio\ Code\ -\ Insiders.app/Contents/MacOS/*)
+            local args; args=$(_vigil_args_from_command "$comm" "$command_line")
+            printf '%s\t%s\t%s\t%s\n' "$pid" "app-vscode-copilot-chat" "$comm" "$args"
+            return 0
+            ;;
+    esac
 
     if _vigil_is_excluded_cmd "$command_line"; then
         return 0

@@ -27,3 +27,9 @@
   - `tests/fixtures/ps-axww-snapshot.txt` grew two rows (Claude.app LAM bundled CC at pid 87838, VS Code ChatGPT extension codex worker at pid 31322).
   - New paired fixture `tests/fixtures/ps-axww-comm-snapshot.txt` mirrors what live `ps -o comm=` returns. Regenerated from the command fixture via `tests/fixtures/gen_comm_from_command.py` (kept in-repo for reproducibility — the `.app/Contents/MacOS/` heuristic is documented there).
 - **Experiment harness retained** under `tests/experiments/phase-3/` (runs dir gitignored). Reusable for phase-3.1 (GitHub Copilot Chat) and future editor integrations.
+
+### Phase 3.1 (VS Code + GitHub Copilot Chat)
+
+- Added VS Code / VS Code Insiders host detection as `app-vscode-copilot-chat`; Code Helper and extension-host processes are intentionally not matched.
+- Added hash-based Copilot Chat activity detection under `workspaceStorage/*/chatEditingSessions/*/state.json`. Live validation showed raw mtime is noisy because VS Code rewrites `state.json` while idle without changing content; Vigil therefore treats semantic file-content hash changes as activity events and caches an `active_until` window.
+- Kept GitHub Copilot CLI coverage on the existing `copilot` process + `${COPILOT_HOME:-~/.copilot}/session-state/**/events.jsonl` path from phase 1/provider-root support.

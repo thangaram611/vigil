@@ -1,7 +1,6 @@
 # Phase 3.1 — VS Code + GitHub Copilot Chat detection
 
-> **Status: DETAILED PLAN.** Do not implement until the empirical validation
-> matrix in §4 passes on the user's current VS Code / Copilot build.
+> **Status: shipped 2026-06-12** — synthesis archived for the audit trail.
 
 ## 1. Why this exists
 
@@ -46,56 +45,52 @@ The candidate production signal is **not** raw workspaceStorage mtime. It is a
 scoped file glob under those chat-specific paths, and only if validation shows
 the files are quiet during normal editor idle.
 
-## 3. Proposed detection model
+## 3. Detection model
 
-If validation passes, add a new activity-only virtual agent:
+Validation rejected the original raw-mtime proposal. The shipped detector uses:
 
 - agent token: `vscode-copilot-chat`
 - refcount tag: `app-vscode-copilot-chat`
 - host condition: VS Code or VS Code Insiders is running
-- activity condition: newest matching chat file under workspaceStorage is
-  newer than `VIGIL_IDLE_AFTER_SEC`
+- activity condition: a matching `state.json` file's content hash changes
+  after the detector has been primed
 
 Host condition matters because workspaceStorage files can survive editor exit.
-The daemon should only count the activity file if a VS Code host process exists.
+The daemon only counts the activity file if a VS Code host process exists.
 
 Do not add a generic `Code Helper` process match to `detect.sh`; that would
 false-positive against any open VS Code window. Instead, add a narrow host
-probe function that returns true when one of these app hosts is live:
+probe that returns true when one of these app hosts is live:
 
-- `/Applications/Visual Studio Code.app/Contents/MacOS/Electron`
-- `/Applications/Visual Studio Code - Insiders.app/Contents/MacOS/Electron`
+- `/Applications/Visual Studio Code.app/Contents/MacOS/*`
+- `/Applications/Visual Studio Code - Insiders.app/Contents/MacOS/*`
 - matching per-user or external-volume app-bundle paths with the same
-  `*.app/Contents/MacOS/Electron` suffix and app name.
+  `*.app/Contents/MacOS/*` suffix and app name.
 
 ## 4. Validation matrix
 
 Run the retained phase-3 harness, extended to record the candidate globs above.
 Each state needs at least 30 ticks at the daemon cadence.
 
-| State | Expected result |
+| State | Result |
 | --- | --- |
-| VS Code closed | no host, no count even if old chat files exist |
-| VS Code idle | host present, candidate chat mtimes stay older than idle window |
-| ordinary editing | host present, candidate chat mtimes do not advance |
-| Copilot Chat answer | candidate `chatEditingSessions` or debug-log mtime advances |
-| Copilot agent/edit session | candidate mtime advances until the edit run completes |
-| post-completion idle | candidate mtime ages past idle window and count drops |
+| VS Code closed | no scoped files modified |
+| VS Code idle | no scoped files modified during initial idle sample |
+| ordinary workspace change | `state.json` appeared recent, but only because of a prior mtime rewrite |
+| Copilot Chat answer | same `state.json` content hash changed; `timeline.currentEpoch` / checkpoint count advanced |
+| post-completion idle | `state.json` mtime rewrote again while content hash stayed unchanged |
 
-Validation must be repeated for stable VS Code and VS Code Insiders if both are
-installed. If only Insiders is installed, document that in the closeout.
+This is why the implementation is hash-based. Raw mtime would false-positive.
 
-## 5. Implementation steps after validation
+## 5. Implementation closeout
 
-1. Extend `tests/experiments/phase-3/observe.sh` to record the candidate globs.
-2. Capture and annotate the validation runs.
-3. Add `vigil_vscode_host_running` in a new small shell module or in
-   `activity.sh` if the implementation stays compact.
-4. Add a scoped `vigil_vscode_copilot_chat_is_active` probe.
-5. Thread the virtual agent through `bin/vigil-daemon`, `vigil status`, and
+1. Extended `tests/experiments/phase-3/observe.sh` with scoped candidate globs.
+2. Added `app-vscode-copilot-chat` host detection in `lib/detect.sh`.
+3. Added `vigil_vscode_copilot_chat_is_active` in `lib/activity.sh`.
+4. Threaded the virtual agent through daemon refcounting, `vigil status`, and
    `status --json`.
-6. Add fixture tests for host-running true/false and activity-file recency.
-7. Update README, ROADMAP, and CHANGELOG.
+5. Added tests for host detection, helper exclusion, hash-change activity, and
+   the refcount gate.
 
 ## 6. Non-goals
 
@@ -103,4 +98,3 @@ installed. If only Insiders is installed, document that in the closeout.
 - No raw `workspaceStorage/` mtime matching.
 - No `Code Helper` refcount files.
 - No support for Cursor, Windsurf, or other editors in this phase.
-

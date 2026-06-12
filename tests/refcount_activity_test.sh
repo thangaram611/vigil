@@ -57,6 +57,14 @@ test_count_with_app_codex_gated_on_codex_flag() {
     rm -rf "$VIGIL_STATE_DIR"
 }
 
+test_count_with_vscode_copilot_chat_gated_on_activity_flag() {
+    _setup_active_dir
+    _make_pidfile "$VIGIL_ACTIVE_DIR" "app-vscode-copilot-chat-22222"
+    assert_eq "$(vigil_refcount_count 0 0 0 0)" "0" "idle VS Code Copilot Chat host is gated out"
+    assert_eq "$(vigil_refcount_count 0 0 0 1)" "1" "active VS Code Copilot Chat host counts"
+    rm -rf "$VIGIL_STATE_DIR"
+}
+
 test_count_when_all_idle() {
     _setup_active_dir
     _make_pidfile "$VIGIL_ACTIVE_DIR" "cli-claude-1001"
@@ -96,9 +104,10 @@ test_filename_parser_handles_all_prefixes() {
     _make_pidfile "$VIGIL_ACTIVE_DIR" "cli-codex-2"
     _make_pidfile "$VIGIL_ACTIVE_DIR" "cli-copilot-3"
     _make_pidfile "$VIGIL_ACTIVE_DIR" "app-codex-4"
+    _make_pidfile "$VIGIL_ACTIVE_DIR" "app-vscode-copilot-chat-6"
     _make_pidfile "$VIGIL_ACTIVE_DIR" "wrapper-5"
     # All five counted when every flag is on.
-    assert_eq "$(vigil_refcount_count 1 1 1)" "5" "all five prefixes count when active"
+    assert_eq "$(vigil_refcount_count 1 1 1 1)" "6" "all six prefixes count when active"
     rm -rf "$VIGIL_STATE_DIR"
 }
 

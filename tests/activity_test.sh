@@ -176,3 +176,98 @@ test_latest_activity_age_uses_newest_matching_file() {
     fi
     rm -rf "$home"
 }
+
+_mk_vscode_state_file() {
+    local home="$1" epoch="$2"
+    local dir="$home/Library/Application Support/Code - Insiders/User/workspaceStorage/hash/chatEditingSessions/session"
+    mkdir -p "$dir"
+    printf '{"version":1,"timeline":{"checkpoints":[{"checkpointId":"c%s","epoch":%s,"label":"l","description":"d"}],"currentEpoch":%s,"fileBaselines":[],"operations":[],"epochCounter":%s},"recentSnapshot":{"entries":[]},"initialFileContents":[]}\n' \
+        "$epoch" "$epoch" "$epoch" "$epoch" > "$dir/state.json"
+    printf '%s\n' "$dir/state.json"
+}
+
+_reset_vscode_scan_timer() {
+    local state_file="$1"
+    [[ -f "$state_file" ]] || return 0
+    awk -F'\t' 'BEGIN{OFS="\t"} $1=="last_scan" {$2=0} {print}' "$state_file" > "$state_file.tmp"
+    mv "$state_file.tmp" "$state_file"
+}
+
+test_vscode_copilot_chat_hash_change_drives_activity() {
+    local root home state_file chat_state
+    root=$(_mk_root)
+    home="$root/home"
+    state_file="$root/vscode-copilot.state"
+    chat_state=$(_mk_vscode_state_file "$home" 1)
+    export VIGIL_VSCODE_PS_FIXTURE="/Applications/Visual Studio Code - Insiders.app/Contents/MacOS/Code - Insiders"
+    export VIGIL_VSCODE_COPILOT_STATE_FILE="$state_file"
+    export VIGIL_VSCODE_COPILOT_DISCOVER_SECS=5
+    export VIGIL_VSCODE_COPILOT_RECENT_MINS=10
+
+    if vigil_vscode_copilot_chat_is_active "$home"; then
+        printf '    FAIL: first scan should prime existing VS Code chat state without counting active\n'
+        rm -rf "$root"; return 1
+    fi
+
+    # Mtime-only rewrites are the noisy behavior observed live; they must not
+    # mark activity if the semantic file hash did not change.
+    touch "$chat_state"
+    _reset_vscode_scan_timer "$state_file"
+    if vigil_vscode_copilot_chat_is_active "$home"; then
+        printf '    FAIL: mtime-only VS Code chat state rewrite should stay idle\n'
+        rm -rf "$root"; return 1
+    fi
+
+    chat_state=$(_mk_vscode_state_file "$home" 2)
+    _reset_vscode_scan_timer "$state_file"
+    VIGIL_IDLE_AFTER_SEC=300 vigil_vscode_copilot_chat_is_active "$home" || {
+        printf '    FAIL: semantic VS Code chat state change should count active\n'
+        rm -rf "$root"; return 1
+    }
+
+    rm -rf "$root"
+    unset VIGIL_VSCODE_PS_FIXTURE VIGIL_VSCODE_COPILOT_STATE_FILE VIGIL_VSCODE_COPILOT_DISCOVER_SECS VIGIL_VSCODE_COPILOT_RECENT_MINS
+}
+
+test_vscode_copilot_chat_retains_hashes_after_file_ages_out() {
+    local root home state_file chat_state
+    root=$(_mk_root)
+    home="$root/home"
+    state_file="$root/vscode-copilot.state"
+    chat_state=$(_mk_vscode_state_file "$home" 1)
+    export VIGIL_VSCODE_PS_FIXTURE="/Applications/Visual Studio Code - Insiders.app/Contents/MacOS/Code - Insiders"
+    export VIGIL_VSCODE_COPILOT_STATE_FILE="$state_file"
+    export VIGIL_VSCODE_COPILOT_DISCOVER_SECS=5
+    export VIGIL_VSCODE_COPILOT_RECENT_MINS=1
+
+    vigil_vscode_copilot_chat_is_active "$home" && {
+        printf '    FAIL: first scan should only prime\n'
+        rm -rf "$root"; return 1
+    }
+    touch -t 200001010000 "$chat_state"
+    _reset_vscode_scan_timer "$state_file"
+    vigil_vscode_copilot_chat_is_active "$home" && {
+        printf '    FAIL: aged-out known file should not count active\n'
+        rm -rf "$root"; return 1
+    }
+    touch "$chat_state"
+    _reset_vscode_scan_timer "$state_file"
+    vigil_vscode_copilot_chat_is_active "$home" && {
+        printf '    FAIL: unchanged known file reappearing as recent should not count active\n'
+        rm -rf "$root"; return 1
+    }
+
+    rm -rf "$root"
+    unset VIGIL_VSCODE_PS_FIXTURE VIGIL_VSCODE_COPILOT_STATE_FILE VIGIL_VSCODE_COPILOT_DISCOVER_SECS VIGIL_VSCODE_COPILOT_RECENT_MINS
+}
+
+test_vscode_copilot_chat_state_is_none_without_host() {
+    local old_fixture="${VIGIL_VSCODE_PS_FIXTURE-__unset__}"
+    export VIGIL_VSCODE_PS_FIXTURE=""
+    assert_eq "$(vigil_vscode_copilot_chat_state)" "none"
+    if [[ "$old_fixture" == "__unset__" ]]; then
+        unset VIGIL_VSCODE_PS_FIXTURE
+    else
+        VIGIL_VSCODE_PS_FIXTURE="$old_fixture"
+    fi
+}

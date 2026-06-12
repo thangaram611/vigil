@@ -49,6 +49,26 @@ test_detects_codex_app_as_app_codex() {
     assert_contains "$row" "/Applications/Codex.app/Contents/MacOS/Codex" "exe column should be the Codex.app main path"
 }
 
+test_detects_vscode_main_as_copilot_chat_host() {
+    local tmp_cmd tmp_comm
+    tmp_cmd=$(mktemp); tmp_comm=$(mktemp)
+    printf '22222 /Applications/Visual Studio Code - Insiders.app/Contents/MacOS/Code - Insiders\n' > "$tmp_cmd"
+    printf '22222 /Applications/Visual Studio Code - Insiders.app/Contents/MacOS/Code - Insiders\n' > "$tmp_comm"
+    local out; out=$(vigil_detect_all "$tmp_comm" "$tmp_cmd")
+    rm -f "$tmp_cmd" "$tmp_comm"
+    assert_contains "$out" $'22222\tapp-vscode-copilot-chat\t' "VS Code Insiders main process should be the phase-3.1 host anchor"
+}
+
+test_does_not_detect_vscode_helper_as_copilot_chat_host() {
+    local tmp_cmd tmp_comm
+    tmp_cmd=$(mktemp); tmp_comm=$(mktemp)
+    printf '22223 /Applications/Visual Studio Code - Insiders.app/Contents/Frameworks/Code - Insiders Helper.app/Contents/MacOS/Code - Insiders Helper --type=utility\n' > "$tmp_cmd"
+    printf '22223 /Applications/Visual Studio Code - Insiders.app/Contents/Frameworks/Code - Insiders Helper.app/Contents/MacOS/Code - Insiders Helper\n' > "$tmp_comm"
+    local out; out=$(vigil_detect_all "$tmp_comm" "$tmp_cmd")
+    rm -f "$tmp_cmd" "$tmp_comm"
+    assert_not_contains "$out" "app-vscode-copilot-chat" "VS Code helpers must not be host anchors"
+}
+
 test_excludes_helpers_and_node_repl() {
     local out; out=$(vigil_detect_all "$FIXTURE_COMM" "$FIXTURE")
     assert_not_contains "$out" "Helper" "should NOT detect Electron helpers"

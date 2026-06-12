@@ -33,6 +33,7 @@ VIGIL_BASELINE_FILE="$VIGIL_STATE_DIR/baseline.json"
 VIGIL_CAFFEINATE_PIDFILE="$VIGIL_STATE_DIR/caffeinate.pid"
 VIGIL_DAEMON_PIDFILE="$VIGIL_STATE_DIR/daemon.pid"
 VIGIL_LOCK_FILE="$VIGIL_STATE_DIR/state.lock"
+VIGIL_VSCODE_COPILOT_STATE_FILE="$VIGIL_STATE_DIR/vscode-copilot-chat.state"
 # System-managed log-rotation drop-in. Owned by root, installed by `vigil setup`,
 # removed by `vigil uninstall`. NOT user-overridable — newsyslog only reads
 # /etc/newsyslog.d/.
@@ -66,6 +67,10 @@ if [[ -z "${VIGIL_COPILOT_HOME+x}" ]]; then
     _VIGIL_COPILOT_HOME_AUTO=1
     VIGIL_COPILOT_HOME="${COPILOT_HOME:-$HOME/.copilot}"
 fi
+# VS Code Copilot Chat detection is content-change based. Discovery is cached
+# because workspaceStorage can contain many historical chatEditingSessions files.
+VIGIL_VSCODE_COPILOT_DISCOVER_SECS="${VIGIL_VSCODE_COPILOT_DISCOVER_SECS:-30}"
+VIGIL_VSCODE_COPILOT_RECENT_MINS="${VIGIL_VSCODE_COPILOT_RECENT_MINS:-10}"
 # Idle window: a CLI agent only counts toward the refcount if its session
 # storage was modified within this many seconds. BSD `find -mmin` rounds up
 # to whole minutes, so values < 60s silently floor to 60s.

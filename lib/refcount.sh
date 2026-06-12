@@ -64,7 +64,8 @@ vigil_refcount_touch_wrapper() {
         "$pid" "$now" "$safe_cmd" > "$pidfile"
 }
 
-# Activity-filtered refcount. Args: <claude_active> <codex_active> <copilot_active>.
+# Activity-filtered refcount. Args:
+#   <claude_active> <codex_active> <copilot_active> [vscode_copilot_active]
 # Each arg is 0|1. A PID file contributes iff:
 #   - its prefix is `wrapper` (always counts; wrappers are explicit user opt-ins), or
 #   - its prefix is `cli-<agent>` and the corresponding flag is 1, or
@@ -72,8 +73,11 @@ vigil_refcount_touch_wrapper() {
 #     corresponding flag is 1 — `app-codex` is gated on `codex_active`,
 #     same probe as `cli-codex`, since Codex.app shares
 #     `~/.codex/sessions/` with the CLI.
+#   - its prefix is `app-vscode-copilot-chat` and the hash-based VS Code
+#     Copilot Chat activity probe has observed a semantic state change.
 vigil_refcount_count() {
     local claude_active="$1" codex_active="$2" copilot_active="$3"
+    local vscode_copilot_active="${4:-0}"
     local n=0
     [[ -d "$VIGIL_ACTIVE_DIR" ]] || { printf '0\n'; return; }
     while IFS= read -r f; do
@@ -85,6 +89,7 @@ vigil_refcount_count() {
             cli-codex)   (( codex_active ))   && n=$((n+1)) ;;
             cli-copilot) (( copilot_active )) && n=$((n+1)) ;;
             app-codex)   (( codex_active ))   && n=$((n+1)) ;;
+            app-vscode-copilot-chat) (( vscode_copilot_active )) && n=$((n+1)) ;;
             wrapper)     n=$((n+1)) ;;
         esac
     done < <(find "$VIGIL_ACTIVE_DIR" -maxdepth 1 -type f -name '*.pid' 2>/dev/null)
@@ -106,6 +111,7 @@ vigil_refcount_count_total() {
 # wrapper rows are always reported as `active`.
 vigil_refcount_list() {
     local claude_active="$1" codex_active="$2" copilot_active="$3"
+    local vscode_copilot_active="${4:-0}"
     local now; now=$(vigil_now_unix)
     [[ -d "$VIGIL_ACTIVE_DIR" ]] || return 0
     find "$VIGIL_ACTIVE_DIR" -maxdepth 1 -type f -name '*.pid' 2>/dev/null | while read -r f; do
@@ -119,6 +125,7 @@ vigil_refcount_list() {
             cli-codex)   (( codex_active ))   && state="active" ;;
             cli-copilot) (( copilot_active )) && state="active" ;;
             app-codex)   (( codex_active ))   && state="active" ;;
+            app-vscode-copilot-chat) (( vscode_copilot_active )) && state="active" ;;
             wrapper)     state="active" ;;
         esac
         printf '%s\t%s\t%s\t%s\n' "$pid" "$name" "$((now - mtime))" "$state"

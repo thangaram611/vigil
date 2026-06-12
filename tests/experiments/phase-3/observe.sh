@@ -11,11 +11,18 @@
 #   ts           unix seconds
 #   procs        ps rows matching any candidate substring (claude/codex/vscode)
 #   mtimes       newest file mtime under each candidate session-dir root (or null)
+#   scoped       newest file mtime/path for narrow candidate activity globs
 #   sd_disable   pmset SleepDisabled at the time of the snapshot
 #
 # The output is intentionally not jq-shaped — every line is independent and
 # can be filtered with `grep`/`awk` or read directly. Keeping the JSON keys
 # short to make a long-running observation file scrollable in a terminal.
+#
+# Broad root scans are skipped by default because app support directories can
+# contain enough files to blow past the 5s sampling cadence. Set
+# VIGIL_OBSERVE_BROAD_ROOTS=1 for the old expensive root-level behavior.
+# Scoped phase-3.1 probes only report files modified within
+# VIGIL_OBSERVE_RECENT_MINS, default 10 minutes.
 
 set -uo pipefail
 
@@ -27,6 +34,16 @@ out_file="$out_dir/${label}.ndjson"
 
 ts=$(date +%s)
 home="${HOME%/}"
+
+json_escape() {
+    local s="${1:-}"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\t'/\\t}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\n'/\\n}"
+    printf '%s' "$s"
+}
 
 # ---------------------------------------------------------------------------
 # Candidate substrings. The list is intentionally wide — we want to OVER-
@@ -68,10 +85,7 @@ while IFS= read -r line; do
     pid="${line%% *}"
     cmd="${line#"$pid"}"; cmd="${cmd# }"
     [[ "$pid" =~ ^[0-9]+$ ]] || continue
-    # JSON-escape the command string. Only need to handle backslash + double-quote;
-    # control chars are extremely rare in argv on macOS and we accept any noise.
-    esc="${cmd//\\/\\\\}"
-    esc="${esc//\"/\\\"}"
+    esc=$(json_escape "$cmd")
     procs_json+="${sep}{\"pid\":${pid},\"cmd\":\"${esc}\"}"
     sep=","
 done < <(ps -axww -o pid= -o command= 2>/dev/null | grep -F -f "$patterns_file" || true)
@@ -104,6 +118,11 @@ for entry in "${roots[@]}"; do
     name="${entry%%:*}"
     path="${entry#*:}"
     mt="null"
+    if [[ "${VIGIL_OBSERVE_BROAD_ROOTS:-0}" != "1" ]]; then
+        mtimes_json+="${sep}\"${name}\":${mt}"
+        sep=","
+        continue
+    fi
     if [[ -e "$path" ]]; then
         if [[ -d "$path" ]]; then
             # Newest file mtime in the tree (excluding directories). Bounded
@@ -135,6 +154,52 @@ for entry in "${roots[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
+# Scoped candidate activity files. These are the phase-3.1 candidates for
+# VS Code + GitHub Copilot Chat. Unlike the broad roots above, these paths are
+# narrow enough to be considered for production if they stay quiet during idle.
+# For each scope, record the newest matching mtime plus the newest file path.
+# ---------------------------------------------------------------------------
+scopes=(
+    "vscode_chat_sessions:$home/Library/Application Support/Code/User/workspaceStorage:*/chatEditingSessions/*/state.json"
+    "vscode_chat_debug_models:$home/Library/Application Support/Code/User/workspaceStorage:*/GitHub.copilot-chat/debug-logs/*/models.json"
+    "vscode_ins_chat_sessions:$home/Library/Application Support/Code - Insiders/User/workspaceStorage:*/chatEditingSessions/*/state.json"
+    "vscode_ins_chat_debug_models:$home/Library/Application Support/Code - Insiders/User/workspaceStorage:*/GitHub.copilot-chat/debug-logs/*/models.json"
+)
+
+scoped_json=""
+sep=""
+recent_mins="${VIGIL_OBSERVE_RECENT_MINS:-10}"
+case "$recent_mins" in
+    ''|*[!0-9]*) recent_mins=10 ;;
+esac
+(( recent_mins < 1 )) && recent_mins=1
+for entry in "${scopes[@]}"; do
+    name="${entry%%:*}"
+    rest="${entry#*:}"
+    root="${rest%%:*}"
+    rel_glob="${rest#*:}"
+    mt="null"
+    newest_path=""
+    if [[ -d "$root" ]]; then
+        while IFS= read -r -d '' f; do
+            m=$(stat -f '%m' "$f" 2>/dev/null || echo 0)
+            [[ "$m" =~ ^[0-9]+$ ]] || continue
+            if [[ "$mt" == "null" || "$m" -gt "$mt" ]]; then
+                mt="$m"
+                newest_path="$f"
+            fi
+        done < <(find "$root" -maxdepth 6 -type f -path "$root/$rel_glob" -mmin "-$recent_mins" -print0 2>/dev/null)
+    fi
+    if [[ -n "$newest_path" ]]; then
+        path_json="\"$(json_escape "$newest_path")\""
+    else
+        path_json="null"
+    fi
+    scoped_json+="${sep}\"${name}\":{\"mtime\":${mt},\"path\":${path_json}}"
+    sep=","
+done
+
+# ---------------------------------------------------------------------------
 # SleepDisabled (so we can verify vigil's behavior alongside the observation).
 # ---------------------------------------------------------------------------
 sd=$(pmset -g 2>/dev/null | awk '/SleepDisabled/ {print $NF}')
@@ -143,8 +208,8 @@ case "$sd" in 0|1) ;; *) sd="null" ;; esac
 # ---------------------------------------------------------------------------
 # Emit one line.
 # ---------------------------------------------------------------------------
-printf '{"ts":%s,"label":"%s","sd":%s,"procs":[%s],"mtimes":{%s}}\n' \
-    "$ts" "$label" "$sd" "$procs_json" "$mtimes_json" >> "$out_file"
+printf '{"ts":%s,"label":"%s","sd":%s,"procs":[%s],"mtimes":{%s},"scoped":{%s}}\n' \
+    "$ts" "$label" "$sd" "$procs_json" "$mtimes_json" "$scoped_json" >> "$out_file"
 
 # Also echo a human-readable summary to stderr so an interactive caller sees
 # what was captured this tick without tailing the file.

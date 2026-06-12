@@ -172,7 +172,8 @@ cmd_status_json() {
     local claude_active=0;  vigil_agent_is_active claude  && claude_active=1
     local codex_active=0;   vigil_agent_is_active codex   && codex_active=1
     local copilot_active=0; vigil_agent_is_active copilot && copilot_active=1
-    local active; active=$(vigil_refcount_count "$claude_active" "$codex_active" "$copilot_active")
+    local vscode_copilot_active=0; vigil_vscode_copilot_chat_is_active && vscode_copilot_active=1
+    local active; active=$(vigil_refcount_count "$claude_active" "$codex_active" "$copilot_active" "$vscode_copilot_active")
     local total; total=$(vigil_refcount_count_total)
     local idle_min=$(( (VIGIL_IDLE_AFTER_SEC + 59) / 60 ))
     local sd; sd=$(vigil_read_sleepdisabled)
@@ -210,8 +211,8 @@ cmd_status_json() {
     printf '  "refcount_active": %s,\n' "$active"
     printf '  "refcount_total": %s,\n' "$total"
     printf '  "idle_window_minutes": %s,\n' "$idle_min"
-    printf '  "agents": {"claude":"%s","codex":"%s","copilot":"%s"},\n' \
-        "$(vigil_agent_state claude)" "$(vigil_agent_state codex)" "$(vigil_agent_state copilot)"
+    printf '  "agents": {"claude":"%s","codex":"%s","copilot":"%s","vscode_copilot_chat":"%s"},\n' \
+        "$(vigil_agent_state claude)" "$(vigil_agent_state codex)" "$(vigil_agent_state copilot)" "$(vigil_vscode_copilot_chat_state)"
     printf '  "provider_roots": %s,\n' "$(cmd_provider_roots_json)"
     printf '  "pmset_disablesleep": %s,\n' "$sd"
     printf '  "baseline": %s,\n' "$baseline_json"
@@ -432,8 +433,9 @@ cmd_status() {
     local claude_active=0;  vigil_agent_is_active claude  && claude_active=1
     local codex_active=0;   vigil_agent_is_active codex   && codex_active=1
     local copilot_active=0; vigil_agent_is_active copilot && copilot_active=1
+    local vscode_copilot_active=0; vigil_vscode_copilot_chat_is_active && vscode_copilot_active=1
 
-    local active; active=$(vigil_refcount_count "$claude_active" "$codex_active" "$copilot_active")
+    local active; active=$(vigil_refcount_count "$claude_active" "$codex_active" "$copilot_active" "$vscode_copilot_active")
     local total;  total=$(vigil_refcount_count_total)
     local idle_min=$(( (VIGIL_IDLE_AFTER_SEC + 59) / 60 ))
     local sd; sd=$(vigil_read_sleepdisabled)
@@ -445,8 +447,8 @@ cmd_status() {
     printf 'launchd loaded:    %s\n' "$loaded"
     printf 'daemon pid:        %s\n' "$daemon_pid"
     printf 'refcount:          %s active / %s total   (idle window %sm)\n' "$active" "$total" "$idle_min"
-    printf 'agents:            claude=%s  codex=%s  copilot=%s\n' \
-        "$(vigil_agent_state claude)" "$(vigil_agent_state codex)" "$(vigil_agent_state copilot)"
+    printf 'agents:            claude=%s  codex=%s  copilot=%s  vscode_copilot_chat=%s\n' \
+        "$(vigil_agent_state claude)" "$(vigil_agent_state codex)" "$(vigil_agent_state copilot)" "$(vigil_vscode_copilot_chat_state)"
     echo 'provider roots:'
     cmd_provider_roots_text
     printf 'pmset disablesleep: %s   (baseline=%s)\n' "$sd" "$baseline"
@@ -457,7 +459,7 @@ cmd_status() {
     if (( total > 0 )); then
         echo
         echo 'active matches:'
-        vigil_refcount_list "$claude_active" "$codex_active" "$copilot_active" \
+        vigil_refcount_list "$claude_active" "$codex_active" "$copilot_active" "$vscode_copilot_active" \
             | awk -F'\t' '{printf "  pid=%-7s name=%-15s age=%-5s %s\n", $1, $2, $3"s", $4}'
     fi
 

@@ -112,6 +112,160 @@ vigil_agent_latest_activity_age_secs() {
     printf '%s\n' "$(( now - mtime ))"
 }
 
+# ---- VS Code + GitHub Copilot Chat ------------------------------------------
+#
+# Copilot Chat inside VS Code has no distinct per-chat worker process. The
+# observed file signal is:
+#   ~/Library/Application Support/Code{,- Insiders}/User/workspaceStorage/*/
+#       chatEditingSessions/*/state.json
+#
+# Raw mtime is noisy: VS Code rewrites state.json while idle without changing
+# its content. We therefore treat a semantic file-content hash change as the
+# activity event and cache an active_until timestamp for VIGIL_IDLE_AFTER_SEC.
+
+_vigil_vscode_ps() {
+    if [[ "${VIGIL_VSCODE_PS_FIXTURE+set}" == "set" ]]; then
+        printf '%s\n' "$VIGIL_VSCODE_PS_FIXTURE"
+    else
+        ps -axww -o command= 2>/dev/null
+    fi
+}
+
+vigil_vscode_host_running() {
+    local out; out=$(_vigil_vscode_ps)
+    case "$out" in
+        *"/Visual Studio Code.app/Contents/MacOS/"*|*"/Visual Studio Code - Insiders.app/Contents/MacOS/"*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+vigil_vscode_workspace_roots() {
+    local home="${1:-$HOME}"
+    printf '%s\n' "$home/Library/Application Support/Code/User/workspaceStorage"
+    printf '%s\n' "$home/Library/Application Support/Code - Insiders/User/workspaceStorage"
+}
+
+vigil_vscode_copilot_recent_state_files() {
+    local home="${1:-$HOME}"
+    local recent_mins="${VIGIL_VSCODE_COPILOT_RECENT_MINS:-10}"
+    case "$recent_mins" in ''|*[!0-9]*) recent_mins=10 ;; esac
+    (( recent_mins < 1 )) && recent_mins=1
+    local root
+    while IFS= read -r root; do
+        [[ -d "$root" ]] || continue
+        find "$root" -maxdepth 6 -type f \
+            -path "$root/*/chatEditingSessions/*/state.json" \
+            -mmin "-$recent_mins" -print 2>/dev/null
+    done < <(vigil_vscode_workspace_roots "$home")
+}
+
+_vigil_file_sha256() {
+    shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+}
+
+_vigil_vscode_state_field() {
+    local key="$1" file="${2:-$VIGIL_VSCODE_COPILOT_STATE_FILE}"
+    [[ -f "$file" ]] || return 1
+    awk -F '\t' -v k="$key" '$1 == k { print $2; exit }' "$file"
+}
+
+_vigil_vscode_state_hash_for_path() {
+    local path="$1" file="${2:-$VIGIL_VSCODE_COPILOT_STATE_FILE}"
+    [[ -f "$file" ]] || return 1
+    awk -F '\t' -v p="$path" '$1 == "file" && $3 == p { print $2; exit }' "$file"
+}
+
+_vigil_vscode_write_state() {
+    local state_file="$1" active_until="$2" last_scan="$3" primed="$4" file_lines="$5"
+    mkdir -p "$(dirname "$state_file")"
+    {
+        printf 'active_until\t%s\n' "$active_until"
+        printf 'last_scan\t%s\n' "$last_scan"
+        printf 'primed\t%s\n' "$primed"
+        printf '%s' "$file_lines"
+    } > "$state_file"
+}
+
+vigil_vscode_copilot_chat_is_active() {
+    local home="${1:-$HOME}"
+    [[ "${VIGIL_VSCODE_COPILOT_ENABLED:-1}" == "0" ]] && return 1
+    vigil_vscode_host_running || return 1
+
+    local now; now=$(vigil_now_unix)
+    local state_file="${VIGIL_VSCODE_COPILOT_STATE_FILE}"
+    local active_until last_scan primed discover_secs
+    active_until=$(_vigil_vscode_state_field active_until "$state_file" 2>/dev/null || echo 0)
+    last_scan=$(_vigil_vscode_state_field last_scan "$state_file" 2>/dev/null || echo 0)
+    primed=$(_vigil_vscode_state_field primed "$state_file" 2>/dev/null || echo 0)
+    [[ "$active_until" =~ ^[0-9]+$ ]] || active_until=0
+    [[ "$last_scan" =~ ^[0-9]+$ ]] || last_scan=0
+    [[ "$primed" =~ ^[01]$ ]] || primed=0
+    discover_secs="${VIGIL_VSCODE_COPILOT_DISCOVER_SECS:-30}"
+    case "$discover_secs" in ''|*[!0-9]*) discover_secs=30 ;; esac
+    (( discover_secs < 5 )) && discover_secs=5
+
+    if (( now - last_scan < discover_secs )); then
+        (( active_until > now ))
+        return
+    fi
+
+    local changed=0 file sha old file_lines=""
+    local -a current_paths=()
+    while IFS= read -r file; do
+        [[ -f "$file" ]] || continue
+        sha=$(_vigil_file_sha256 "$file")
+        [[ -n "$sha" ]] || continue
+        old=$(_vigil_vscode_state_hash_for_path "$file" "$state_file" 2>/dev/null || true)
+        if (( primed == 1 )) && [[ -n "$old" && "$old" != "$sha" ]]; then
+            changed=1
+        fi
+        current_paths+=("$file")
+        file_lines+="file	${sha}	${file}"$'\n'
+    done < <(vigil_vscode_copilot_recent_state_files "$home")
+
+    # Preserve hashes for files that were seen before but are not recent in
+    # this scan. This avoids false activity when VS Code later performs an
+    # mtime-only rewrite of an old state file with unchanged content.
+    if [[ -f "$state_file" ]]; then
+        local tag old_sha old_path keep current_path
+        while IFS=$'\t' read -r tag old_sha old_path; do
+            [[ "$tag" == "file" && -n "$old_sha" && -n "$old_path" ]] || continue
+            keep=1
+            if (( ${#current_paths[@]} > 0 )); then
+                for current_path in "${current_paths[@]}"; do
+                    if [[ "$current_path" == "$old_path" ]]; then
+                        keep=0
+                        break
+                    fi
+                done
+            fi
+            (( keep == 1 )) && file_lines+="file	${old_sha}	${old_path}"$'\n'
+        done < "$state_file"
+    fi
+
+    if (( changed == 1 )); then
+        active_until=$(( now + VIGIL_IDLE_AFTER_SEC ))
+        log INFO "vscode-copilot-chat activity — semantic state changed"
+    fi
+    _vigil_vscode_write_state "$state_file" "$active_until" "$now" 1 "$file_lines"
+
+    (( active_until > now ))
+}
+
+vigil_vscode_copilot_chat_state() {
+    if ! vigil_vscode_host_running; then
+        printf 'none\n'
+        return 0
+    fi
+    if vigil_vscode_copilot_chat_is_active; then
+        printf 'active\n'
+    else
+        printf 'idle\n'
+    fi
+}
+
 # Tri-state for status display: "active" | "idle" | "none".
 # "none" means the session dir doesn't exist on disk at all.
 vigil_agent_state() {

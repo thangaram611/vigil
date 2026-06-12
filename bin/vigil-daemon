@@ -85,7 +85,8 @@ vigil_refcount_gc
 startup_claude_active=0;  vigil_agent_is_active claude  && startup_claude_active=1
 startup_codex_active=0;   vigil_agent_is_active codex   && startup_codex_active=1
 startup_copilot_active=0; vigil_agent_is_active copilot && startup_copilot_active=1
-startup_count=$(vigil_refcount_count "$startup_claude_active" "$startup_codex_active" "$startup_copilot_active")
+startup_vscode_copilot_active=0; vigil_vscode_copilot_chat_is_active && startup_vscode_copilot_active=1
+startup_count=$(vigil_refcount_count "$startup_claude_active" "$startup_codex_active" "$startup_copilot_active" "$startup_vscode_copilot_active")
 startup_can_hold=1
 vigil_thermal_should_cut && startup_can_hold=0 || true
 vigil_battery_should_cut && startup_can_hold=0 || true
@@ -118,9 +119,10 @@ while true; do
     claude_active=0;  vigil_agent_is_active claude  && claude_active=1
     codex_active=0;   vigil_agent_is_active codex   && codex_active=1
     copilot_active=0; vigil_agent_is_active copilot && copilot_active=1
+    vscode_copilot_active=0; vigil_vscode_copilot_chat_is_active && vscode_copilot_active=1
 
     # 4. Activity-filtered refcount.
-    count=$(vigil_refcount_count "$claude_active" "$codex_active" "$copilot_active")
+    count=$(vigil_refcount_count "$claude_active" "$codex_active" "$copilot_active" "$vscode_copilot_active")
 
     # 5. Cutoff checks.
     now=$(vigil_now_unix)
@@ -142,7 +144,8 @@ while true; do
         cs="idle"; (( claude_active ))  && cs="active"
         xs="idle"; (( codex_active ))   && xs="active"
         ps="idle"; (( copilot_active )) && ps="active"
-        log INFO "engage — count=$count thermal=ok battery=ok claude=$cs codex=$xs copilot=$ps"
+        vs="idle"; (( vscode_copilot_active )) && vs="active"
+        log INFO "engage — count=$count thermal=ok battery=ok claude=$cs codex=$xs copilot=$ps vscode_copilot_chat=$vs"
         if vigil_pmset_engage; then
             DAEMON_ENGAGED=1
         fi

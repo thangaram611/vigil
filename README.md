@@ -11,7 +11,7 @@ Keep your Mac awake while AI coding agents are working — including with the li
 ## What it does today (phase 1)
 
 - Watches for the **CLI** processes `claude` (Claude Code), `codex`, `copilot`. The `copilot --acp` worker that [`copilot-companion`](https://github.com/thangaram611/copilot-companion) spawns per Copilot session is the same `copilot` binary and is detected via the same path; the long-lived `node` router daemon is intentionally not detected (it does no agent work itself).
-- Watches for the **Codex.app** Electron host (`/Applications/Codex.app/Contents/MacOS/Codex`). Counts toward refcount only while Codex.app is producing rollout writes (idle-but-open is treated as idle). Coverage extends transitively to the OpenAI ChatGPT VS Code extension, which spawns the same kind of `codex` worker outside `/Applications/`. **Claude.app**'s Local Agent Mode is covered by the same `claude` basename match as the CLI (LAM spawns the bundled Claude Code binary, which writes to `~/.claude/projects/`). VS Code + GitHub Copilot Chat (in-process JS) is deferred to phase 3.1; see [`ROADMAP.md`](./ROADMAP.md).
+- Watches for the **Codex.app** Electron host (`/Applications/Codex.app/Contents/MacOS/Codex`). Counts toward refcount only while Codex.app is producing rollout writes (idle-but-open is treated as idle). Coverage extends transitively to the OpenAI ChatGPT VS Code extension, which spawns the same kind of `codex` worker outside `/Applications/`. **Claude.app**'s Local Agent Mode is covered by the same `claude` basename match as the CLI (LAM spawns the bundled Claude Code binary, which writes to `~/.claude/projects/`). **VS Code + GitHub Copilot Chat** is covered via the VS Code/Insiders host process plus semantic hash changes in `workspaceStorage/*/chatEditingSessions/*/state.json`; mtime-only idle rewrites are ignored.
 - **Activity-aware:** an agent only counts toward sleep prevention when its session storage has been touched within the last 5 minutes (`VIGIL_IDLE_AFTER_SEC=300`). An idle REPL waiting for input or a Codex.app window with no in-flight prompt is treated as idle. Probe is per-agent-type and uses `find -mmin` against `~/.claude/projects/`, `~/.codex/sessions/`, `~/.copilot/session-state/`, honoring provider home overrides (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`) and Vigil-specific overrides (`VIGIL_CLAUDE_HOME`, `VIGIL_CODEX_HOME`, `VIGIL_COPILOT_HOME`).
 - Provides a `vigil run <cmd>` wrapper for explicit invocations (re-aliases your `claudex` cleanly). Wrappers are an explicit user opt-in and hold sleep for the wrapped command's full lifetime, regardless of session activity.
 - Holds `pmset disablesleep=1` + `caffeinate -di` while at least one agent is active.
@@ -23,7 +23,7 @@ Keep your Mac awake while AI coding agents are working — including with the li
 
 What vigil **does not** do (yet) — see [`ROADMAP.md`](./ROADMAP.md):
 
-- Detect VS Code + GitHub Copilot Chat's in-process JS chat sessions (deferred to phase 3.1; the in-process model has no distinct host process to anchor against, and the available activity signal is workspaceStorage which is too noisy in its raw form). Standalone GitHub Copilot.app is also out of scope until it ships beyond tech preview.
+- Detect standalone GitHub Copilot.app beyond the CLI/VS Code surfaces above.
 - Lock the laptop with a key-combo unlock (phase 4).
 - Linux / Windows support (phase 5).
 
