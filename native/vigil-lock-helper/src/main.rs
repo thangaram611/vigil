@@ -3,6 +3,7 @@ use std::env;
 mod combo;
 #[cfg(target_os = "macos")]
 mod macos;
+mod overlay;
 
 const EXIT_OK: i32 = 0;
 #[cfg(not(target_os = "macos"))]
@@ -23,11 +24,19 @@ enum Command {
         max_secs: u64,
         debug_sleep_ms: Option<u64>,
     },
+    /// Interactively capture a single unlock chord by pressing it. Reuses the
+    /// freeze HID tap (so the chord is swallowed and never leaks to apps),
+    /// records the first non-modifier keydown + held modifiers, prints the
+    /// canonical combo as JSON, and exits 0. Esc / 30s timeout / unmapped key →
+    /// non-zero with no combo. Requires the same Input-Monitoring/Accessibility
+    /// TCC grant the freeze does.
+    CaptureCombo,
 }
 
 fn print_usage() {
     eprintln!("vigil-lock-helper --check-permissions --json [--prompt]");
     eprintln!("vigil-lock-helper --freeze --combo <combo> --max-secs <seconds> [--debug-sleep-in-callback-ms <ms>]");
+    eprintln!("vigil-lock-helper --capture-combo");
 }
 
 fn parse_u64(value: &str) -> Result<u64, String> {
@@ -59,6 +68,9 @@ fn parse_args(args: Vec<String>) -> Result<Command, String> {
                     max_secs: 0,
                     debug_sleep_ms: None,
                 });
+            }
+            "--capture-combo" => {
+                mode = Some(Command::CaptureCombo);
             }
             "--json" => json = true,
             "--prompt" => prompt = true,
@@ -101,7 +113,7 @@ fn parse_args(args: Vec<String>) -> Result<Command, String> {
         Some(Command::Freeze { .. }) => {
             let combo = combo.ok_or_else(|| "--freeze requires --combo".to_string())?;
             let max_secs = max_secs.ok_or_else(|| "--freeze requires --max-secs".to_string())?;
-            let parsed = combo::parse_combo(&combo).map_err(|e| e)?;
+            let parsed = combo::parse_chord(&combo)?;
             let combo = parsed.canonical;
             Ok(Command::Freeze {
                 combo,
@@ -109,7 +121,10 @@ fn parse_args(args: Vec<String>) -> Result<Command, String> {
                 debug_sleep_ms,
             })
         }
-        None => Err("one of --check-permissions or --freeze is required".to_string()),
+        Some(Command::CaptureCombo) => Ok(Command::CaptureCombo),
+        None => {
+            Err("one of --check-permissions, --freeze, or --capture-combo is required".to_string())
+        }
     }
 }
 
@@ -123,7 +138,9 @@ fn unsupported() -> ! {
 fn main() {
     match parse_args(env::args().skip(1).collect()) {
         Ok(command) => match command {
-            Command::CheckPermissions { .. } | Command::Freeze { .. } => unsupported(),
+            Command::CheckPermissions { .. } | Command::Freeze { .. } | Command::CaptureCombo => {
+                unsupported()
+            }
         },
         Err(err) => {
             eprintln!("error: {err}");
@@ -160,6 +177,17 @@ fn main() {
             debug_sleep_ms,
         } => match macos::freeze(&combo, max_secs, debug_sleep_ms) {
             Ok(()) => EXIT_OK,
+            Err(code) => code,
+        },
+        Command::CaptureCombo => match macos::capture_combo() {
+            Ok(combo) => {
+                // Print ONLY the JSON on stdout so the caller can parse it; the
+                // combo is intentionally the sole stdout byte stream.
+                println!("{{\"combo\":\"{combo}\"}}");
+                EXIT_OK
+            }
+            // Cancel (Esc) / timeout / unmapped key / tap failure: no combo on
+            // stdout, propagate the failure code.
             Err(code) => code,
         },
     };

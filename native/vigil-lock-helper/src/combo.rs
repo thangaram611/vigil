@@ -1,69 +1,148 @@
+//! Unlock-chord model: an **ordered sequence** of keys (modifiers and regular
+//! keys, in press order) plus the two pure state machines that drive it:
+//!
+//! - [`CaptureAccumulator`] — records the chord as you press it (any number of
+//!   keys, in order) and finalizes when you release the *anchor* (the first key
+//!   you pressed), so you can hold the anchor and add keys freely until then.
+//! - [`SequenceMatcher`] — during a freeze, fires `unlock` only when the chord's
+//!   keys are pressed **in the recorded order** (foreign keys ignored, releasing
+//!   a matched key resets progress).
+//!
+//! Both are platform-independent and exhaustively unit-tested; the macOS event
+//! tap (`macos.rs`) only translates `CGEvent`s into `ChordKey` down/up + modifier
+//! bitmasks and feeds them in. The canonical wire form is `+`-joined tokens in
+//! press order (e.g. `ctrl+l+alt`) — order is significant, unlike a sorted
+//! hotkey.
+
+/// Carbon HIToolbox virtual key codes (`kVK_*`, `HIToolbox/Events.h`).
+///
+/// `objc2-core-graphics` does not re-export the named `KeyCode::ANSI_*`
+/// constants the old `core-graphics` crate provided, so we carry the frozen
+/// Carbon values directly. These are a stable macOS ABI and have not changed
+/// since Carbon shipped.
 #[cfg(target_os = "macos")]
-use core_graphics::event::{CGEventFlags, KeyCode};
-
-#[cfg(not(target_os = "macos"))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct CGEventFlags(u8);
-
-#[cfg(not(target_os = "macos"))]
-impl core::ops::BitOr for CGEventFlags {
-    type Output = Self;
-    fn bitor(self, _rhs: Self) -> Self::Output {
-        self
-    }
+mod keycode {
+    pub const ANSI_A: u16 = 0x00;
+    pub const ANSI_S: u16 = 0x01;
+    pub const ANSI_D: u16 = 0x02;
+    pub const ANSI_F: u16 = 0x03;
+    pub const ANSI_H: u16 = 0x04;
+    pub const ANSI_G: u16 = 0x05;
+    pub const ANSI_Z: u16 = 0x06;
+    pub const ANSI_X: u16 = 0x07;
+    pub const ANSI_C: u16 = 0x08;
+    pub const ANSI_V: u16 = 0x09;
+    pub const ANSI_B: u16 = 0x0B;
+    pub const ANSI_Q: u16 = 0x0C;
+    pub const ANSI_W: u16 = 0x0D;
+    pub const ANSI_E: u16 = 0x0E;
+    pub const ANSI_R: u16 = 0x0F;
+    pub const ANSI_Y: u16 = 0x10;
+    pub const ANSI_T: u16 = 0x11;
+    pub const ANSI_1: u16 = 0x12;
+    pub const ANSI_2: u16 = 0x13;
+    pub const ANSI_3: u16 = 0x14;
+    pub const ANSI_4: u16 = 0x15;
+    pub const ANSI_6: u16 = 0x16;
+    pub const ANSI_5: u16 = 0x17;
+    pub const ANSI_9: u16 = 0x19;
+    pub const ANSI_7: u16 = 0x1A;
+    pub const ANSI_8: u16 = 0x1C;
+    pub const ANSI_0: u16 = 0x1D;
+    pub const ANSI_O: u16 = 0x1F;
+    pub const ANSI_U: u16 = 0x20;
+    pub const ANSI_I: u16 = 0x22;
+    pub const ANSI_P: u16 = 0x23;
+    pub const ANSI_L: u16 = 0x25;
+    pub const ANSI_J: u16 = 0x26;
+    pub const ANSI_K: u16 = 0x28;
+    pub const ANSI_N: u16 = 0x2D;
+    pub const ANSI_M: u16 = 0x2E;
+    pub const RETURN: u16 = 0x24;
+    pub const TAB: u16 = 0x30;
+    pub const SPACE: u16 = 0x31;
+    pub const F1: u16 = 0x7A;
+    pub const F2: u16 = 0x78;
+    pub const F3: u16 = 0x63;
+    pub const F4: u16 = 0x76;
+    pub const F5: u16 = 0x60;
+    pub const F6: u16 = 0x61;
+    pub const F7: u16 = 0x62;
+    pub const F8: u16 = 0x64;
+    pub const F9: u16 = 0x65;
+    pub const F10: u16 = 0x6D;
+    pub const F11: u16 = 0x67;
+    pub const F12: u16 = 0x6F;
 }
 
-#[cfg(not(target_os = "macos"))]
-impl CGEventFlags {
-    pub const CGEventFlagControl: Self = Self(0);
-    pub const CGEventFlagShift: Self = Self(0);
-    pub const CGEventFlagAlternate: Self = Self(0);
-    pub const CGEventFlagCommand: Self = Self(0);
-    pub const fn contains(self, _other: Self) -> bool {
-        false
-    }
-}
+// ── modifier identity + bitset ────────────────────────────────────────────────
 
+/// Modifier bit values for the compact `u8` modifier set the capture/match state
+/// machines pass around. Shared with `macos.rs`, which derives them from
+/// `CGEventFlags`.
+pub const MOD_CONTROL: u8 = 1;
+pub const MOD_OPTION: u8 = 2;
+pub const MOD_SHIFT: u8 = 4;
+pub const MOD_COMMAND: u8 = 8;
+
+/// The safety floor: a chord must contain at least this many keys. Below this an
+/// unlock would be too easy to trigger by accident. (The old model required
+/// ≥3 *modifiers* + a key; this is the looser "≥3 keys, any mix" rule.)
+pub const MIN_CHORD_KEYS: usize = 3;
+
+/// One of the four chord modifiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RequiredFlags {
-    pub control: bool,
-    pub option: bool,
-    pub shift: bool,
-    pub command: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Combo {
-    pub required_flags: RequiredFlags,
-    pub final_keycode: u16,
-    pub canonical: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ModifierToken {
+pub enum Modifier {
     Control,
     Option,
     Shift,
     Command,
 }
 
-impl ModifierToken {
-    fn canonical(self) -> &'static str {
+impl Modifier {
+    /// Canonical token spelling (`ctrl`/`alt`/`shift`/`cmd`).
+    pub fn canonical(self) -> &'static str {
         match self {
-            ModifierToken::Control => "ctrl",
-            ModifierToken::Option => "alt",
-            ModifierToken::Shift => "shift",
-            ModifierToken::Command => "cmd",
+            Modifier::Control => "ctrl",
+            Modifier::Option => "alt",
+            Modifier::Shift => "shift",
+            Modifier::Command => "cmd",
+        }
+    }
+
+    /// This modifier's bit in the `MOD_*` set.
+    pub fn bit(self) -> u8 {
+        match self {
+            Modifier::Control => MOD_CONTROL,
+            Modifier::Option => MOD_OPTION,
+            Modifier::Shift => MOD_SHIFT,
+            Modifier::Command => MOD_COMMAND,
         }
     }
 }
 
-fn normalize_modifier_token(token: &str) -> Option<ModifierToken> {
+/// The four modifiers in their fixed bit order — used when expanding a modifier
+/// bitmask diff into individual `ChordKey::Mod` events.
+pub const MODIFIER_TABLE: [Modifier; 4] = [
+    Modifier::Control,
+    Modifier::Option,
+    Modifier::Shift,
+    Modifier::Command,
+];
+
+/// A single element of an ordered chord: a modifier or a regular key (keycode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChordKey {
+    Mod(Modifier),
+    Key(u16),
+}
+
+fn normalize_modifier_token(token: &str) -> Option<Modifier> {
     match token {
-        "ctrl" | "control" => Some(ModifierToken::Control),
-        "alt" | "option" | "opt" => Some(ModifierToken::Option),
-        "shift" => Some(ModifierToken::Shift),
-        "cmd" | "command" | "super" => Some(ModifierToken::Command),
+        "ctrl" | "control" => Some(Modifier::Control),
+        "alt" | "option" | "opt" => Some(Modifier::Option),
+        "shift" => Some(Modifier::Shift),
+        "cmd" | "command" | "super" => Some(Modifier::Command),
         _ => None,
     }
 }
@@ -75,277 +154,645 @@ fn keycode_for_key(token: &str) -> Option<u16> {
     let unsupported = None;
     match token {
         #[cfg(target_os = "macos")]
-        "a" => Some(KeyCode::ANSI_A),
+        "a" => Some(keycode::ANSI_A),
         #[cfg(target_os = "macos")]
-        "b" => Some(KeyCode::ANSI_B),
+        "b" => Some(keycode::ANSI_B),
         #[cfg(target_os = "macos")]
-        "c" => Some(KeyCode::ANSI_C),
+        "c" => Some(keycode::ANSI_C),
         #[cfg(target_os = "macos")]
-        "d" => Some(KeyCode::ANSI_D),
+        "d" => Some(keycode::ANSI_D),
         #[cfg(target_os = "macos")]
-        "e" => Some(KeyCode::ANSI_E),
+        "e" => Some(keycode::ANSI_E),
         #[cfg(target_os = "macos")]
-        "f" => Some(KeyCode::ANSI_F),
+        "f" => Some(keycode::ANSI_F),
         #[cfg(target_os = "macos")]
-        "g" => Some(KeyCode::ANSI_G),
+        "g" => Some(keycode::ANSI_G),
         #[cfg(target_os = "macos")]
-        "h" => Some(KeyCode::ANSI_H),
+        "h" => Some(keycode::ANSI_H),
         #[cfg(target_os = "macos")]
-        "i" => Some(KeyCode::ANSI_I),
+        "i" => Some(keycode::ANSI_I),
         #[cfg(target_os = "macos")]
-        "j" => Some(KeyCode::ANSI_J),
+        "j" => Some(keycode::ANSI_J),
         #[cfg(target_os = "macos")]
-        "k" => Some(KeyCode::ANSI_K),
+        "k" => Some(keycode::ANSI_K),
         #[cfg(target_os = "macos")]
-        "l" => Some(KeyCode::ANSI_L),
+        "l" => Some(keycode::ANSI_L),
         #[cfg(target_os = "macos")]
-        "m" => Some(KeyCode::ANSI_M),
+        "m" => Some(keycode::ANSI_M),
         #[cfg(target_os = "macos")]
-        "n" => Some(KeyCode::ANSI_N),
+        "n" => Some(keycode::ANSI_N),
         #[cfg(target_os = "macos")]
-        "o" => Some(KeyCode::ANSI_O),
+        "o" => Some(keycode::ANSI_O),
         #[cfg(target_os = "macos")]
-        "p" => Some(KeyCode::ANSI_P),
+        "p" => Some(keycode::ANSI_P),
         #[cfg(target_os = "macos")]
-        "q" => Some(KeyCode::ANSI_Q),
+        "q" => Some(keycode::ANSI_Q),
         #[cfg(target_os = "macos")]
-        "r" => Some(KeyCode::ANSI_R),
+        "r" => Some(keycode::ANSI_R),
         #[cfg(target_os = "macos")]
-        "s" => Some(KeyCode::ANSI_S),
+        "s" => Some(keycode::ANSI_S),
         #[cfg(target_os = "macos")]
-        "t" => Some(KeyCode::ANSI_T),
+        "t" => Some(keycode::ANSI_T),
         #[cfg(target_os = "macos")]
-        "u" => Some(KeyCode::ANSI_U),
+        "u" => Some(keycode::ANSI_U),
         #[cfg(target_os = "macos")]
-        "v" => Some(KeyCode::ANSI_V),
+        "v" => Some(keycode::ANSI_V),
         #[cfg(target_os = "macos")]
-        "w" => Some(KeyCode::ANSI_W),
+        "w" => Some(keycode::ANSI_W),
         #[cfg(target_os = "macos")]
-        "x" => Some(KeyCode::ANSI_X),
+        "x" => Some(keycode::ANSI_X),
         #[cfg(target_os = "macos")]
-        "y" => Some(KeyCode::ANSI_Y),
+        "y" => Some(keycode::ANSI_Y),
         #[cfg(target_os = "macos")]
-        "z" => Some(KeyCode::ANSI_Z),
+        "z" => Some(keycode::ANSI_Z),
         #[cfg(target_os = "macos")]
-        "0" => Some(KeyCode::ANSI_0),
+        "0" => Some(keycode::ANSI_0),
         #[cfg(target_os = "macos")]
-        "1" => Some(KeyCode::ANSI_1),
+        "1" => Some(keycode::ANSI_1),
         #[cfg(target_os = "macos")]
-        "2" => Some(KeyCode::ANSI_2),
+        "2" => Some(keycode::ANSI_2),
         #[cfg(target_os = "macos")]
-        "3" => Some(KeyCode::ANSI_3),
+        "3" => Some(keycode::ANSI_3),
         #[cfg(target_os = "macos")]
-        "4" => Some(KeyCode::ANSI_4),
+        "4" => Some(keycode::ANSI_4),
         #[cfg(target_os = "macos")]
-        "5" => Some(KeyCode::ANSI_5),
+        "5" => Some(keycode::ANSI_5),
         #[cfg(target_os = "macos")]
-        "6" => Some(KeyCode::ANSI_6),
+        "6" => Some(keycode::ANSI_6),
         #[cfg(target_os = "macos")]
-        "7" => Some(KeyCode::ANSI_7),
+        "7" => Some(keycode::ANSI_7),
         #[cfg(target_os = "macos")]
-        "8" => Some(KeyCode::ANSI_8),
+        "8" => Some(keycode::ANSI_8),
         #[cfg(target_os = "macos")]
-        "9" => Some(KeyCode::ANSI_9),
+        "9" => Some(keycode::ANSI_9),
         #[cfg(target_os = "macos")]
-        "f1" => Some(KeyCode::F1),
+        "f1" => Some(keycode::F1),
         #[cfg(target_os = "macos")]
-        "f2" => Some(KeyCode::F2),
+        "f2" => Some(keycode::F2),
         #[cfg(target_os = "macos")]
-        "f3" => Some(KeyCode::F3),
+        "f3" => Some(keycode::F3),
         #[cfg(target_os = "macos")]
-        "f4" => Some(KeyCode::F4),
+        "f4" => Some(keycode::F4),
         #[cfg(target_os = "macos")]
-        "f5" => Some(KeyCode::F5),
+        "f5" => Some(keycode::F5),
         #[cfg(target_os = "macos")]
-        "f6" => Some(KeyCode::F6),
+        "f6" => Some(keycode::F6),
         #[cfg(target_os = "macos")]
-        "f7" => Some(KeyCode::F7),
+        "f7" => Some(keycode::F7),
         #[cfg(target_os = "macos")]
-        "f8" => Some(KeyCode::F8),
+        "f8" => Some(keycode::F8),
         #[cfg(target_os = "macos")]
-        "f9" => Some(KeyCode::F9),
+        "f9" => Some(keycode::F9),
         #[cfg(target_os = "macos")]
-        "f10" => Some(KeyCode::F10),
+        "f10" => Some(keycode::F10),
         #[cfg(target_os = "macos")]
-        "f11" => Some(KeyCode::F11),
+        "f11" => Some(keycode::F11),
         #[cfg(target_os = "macos")]
-        "f12" => Some(KeyCode::F12),
+        "f12" => Some(keycode::F12),
         #[cfg(target_os = "macos")]
-        "space" => Some(KeyCode::SPACE),
+        "space" => Some(keycode::SPACE),
         #[cfg(target_os = "macos")]
-        "tab" => Some(KeyCode::TAB),
+        "tab" => Some(keycode::TAB),
         #[cfg(target_os = "macos")]
-        "return" => Some(KeyCode::RETURN),
+        "return" => Some(keycode::RETURN),
         _ => unsupported,
     }
 }
 
-pub fn parse_combo(input: &str) -> Result<Combo, String> {
-    let raw_tokens: Vec<&str> = input.split('+').collect();
-    if raw_tokens.is_empty() {
-        return Err("combo must contain at least one modifier and one final key".to_string());
-    }
-
-    let mut modifiers: RequiredFlags = RequiredFlags {
-        control: false,
-        option: false,
-        shift: false,
-        command: false,
+/// Reverse of `keycode_for_key`: map a virtual keycode back to its canonical
+/// token (e.g. `0x25` → `"l"`). `None` for an unmapped keycode (the same keys
+/// `keycode_for_key` rejects, e.g. F13). The capture flow rejects a chord that
+/// contains an unmappable key.
+#[cfg(target_os = "macos")]
+fn token_for_keycode(keycode: u16) -> Option<&'static str> {
+    use keycode::*;
+    let token = match keycode {
+        ANSI_A => "a",
+        ANSI_B => "b",
+        ANSI_C => "c",
+        ANSI_D => "d",
+        ANSI_E => "e",
+        ANSI_F => "f",
+        ANSI_G => "g",
+        ANSI_H => "h",
+        ANSI_I => "i",
+        ANSI_J => "j",
+        ANSI_K => "k",
+        ANSI_L => "l",
+        ANSI_M => "m",
+        ANSI_N => "n",
+        ANSI_O => "o",
+        ANSI_P => "p",
+        ANSI_Q => "q",
+        ANSI_R => "r",
+        ANSI_S => "s",
+        ANSI_T => "t",
+        ANSI_U => "u",
+        ANSI_V => "v",
+        ANSI_W => "w",
+        ANSI_X => "x",
+        ANSI_Y => "y",
+        ANSI_Z => "z",
+        ANSI_0 => "0",
+        ANSI_1 => "1",
+        ANSI_2 => "2",
+        ANSI_3 => "3",
+        ANSI_4 => "4",
+        ANSI_5 => "5",
+        ANSI_6 => "6",
+        ANSI_7 => "7",
+        ANSI_8 => "8",
+        ANSI_9 => "9",
+        F1 => "f1",
+        F2 => "f2",
+        F3 => "f3",
+        F4 => "f4",
+        F5 => "f5",
+        F6 => "f6",
+        F7 => "f7",
+        F8 => "f8",
+        F9 => "f9",
+        F10 => "f10",
+        F11 => "f11",
+        F12 => "f12",
+        SPACE => "space",
+        TAB => "tab",
+        RETURN => "return",
+        _ => return None,
     };
-    let mut seen_mod = std::collections::HashSet::new();
-    let mut final_key: Option<String> = None;
+    Some(token)
+}
 
-    for token in raw_tokens {
+/// Non-macOS stub: no keycodes map (the capture/freeze paths are macOS-only).
+#[cfg(not(target_os = "macos"))]
+fn token_for_keycode(_keycode: u16) -> Option<&'static str> {
+    None
+}
+
+fn token_for_chordkey(key: ChordKey) -> Option<&'static str> {
+    match key {
+        ChordKey::Mod(m) => Some(m.canonical()),
+        ChordKey::Key(kc) => token_for_keycode(kc),
+    }
+}
+
+// ── parsing ───────────────────────────────────────────────────────────────────
+
+/// A parsed, validated chord: the ordered keys plus its canonical wire form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Chord {
+    /// Keys in press order.
+    pub keys: Vec<ChordKey>,
+    /// `+`-joined canonical tokens, IN ORDER (e.g. `ctrl+l+alt`).
+    pub canonical: String,
+}
+
+/// Parse a `+`-joined chord string, preserving token order. Rules:
+/// - every token is a known modifier (incl. aliases) or a supported key;
+/// - no `escape`;
+/// - no duplicate key (you cannot hold the same key twice);
+/// - at least [`MIN_CHORD_KEYS`] keys.
+///
+/// Order is significant and preserved: `ctrl+l+alt` ≠ `ctrl+alt+l`.
+pub fn parse_chord(input: &str) -> Result<Chord, String> {
+    let mut keys: Vec<ChordKey> = Vec::new();
+    let mut tokens: Vec<String> = Vec::new();
+
+    for token in input.split('+') {
         let trimmed = token.trim();
         if trimmed.is_empty() {
-            return Err("combo tokens cannot be empty".to_string());
+            return Err("chord tokens cannot be empty".to_string());
         }
         let lowered = trimmed.to_ascii_lowercase();
-        let is_modifier = normalize_modifier_token(&lowered);
-        let Some(modifier) = is_modifier else {
-            if lowered == "escape" {
-                return Err("escape is not allowed as the unlock key".to_string());
-            }
-            if final_key.is_some() {
-                return Err("combo cannot contain a second non-modifier key".to_string());
-            }
-            final_key = Some(lowered);
-            continue;
+        if lowered == "escape" {
+            return Err("escape is not allowed in an unlock chord".to_string());
+        }
+        let (chord_key, canonical_token) = if let Some(m) = normalize_modifier_token(&lowered) {
+            (ChordKey::Mod(m), m.canonical().to_string())
+        } else if let Some(kc) = keycode_for_key(&lowered) {
+            (ChordKey::Key(kc), lowered.clone())
+        } else {
+            return Err(format!("unsupported key: {lowered}"));
         };
-        let canonical_modifier = modifier.canonical();
-        if !seen_mod.insert(canonical_modifier.to_string()) {
-            return Err(format!("duplicate modifier token: {canonical_modifier}"));
+        if keys.contains(&chord_key) {
+            return Err(format!("duplicate key in chord: {lowered}"));
         }
-        match modifier {
-            ModifierToken::Control => modifiers.control = true,
-            ModifierToken::Option => modifiers.option = true,
-            ModifierToken::Shift => modifiers.shift = true,
-            ModifierToken::Command => modifiers.command = true,
-        }
+        keys.push(chord_key);
+        tokens.push(canonical_token);
     }
 
-    let final_key = final_key.ok_or_else(|| "combo must include a non-modifier key".to_string())?;
-    let num_modifiers = (modifiers.control as u8)
-        + (modifiers.option as u8)
-        + (modifiers.shift as u8)
-        + (modifiers.command as u8);
-    if num_modifiers < 3 {
-        return Err("combo must include at least three modifiers".to_string());
+    if keys.len() < MIN_CHORD_KEYS {
+        return Err(format!("chord must include at least {MIN_CHORD_KEYS} keys"));
     }
 
-    let final_keycode =
-        keycode_for_key(&final_key).ok_or_else(|| format!("unsupported final key: {final_key}"))?;
-
-    let mut canonical_parts = Vec::new();
-    if modifiers.control {
-        canonical_parts.push("ctrl");
-    }
-    if modifiers.option {
-        canonical_parts.push("alt");
-    }
-    if modifiers.shift {
-        canonical_parts.push("shift");
-    }
-    if modifiers.command {
-        canonical_parts.push("cmd");
-    }
-    canonical_parts.push(&final_key);
-
-    Ok(Combo {
-        required_flags: modifiers,
-        final_keycode,
-        canonical: canonical_parts.join("+"),
+    Ok(Chord {
+        keys,
+        canonical: tokens.join("+"),
     })
+}
+
+/// Build the canonical wire form from a captured ordered sequence. `None` if any
+/// element is an unmappable keycode (the chord cannot be registered).
+pub fn canonical_from_sequence(keys: &[ChordKey]) -> Option<String> {
+    let mut parts: Vec<&'static str> = Vec::with_capacity(keys.len());
+    for &k in keys {
+        parts.push(token_for_chordkey(k)?);
+    }
+    Some(parts.join("+"))
+}
+
+// ── capture: record a chord by pressing it (finalize on release) ──────────────
+
+/// What the capture state machine wants the run loop to do after an event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaptureStep {
+    /// Keep capturing.
+    Continue,
+    /// Esc — abort, record nothing.
+    Cancel,
+    /// The anchor was released — the ordered chord is finalized.
+    Done(Vec<ChordKey>),
+}
+
+/// Accumulates a chord as the user presses it, in press order, and finalizes when
+/// the user releases the **anchor** — the first key they pressed.
+///
+/// So you press an anchor (say `ctrl`), then press as many keys as you like, in
+/// order, while holding it; releasing the anchor records the whole sequence.
+/// Releasing a *non-anchor* key does NOT finish (let it go and keep building).
+/// Esc cancels. Pure and fully testable; the macOS tap feeds it translated events.
+pub struct CaptureAccumulator {
+    seq: Vec<ChordKey>,
+    /// The first key pressed; releasing it finalizes the chord.
+    anchor: Option<ChordKey>,
+    held_mods: u8,
+    finalized: bool,
+}
+
+impl Default for CaptureAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CaptureAccumulator {
+    pub const fn new() -> Self {
+        Self {
+            seq: Vec::new(),
+            anchor: None,
+            held_mods: 0,
+            finalized: false,
+        }
+    }
+
+    /// Append a newly-pressed key in order (a held key cannot fire twice, so
+    /// autorepeat is deduped); the FIRST key recorded becomes the anchor.
+    fn push_key(&mut self, key: ChordKey) {
+        if self.seq.contains(&key) {
+            return;
+        }
+        self.seq.push(key);
+        if self.anchor.is_none() {
+            self.anchor = Some(key);
+        }
+    }
+
+    /// A regular key went down. `is_escape` true → cancel. Otherwise the key is
+    /// appended to the chord in press order.
+    pub fn on_key_down(&mut self, keycode: u16, is_escape: bool) -> CaptureStep {
+        if self.finalized {
+            return CaptureStep::Continue;
+        }
+        if is_escape {
+            return CaptureStep::Cancel;
+        }
+        self.push_key(ChordKey::Key(keycode));
+        CaptureStep::Continue
+    }
+
+    /// A regular key was released → finalize ONLY if it is the anchor.
+    pub fn on_key_up(&mut self, keycode: u16) -> CaptureStep {
+        self.on_release(ChordKey::Key(keycode))
+    }
+
+    /// The modifier set changed to `now`. Newly-pressed modifiers are appended in
+    /// press order; releasing the anchor modifier finalizes.
+    pub fn on_flags(&mut self, now: u8) -> CaptureStep {
+        if self.finalized {
+            return CaptureStep::Continue;
+        }
+        let added = now & !self.held_mods;
+        let removed = self.held_mods & !now;
+        self.held_mods = now;
+        for m in MODIFIER_TABLE {
+            if added & m.bit() != 0 {
+                self.push_key(ChordKey::Mod(m));
+            }
+        }
+        for m in MODIFIER_TABLE {
+            if removed & m.bit() != 0 {
+                if let step @ CaptureStep::Done(_) = self.on_release(ChordKey::Mod(m)) {
+                    return step;
+                }
+            }
+        }
+        CaptureStep::Continue
+    }
+
+    /// Finalize iff `key` is the anchor (and at least one key is recorded).
+    fn on_release(&mut self, key: ChordKey) -> CaptureStep {
+        if self.finalized || self.anchor != Some(key) || self.seq.is_empty() {
+            return CaptureStep::Continue;
+        }
+        self.finalized = true;
+        CaptureStep::Done(self.seq.clone())
+    }
+}
+
+// ── match: fire unlock on the chord pressed IN ORDER ──────────────────────────
+
+/// Detects the recorded chord pressed in **exact order**. Feed it `on_down` /
+/// `on_up` for every key (modifiers and regular keys); `on_down` returns `true`
+/// the instant the final key of the sequence is pressed in order.
+///
+/// Semantics:
+/// - keys not in the chord are ignored (a stray keypress won't break an attempt);
+/// - releasing a key that is part of the matched prefix resets progress (you must
+///   hold the chord as you build it);
+/// - an out-of-order chord key reseeds progress (so a fresh attempt can start
+///   immediately);
+/// - autorepeat (a second down for an already-held key) is ignored.
+pub struct SequenceMatcher {
+    target: Vec<ChordKey>,
+    progress: usize,
+    held: Vec<ChordKey>,
+}
+
+impl SequenceMatcher {
+    pub fn new(target: Vec<ChordKey>) -> Self {
+        Self {
+            target,
+            progress: 0,
+            held: Vec::new(),
+        }
+    }
+
+    /// Feed a key-down. Returns `true` iff the chord just completed in order.
+    pub fn on_down(&mut self, key: ChordKey) -> bool {
+        if self.held.contains(&key) {
+            return false; // autorepeat / already held
+        }
+        self.held.push(key);
+
+        let Some(pos) = self.target.iter().position(|&t| t == key) else {
+            return false; // foreign key — ignore, don't disturb progress
+        };
+
+        if pos == self.progress {
+            self.progress += 1;
+        } else {
+            // Out-of-order chord key: reseed. Targets are duplicate-free, so the
+            // only key that can re-open an attempt is target[0].
+            self.progress = usize::from(pos == 0);
+        }
+
+        if self.progress == self.target.len() {
+            self.progress = 0; // ready for a fresh attempt next time
+            return true;
+        }
+        false
+    }
+
+    /// Feed a key-up. Releasing a matched-prefix key resets progress.
+    pub fn on_up(&mut self, key: ChordKey) {
+        self.held.retain(|&h| h != key);
+        if let Some(pos) = self.target.iter().position(|&t| t == key) {
+            if pos < self.progress {
+                self.progress = 0;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // ── parse_chord ──────────────────────────────────────────────────────────
+
+    #[cfg(target_os = "macos")]
     #[test]
-    fn parse_aliases_and_canonicalizes() {
-        let combo = parse_combo("CMD + aLt + control + shift + L").unwrap();
-        assert!(combo.required_flags.control);
-        assert!(combo.required_flags.option);
-        assert!(combo.required_flags.shift);
-        assert!(combo.required_flags.command);
-        assert_eq!(combo.final_keycode, KeyCode::ANSI_L);
-        assert_eq!(combo.canonical, "ctrl+alt+shift+cmd+l");
+    fn parse_preserves_press_order_and_normalizes() {
+        let chord = parse_chord("CTRL + L + aLt").unwrap();
+        assert_eq!(chord.canonical, "ctrl+l+alt");
+        assert_eq!(
+            chord.keys,
+            vec![
+                ChordKey::Mod(Modifier::Control),
+                ChordKey::Key(keycode::ANSI_L),
+                ChordKey::Mod(Modifier::Option),
+            ]
+        );
+        // Order is significant: a different press order is a different chord.
+        let other = parse_chord("ctrl+alt+l").unwrap();
+        assert_eq!(other.canonical, "ctrl+alt+l");
+        assert_ne!(chord.canonical, other.canonical);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_accepts_modifier_aliases_in_order() {
+        let chord = parse_chord("control+option+super+space").unwrap();
+        assert_eq!(chord.canonical, "ctrl+alt+cmd+space");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parse_rejects_too_short_dupes_escape_unknown() {
+        // Below the floor.
+        assert!(
+            parse_chord("ctrl+l").is_err(),
+            "two keys is below the floor"
+        );
+        // Duplicate key (a held key cannot fire twice).
+        assert!(
+            parse_chord("ctrl+l+ctrl").is_err(),
+            "duplicate modifier rejected"
+        );
+        assert!(parse_chord("ctrl+l+l").is_err(), "duplicate key rejected");
+        // Alias of an already-present modifier is still a duplicate.
+        assert!(parse_chord("ctrl+control+l").is_err());
+        // Escape forbidden anywhere.
+        assert!(parse_chord("ctrl+escape+l").is_err());
+        // Unknown / unmapped key.
+        assert!(parse_chord("ctrl+alt+f13").is_err());
+        // Empty token.
+        assert!(parse_chord("ctrl++l").is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn canonical_from_sequence_round_trips_through_parse() {
+        let seq = vec![
+            ChordKey::Mod(Modifier::Control),
+            ChordKey::Key(keycode::ANSI_L),
+            ChordKey::Mod(Modifier::Option),
+        ];
+        let canon = canonical_from_sequence(&seq).unwrap();
+        assert_eq!(canon, "ctrl+l+alt");
+        assert_eq!(parse_chord(&canon).unwrap().keys, seq);
+        // Unmappable keycode → None.
+        assert_eq!(canonical_from_sequence(&[ChordKey::Key(0x6E)]), None);
+    }
+
+    // ── SequenceMatcher (pure, platform-independent) ─────────────────────────
+
+    fn seq(keys: &[ChordKey]) -> SequenceMatcher {
+        SequenceMatcher::new(keys.to_vec())
+    }
+    const A: ChordKey = ChordKey::Key(0x00);
+    const B: ChordKey = ChordKey::Key(0x0B);
+    const C: ChordKey = ChordKey::Key(0x08);
+    const CTRL: ChordKey = ChordKey::Mod(Modifier::Control);
+    const ALT: ChordKey = ChordKey::Mod(Modifier::Option);
+
+    #[test]
+    fn matcher_fires_on_exact_in_order_press() {
+        let mut m = seq(&[CTRL, A, ALT]);
+        assert!(!m.on_down(CTRL));
+        assert!(!m.on_down(A));
+        assert!(m.on_down(ALT), "completing in order fires unlock");
     }
 
     #[test]
-    fn parse_requires_three_modifiers_and_final_key() {
-        assert!(
-            parse_combo("ctrl+alt+L").is_err(),
-            "at least three modifiers required"
-        );
-        assert!(
-            parse_combo("ctrl+alt+shift+cmd").is_err(),
-            "must include a final key"
-        );
-        assert!(
-            parse_combo("ctrl+alt+shift+cmd+escape").is_err(),
-            "escape forbidden"
-        );
+    fn matcher_rejects_wrong_order() {
+        let mut m = seq(&[CTRL, A, ALT]);
+        assert!(!m.on_down(CTRL));
+        assert!(!m.on_down(ALT)); // out of order → reseed to 0
+        assert!(!m.on_down(A));
+        // never completes in this attempt
+        assert!(!m.on_down(ALT)); // ALT again but progress was reset
     }
 
     #[test]
-    fn parse_rejects_duplicate_and_unknown() {
-        assert!(
-            parse_combo("ctrl+alt+shift+cmd+ctrl+l").is_err(),
-            "duplicate modifier not allowed"
-        );
-        assert!(
-            parse_combo("ctrl+alt+opt+shift+cmd+l").is_err(),
-            "duplicate modifier aliases not allowed"
-        );
-        assert!(
-            parse_combo("ctrl+alt+shift+cmd+f13").is_err(),
-            "unknown key rejected"
-        );
+    fn matcher_ignores_foreign_keys() {
+        let mut m = seq(&[CTRL, A]);
+        assert!(!m.on_down(CTRL));
+        assert!(!m.on_down(B), "B is not in the chord → ignored");
+        assert!(m.on_down(A), "foreign key did not disturb progress");
     }
 
     #[test]
-    fn event_matches_combo_checks_required_state() {
-        let combo = parse_combo("ctrl+alt+shift+cmd+l").unwrap();
-        let missing_shift = CGEventFlags::CGEventFlagControl
-            | CGEventFlags::CGEventFlagAlternate
-            | CGEventFlags::CGEventFlagCommand;
-        assert!(!event_matches_combo(
-            &combo,
-            combo.final_keycode,
-            missing_shift
-        ));
-        let exact = CGEventFlags::CGEventFlagControl
-            | CGEventFlags::CGEventFlagAlternate
-            | CGEventFlags::CGEventFlagShift
-            | CGEventFlags::CGEventFlagCommand;
-        assert!(event_matches_combo(&combo, combo.final_keycode, exact));
-        assert!(!event_matches_combo(&combo, combo.final_keycode + 1, exact));
+    fn matcher_resets_when_prefix_key_released() {
+        let mut m = seq(&[CTRL, A, ALT]);
+        assert!(!m.on_down(CTRL));
+        assert!(!m.on_down(A));
+        m.on_up(CTRL); // released a matched-prefix key → reset
+        assert!(!m.on_down(ALT), "must NOT unlock after releasing the hold");
     }
-}
 
-#[allow(dead_code)]
-pub fn event_matches_combo(combo: &Combo, keycode: u16, flags: CGEventFlags) -> bool {
-    if keycode != combo.final_keycode {
-        return false;
+    #[test]
+    fn matcher_dedupes_autorepeat() {
+        let mut m = seq(&[A, B]);
+        assert!(!m.on_down(A));
+        assert!(!m.on_down(A), "autorepeat of a held key is ignored");
+        assert!(m.on_down(B));
     }
-    let has_control = flags.contains(CGEventFlags::CGEventFlagControl);
-    let has_shift = flags.contains(CGEventFlags::CGEventFlagShift);
-    let has_option = flags.contains(CGEventFlags::CGEventFlagAlternate);
-    let has_command = flags.contains(CGEventFlags::CGEventFlagCommand);
 
-    if combo.required_flags.control && !has_control {
-        return false;
+    #[test]
+    fn matcher_reseeds_for_a_fresh_attempt() {
+        let mut m = seq(&[A, B]);
+        assert!(!m.on_down(B)); // wrong start
+        m.on_up(B);
+        assert!(!m.on_down(A)); // fresh attempt
+        assert!(m.on_down(B));
     }
-    if combo.required_flags.option && !has_option {
-        return false;
+
+    #[test]
+    fn matcher_handles_a_stray_target_key_between() {
+        // Chord [A, B, C]; pressing A, C (wrong, == target[2]) resets to 0
+        // because C != target[1]; then A, B, C in order completes.
+        let mut m = seq(&[A, B, C]);
+        assert!(!m.on_down(A));
+        assert!(!m.on_down(C)); // out of order → reseed (C != target[0]) → 0
+        m.on_up(C);
+        m.on_up(A);
+        assert!(!m.on_down(A));
+        assert!(!m.on_down(B));
+        assert!(m.on_down(C));
     }
-    if combo.required_flags.shift && !has_shift {
-        return false;
+
+    // ── CaptureAccumulator (pure) ────────────────────────────────────────────
+
+    #[test]
+    fn capture_finalizes_only_on_anchor_release() {
+        let mut acc = CaptureAccumulator::new();
+        // ctrl is pressed first → it is the anchor. Then l, then alt, all held.
+        assert_eq!(acc.on_flags(MOD_CONTROL), CaptureStep::Continue);
+        assert_eq!(acc.on_key_down(0x25, false), CaptureStep::Continue); // l
+        assert_eq!(
+            acc.on_flags(MOD_CONTROL | MOD_OPTION),
+            CaptureStep::Continue
+        );
+        // Releasing a NON-anchor key (drop alt) must NOT finalize.
+        assert_eq!(acc.on_flags(MOD_CONTROL), CaptureStep::Continue);
+        // Releasing the anchor (ctrl) finalizes the WHOLE press-order sequence
+        // (alt stays recorded even though it was let go first).
+        match acc.on_flags(0) {
+            CaptureStep::Done(seq) => assert_eq!(
+                seq,
+                vec![
+                    ChordKey::Mod(Modifier::Control),
+                    ChordKey::Key(0x25),
+                    ChordKey::Mod(Modifier::Option),
+                ]
+            ),
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
-    if combo.required_flags.command && !has_command {
-        return false;
+
+    #[test]
+    fn capture_anchor_can_be_a_regular_key() {
+        let mut acc = CaptureAccumulator::new();
+        // l pressed first → anchor is the regular key l.
+        assert_eq!(acc.on_key_down(0x25, false), CaptureStep::Continue);
+        assert_eq!(acc.on_flags(MOD_CONTROL), CaptureStep::Continue);
+        // Releasing the modifier (non-anchor) does not finalize.
+        assert_eq!(acc.on_flags(0), CaptureStep::Continue);
+        // Releasing l (the anchor) finalizes.
+        match acc.on_key_up(0x25) {
+            CaptureStep::Done(seq) => assert_eq!(
+                seq,
+                vec![ChordKey::Key(0x25), ChordKey::Mod(Modifier::Control)]
+            ),
+            other => panic!("expected Done, got {other:?}"),
+        }
     }
-    true
+
+    #[test]
+    fn capture_non_anchor_release_does_not_finalize() {
+        let mut acc = CaptureAccumulator::new();
+        assert_eq!(acc.on_flags(MOD_CONTROL), CaptureStep::Continue); // anchor = ctrl
+        assert_eq!(acc.on_key_down(0x25, false), CaptureStep::Continue); // l
+                                                                         // Releasing l (not the anchor) keeps capturing.
+        assert_eq!(acc.on_key_up(0x25), CaptureStep::Continue);
+    }
+
+    #[test]
+    fn capture_escape_cancels() {
+        let mut acc = CaptureAccumulator::new();
+        assert_eq!(acc.on_flags(MOD_CONTROL), CaptureStep::Continue);
+        assert_eq!(acc.on_key_down(53, true), CaptureStep::Cancel);
+    }
+
+    #[test]
+    fn capture_release_before_any_key_is_noop() {
+        let mut acc = CaptureAccumulator::new();
+        // A release with nothing recorded yet (no anchor) must NOT finalize.
+        assert_eq!(acc.on_key_up(0x25), CaptureStep::Continue);
+        assert_eq!(acc.on_flags(0), CaptureStep::Continue);
+        // Re-asserting the same flags (no new bit) records nothing new.
+        assert_eq!(acc.on_flags(MOD_CONTROL), CaptureStep::Continue);
+        assert_eq!(acc.on_flags(MOD_CONTROL), CaptureStep::Continue);
+    }
 }
