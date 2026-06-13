@@ -9,8 +9,8 @@
 // reference them via the crate root.
 use vigil::{battery, config, daemon, debug, output, power_guard, thermal};
 
+mod commands;
 mod exit;
-mod shim;
 
 use std::ffi::OsString;
 
@@ -260,16 +260,16 @@ fn dispatch(command: Command) -> ! {
             cmd_debug(sub, json);
             std::process::exit(0);
         }
-        Command::Setup { args } => shim::exec_bash("setup", &args),
-        Command::Uninstall { args } => shim::exec_bash("uninstall", &args),
-        Command::Start { args } => shim::exec_bash("start", &args),
-        Command::Stop { args } => shim::exec_bash("stop", &args),
-        Command::Status { args } => shim::exec_bash("status", &args),
-        Command::Log { args } => shim::exec_bash("log", &args),
-        Command::Run { args } => shim::exec_bash("run", &args),
-        Command::Reload { args } => shim::exec_bash("reload", &args),
-        Command::Lock { args } => shim::exec_bash("lock", &args),
-        Command::Doctor { args } => shim::exec_bash("doctor", &args),
+        Command::Setup { args } => commands::setup::run(args),
+        Command::Uninstall { args } => commands::uninstall::run(args),
+        Command::Start { args } => commands::start::run(args),
+        Command::Stop { args } => commands::stop::run(args),
+        Command::Status { args } => commands::status::run(args),
+        Command::Log { args } => commands::log::run(args),
+        Command::Run { args } => commands::run::run(args),
+        Command::Reload { args } => commands::reload::run(args),
+        Command::Lock { args } => commands::lock::run(args),
+        Command::Doctor { args } => commands::doctor::run(args),
     }
 }
 

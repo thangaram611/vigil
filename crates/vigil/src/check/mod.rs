@@ -376,6 +376,31 @@ impl CheckEngine {
         }
     }
 
+    /// Classify ONLY the daemon scan state (+age), reading the pidfile + tick
+    /// file + the supplied load probe. Lightweight relative to [`Self::run`]
+    /// (no helper IPC / pmset reads), so the `start` bounded first-scan wait can
+    /// call it in a tight 100ms poll loop (§2.3.5). Pure over `now` for testing.
+    pub fn daemon_scan<P: LoadProbe>(
+        cfg: &VigilConfig,
+        now: i64,
+        probe: &P,
+    ) -> (DaemonScanState, Option<i64>) {
+        let loaded = probe.is_loaded(crate::service::USER_AGENT_LABEL);
+        let daemon_pid_raw = std::fs::read_to_string(&cfg.daemon_pidfile).ok();
+        let daemon_pid_str = daemon_pid_raw.as_ref().map(|s| s.trim().to_string());
+        let tick = read_tick_fields(Path::new(&cfg.daemon_tick_file));
+        let pidfile_mtime = file_mtime_secs(Path::new(&cfg.daemon_pidfile));
+        classify_scan_state(
+            loaded,
+            daemon_pid_str.as_deref().filter(|s| is_numeric(s)),
+            tick.as_ref(),
+            pidfile_mtime,
+            now,
+            cfg.tick_secs,
+            cfg.start_wait_secs,
+        )
+    }
+
     /// Assemble the full [`StatusSnapshot`] (read-only). Mirrors bash
     /// `cmd_status_json` field-by-field (§5.1) so `to_json` is byte-stable.
     fn snapshot<P: LoadProbe, H: HelperClient, S: crate::power::pmset::SleepReader>(

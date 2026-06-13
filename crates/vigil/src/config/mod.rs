@@ -26,6 +26,13 @@ use serde::{Deserialize, Serialize};
 
 pub const VIGIL_ROOT: &str = "/Library/Application Support/vigil";
 pub const NEWSYSLOG_FILE: &str = "/etc/newsyslog.d/vigil.conf";
+/// The system LaunchDaemon plist for the privileged helper. Hardcoded — the
+/// label `com.thangaram.vigil.helper` is never overridable (bash
+/// `VIGIL_HELPER_PLIST`). Part of the 14-path privileged allowlist (§4.8/Q5).
+pub const HELPER_PLIST_FILE: &str = "/Library/LaunchDaemons/com.thangaram.vigil.helper.plist";
+/// The legacy sudoers file vigil removes on setup/uninstall (bash
+/// `VIGIL_LEGACY_SUDOERS_FILE`). Hardcoded; part of the 14-path allowlist.
+pub const LEGACY_SUDOERS_FILE: &str = "/etc/sudoers.d/vigil";
 
 // ── Config error ──────────────────────────────────────────────────────────────
 
@@ -751,8 +758,23 @@ impl VigilConfig {
             NEWSYSLOG_FILE.to_string()
         );
 
-        // The helper plist path is a bin/vigil constant, not part of VigilConfig.
-        // Plist checks live in the admin slices (5.5/5.7).
+        // The 14th/13th allowlist entries (§4.8/Q5, bash
+        // `cmd_assert_standard_privileged_paths` lines 105,107): the helper plist
+        // and legacy sudoers paths. These are hardcoded constants (no VigilConfig
+        // field), so the actual == expected check is structurally true; it is
+        // present to make the privileged-path allowlist bash-faithful at all 14
+        // entries and to fail loudly if a future refactor ever makes them
+        // overridable.
+        check!(
+            "VIGIL_HELPER_PLIST",
+            HELPER_PLIST_FILE,
+            HELPER_PLIST_FILE.to_string()
+        );
+        check!(
+            "VIGIL_LEGACY_SUDOERS_FILE",
+            LEGACY_SUDOERS_FILE,
+            LEGACY_SUDOERS_FILE.to_string()
+        );
         Ok(())
     }
 

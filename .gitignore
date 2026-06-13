@@ -14,3 +14,6 @@ target/
 # Scratch / local-only files
 .scratch/
 *.local
+
+# Claude Code session artifacts (worktrees, workflow scripts, transcripts)
+.claude/
