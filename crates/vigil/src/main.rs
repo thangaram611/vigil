@@ -1,0 +1,209 @@
+//! vigil — single-binary CLI skeleton (Phase 5.1).
+//!
+//! clap-derive dispatch with exit-code discipline. Only `--version`, help, and
+//! `completions` are handled natively; every real command delegates to the
+//! existing bash `bin/vigil` via `shim::exec_bash` (execv) so exit codes and
+//! signals propagate verbatim.
+
+mod exit;
+mod output;
+mod shim;
+
+use std::ffi::OsString;
+
+use clap::error::ErrorKind;
+use clap::{ColorChoice, CommandFactory, FromArgMatches, Parser, Subcommand};
+
+/// Top-level CLI. `--color` is a global flag via colorchoice-clap.
+#[derive(Parser, Debug)]
+#[command(
+    name = "vigil",
+    version,
+    about = "vigil — keep Mac awake while AI agents are working",
+    styles = output::clap_styles(),
+)]
+pub(crate) struct Cli {
+    /// Global color choice (auto|always|never). Flattened from colorchoice-clap.
+    #[command(flatten)]
+    color: colorchoice_clap::Color,
+
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Install root helper + newsyslog entry, create dirs, load LaunchAgent
+    Setup {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// Remove helper + plist, restore baseline, wipe state
+    Uninstall {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// Bootstrap the LaunchAgent
+    Start {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// Boot out the LaunchAgent
+    Stop {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// Show service, activity, and power state
+    Status {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// cat / tail -f the daemon log
+    Log {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// Wrapper: hold sleep prevention while <cmd> runs
+    Run {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// Re-sync daemon + libs into install dir, restart launchd
+    Reload {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// Freeze input until configured combo (and `lock doctor`)
+    Lock {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// Diagnose installation
+    Doctor {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
+    /// Generate shell completion script to stdout (native)
+    Completions {
+        /// Shell to generate completions for
+        shell: clap_complete::Shell,
+    },
+}
+
+fn main() {
+    let cli = parse_or_exit();
+
+    // --color was already applied to the process-global ColorChoice inside
+    // `parse_or_exit` (so help/version/error rendering during parsing is also
+    // governed). Re-applying here is a harmless no-op kept for clarity/safety.
+    cli.color.write_global();
+
+    dispatch(cli.command);
+}
+
+/// Resolve the global `--color` value from argv with a tiny hand-rolled scan.
+///
+/// clap emits help/usage/version/errors DURING parsing — before the typed
+/// `Cli.color` field exists — so we must learn the color choice up front. A
+/// clap `ignore_errors(true)` pre-pass is NOT reliable here: when `--help` or
+/// `--version` appears, clap short-circuits and the global `--color` value is
+/// absent from the partial matches (it reports the default `Auto`), which is
+/// exactly the case the substrate must color correctly. So we scan argv
+/// directly for `--color=<v>` and `--color <v>`. Unknown/garbage values fall
+/// back to `Auto` (clap will reject them with a usage error during real parse).
+/// Last occurrence wins, matching clap's override semantics.
+fn resolve_color_choice() -> ColorChoice {
+    let mut choice = ColorChoice::Auto;
+    let mut args = std::env::args_os().skip(1).peekable();
+    while let Some(arg) = args.next() {
+        let s = arg.to_string_lossy();
+        let value = if let Some(v) = s.strip_prefix("--color=") {
+            Some(v.to_string())
+        } else if s == "--color" {
+            args.peek().map(|n| n.to_string_lossy().into_owned())
+        } else {
+            None
+        };
+        if let Some(v) = value {
+            choice = match v.as_str() {
+                "always" => ColorChoice::Always,
+                "never" => ColorChoice::Never,
+                _ => ColorChoice::Auto,
+            };
+        }
+    }
+    choice
+}
+
+/// Parse argv. On a clap error, map DisplayHelp/DisplayVersion to a clean exit 0
+/// (printed to stdout); everything else (unknown subcommand/arg, missing value)
+/// to stderr + exit 64.
+fn parse_or_exit() -> Cli {
+    // Resolve and apply `--color` BEFORE clap renders any help/version/error
+    // text, because that output is produced during parsing. Two channels need
+    // it: (1) the process-global ColorChoice (anstream/owo-colors prints, and
+    // the streams clap writes through); (2) clap's OWN help/version/error
+    // colorization, which is governed by the Command's `.color()` setting and
+    // NOT by the colorchoice global — so we must set both or `--color` would be
+    // a no-op for exactly the styled output this substrate governs.
+    let choice = resolve_color_choice();
+    colorchoice_clap::Color { color: choice }.write_global();
+
+    // Build the command with the resolved color so help/version/error rendering
+    // (DisplayHelp/DisplayVersion as well as usage errors from try_get_matches)
+    // honors `--color=always|never` rather than clap's default Auto.
+    let matches = match Cli::command()
+        .color(choice)
+        .try_get_matches_from(std::env::args_os())
+    {
+        Ok(m) => m,
+        Err(e) => exit_on_clap_error(e),
+    };
+    match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        // from_arg_matches only fails on an internal mismatch; surface it as a
+        // usage error through the same colored, exit-coded path.
+        Err(e) => exit_on_clap_error(e.with_cmd(&Cli::command().color(choice))),
+    }
+}
+
+/// Print a clap error with its configured color and exit: help/version → 0
+/// (stdout); every other kind (unknown subcommand/arg, missing value) → 64
+/// (stderr).
+fn exit_on_clap_error(e: clap::Error) -> ! {
+    match e.kind() {
+        ErrorKind::DisplayHelp
+        | ErrorKind::DisplayVersion
+        | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => {
+            // clap formats help/version to stdout for these kinds; exit 0.
+            let _ = e.print();
+            std::process::exit(0);
+        }
+        _ => {
+            // Unknown command/subcommand, bad/missing arg, etc.
+            let _ = e.print(); // goes to stderr for error kinds
+            std::process::exit(exit::EX_USAGE); // 64
+        }
+    }
+}
+
+/// Dispatch a parsed command. Returns `!` — every arm either execs (never
+/// returns) or exits.
+fn dispatch(command: Command) -> ! {
+    match command {
+        Command::Completions { shell } => {
+            output::generate_completions(shell);
+            std::process::exit(0);
+        }
+        Command::Setup { args } => shim::exec_bash("setup", &args),
+        Command::Uninstall { args } => shim::exec_bash("uninstall", &args),
+        Command::Start { args } => shim::exec_bash("start", &args),
+        Command::Stop { args } => shim::exec_bash("stop", &args),
+        Command::Status { args } => shim::exec_bash("status", &args),
+        Command::Log { args } => shim::exec_bash("log", &args),
+        Command::Run { args } => shim::exec_bash("run", &args),
+        Command::Reload { args } => shim::exec_bash("reload", &args),
+        Command::Lock { args } => shim::exec_bash("lock", &args),
+        Command::Doctor { args } => shim::exec_bash("doctor", &args),
+    }
+}

@@ -66,6 +66,8 @@ run_file() {
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 export VIGIL_REPO_ROOT="$repo_root"
 
+# Auto-discovers every tests/*_test.sh (e.g. cli_dispatch_test.sh, which drives
+# the built Rust target/debug/vigil binary).
 for f in "$repo_root"/tests/*_test.sh; do
     [[ -e "$f" ]] || continue
     run_file "$f"
