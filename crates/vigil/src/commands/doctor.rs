@@ -52,14 +52,21 @@ pub fn run(args: Vec<OsString>) -> ! {
     let opts = parse(&args);
     let cfg = load_config_or_exit();
     let now = now_unix();
+    // Spinner on stderr while the snapshot is gathered (the helper liveness probe
+    // can take a beat). Interactive-only → piped/CI stdout stays byte-identical.
+    let interactive = super::interactive(false);
 
     if opts.power {
-        let report = CheckEngine::run(&cfg, CheckMode::Power, now);
+        let report = super::tui::with_activity(interactive, "Checking power helper…", || {
+            CheckEngine::run(&cfg, CheckMode::Power, now)
+        });
         let code = render_power(&report.snapshot, opts.verbose);
         std::process::exit(code);
     }
 
-    let report = CheckEngine::run(&cfg, CheckMode::Doctor, now);
+    let report = super::tui::with_activity(interactive, "Running diagnostics…", || {
+        CheckEngine::run(&cfg, CheckMode::Doctor, now)
+    });
     let code = render_doctor(&cfg, &report.snapshot, opts.verbose);
     std::process::exit(code);
 }

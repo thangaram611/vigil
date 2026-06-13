@@ -333,6 +333,16 @@ impl LoadProbe for RealLoadProbe {
     }
 }
 
+/// The status/doctor helper liveness probe must stay snappy: it only needs to
+/// know whether the privileged helper answers a `status` ping *now*. The helper
+/// `--serve` loop polls its request dir every `poll_secs` (default 1s), so a
+/// couple of cycles is plenty. We cap the probe FAR below the 10s power-
+/// OPERATION timeout (`power_helper_timeout_secs`) — at the full timeout a single
+/// dead/slow helper blocks the ENTIRE status/doctor paint (the ~10s blank wait).
+/// This cap only affects the diagnostic snapshot; the daemon's real engage/
+/// release path builds its own client with the full timeout.
+const STATUS_PROBE_TIMEOUT_SECS: u32 = 2;
+
 /// The unified check engine.
 pub struct CheckEngine;
 
@@ -344,7 +354,8 @@ impl CheckEngine {
         let helper = crate::ipc::MacHelperClient {
             request_dir: std::path::PathBuf::from(&cfg.power_request_dir),
             response_dir: std::path::PathBuf::from(&cfg.power_response_dir),
-            timeout_secs: cfg.power_helper_timeout_secs,
+            // Liveness probe, not a power operation — cap it (see the const docs).
+            timeout_secs: cfg.power_helper_timeout_secs.min(STATUS_PROBE_TIMEOUT_SECS),
         };
         let sleep = crate::power::pmset::MacSleepReader;
         Self::run_with(cfg, mode, now, &probe, &helper, &sleep)

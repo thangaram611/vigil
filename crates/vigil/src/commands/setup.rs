@@ -14,20 +14,23 @@ use std::ffi::OsString;
 use vigil::config::VigilConfig;
 use vigil::service::{MacosLaunchdInstaller, ServiceInstaller, StartState};
 
+use super::tui::Tui;
 use super::{
-    LEGACY_SUDOERS_FILE, cmd_sync_install, die, helper_plist_path, load_config_or_exit,
-    require_admin_allowed_or_die, user_plist_path,
+    LEGACY_SUDOERS_FILE, bin_link_path, cmd_sync_install, die, helper_plist_path, interactive,
+    link_vigil_onto_path, load_config_or_exit, require_admin_allowed_or_die, user_plist_path,
 };
 
-/// `vigil setup [--dry-run] [--verbose]`.
+/// `vigil setup [--dry-run] [--verbose] [--yes|--non-interactive]`.
 pub fn run(args: Vec<OsString>) -> ! {
     let mut dry_run = false;
     let mut verbose = false;
+    let mut yes = false;
     for a in &args {
         match a.to_str() {
             Some("--dry-run") => dry_run = true,
             Some("--verbose") => verbose = true,
-            _ => die("usage: vigil setup [--dry-run] [--verbose]"),
+            Some("--yes") | Some("--non-interactive") => yes = true,
+            _ => die("usage: vigil setup [--dry-run] [--verbose] [--yes|--non-interactive]"),
         }
     }
 
@@ -47,95 +50,174 @@ pub fn run(args: Vec<OsString>) -> ! {
         die(&e);
     }
 
+    // The clack-style UI, bound once to the interactive gate. When false (--yes,
+    // piped, CI) EVERY method falls back to the byte-frozen plain lines below.
+    let ui = Tui::new(interactive(yes));
+
+    // Interactive confirm — strictly AFTER all three guards and BEFORE the first
+    // side effect (so guard ordering + exit codes are untouched; declining is a
+    // pre-sudo abort, and VIGIL_TEST_NO_ADMIN already died at guard #1 above).
+    // Non-interactive/--yes → `confirm` returns the default WITHOUT prompting →
+    // proceeds, identical to today (which skipped the confirm entirely).
+    if !ui.confirm("Proceed with install? Privileged steps run via sudo.", true) {
+        // Decline = clean no-op exit 0 (nothing was changed). NOT an error code.
+        ui.outro_cancel("vigil: aborted. No privileged changes were made.");
+        std::process::exit(0);
+    }
+
     let installer = MacosLaunchdInstaller::new();
 
-    anstream::println!("vigil: setting up");
+    ui.intro("vigil: setting up");
 
     // 1. prepare user directories.
-    anstream::println!();
-    anstream::println!("  1. preparing user directories");
+    ui.rail_space();
+    let pb = ui.step(
+        "preparing user directories",
+        "  1. preparing user directories",
+    );
     if let Err(e) = cfg.ensure_state_dir() {
         die(&format!("could not create state dirs: {e}"));
     }
-    anstream::println!("     state dir: {}", cfg.state_dir);
-    anstream::println!("     log dir:   {}", cfg.log_dir);
+    pb.detail(
+        &format!("state dir: {}", cfg.state_dir),
+        &format!("     state dir: {}", cfg.state_dir),
+    );
+    pb.detail(
+        &format!("log dir: {}", cfg.log_dir),
+        &format!("     log dir:   {}", cfg.log_dir),
+    );
+    pb.done("user directories ready");
 
     // Silent stop: boot out a prior daemon BEFORE replacing its binary.
     let _ = installer.stop_user_agent(&cfg);
 
     // 2. install user daemon (TCC copy-out, BEFORE the plist points at it).
-    anstream::println!();
-    anstream::println!("  2. installing user daemon");
-    if let Err(e) = cmd_sync_install(&cfg) {
-        die(&e);
-    }
+    ui.rail_space();
+    let pb = ui.step("installing user daemon", "  2. installing user daemon");
+    let dev_vigil = match cmd_sync_install(&cfg, ui) {
+        Ok(p) => p,
+        Err(e) => die(&e),
+    };
+    // Put `vigil` on the user's PATH (symlink into ~/.local/bin). It points at the
+    // dev build in the repo so `setup`/`reload` can rebuild from source; the
+    // installed copy at {install}/bin is only for the LaunchAgent daemon.
+    link_vigil_onto_path(&dev_vigil, ui);
+    pb.done("user daemon installed");
 
     // 3. install privileged power helper (root LaunchDaemon + IPC dirs +
-    //    legacy-sudoers cleanup).
-    anstream::println!();
-    anstream::println!("  3. installing privileged power helper");
+    //    legacy-sudoers cleanup). The sudo region is run WITHOUT an active
+    //    spinner so the macOS password prompt owns the TTY.
+    ui.rail_space();
+    let pb = ui.step(
+        "installing privileged power helper",
+        "  3. installing privileged power helper",
+    );
     if verbose {
-        anstream::println!("     LaunchDaemon plist preview:");
+        pb.detail(
+            "LaunchDaemon plist preview:",
+            "     LaunchDaemon plist preview:",
+        );
         match installer.render_helper_daemon(&cfg) {
             Ok(p) => indent_print(&p, 7),
             Err(e) => die(&format!("could not render helper plist: {e}")),
         }
         anstream::println!();
     } else {
-        anstream::println!("     LaunchDaemon: {}", helper_plist_path());
-        anstream::println!("     binary:       {}", cfg.root_helper);
+        pb.detail(
+            &format!("LaunchDaemon: {}", helper_plist_path()),
+            &format!("     LaunchDaemon: {}", helper_plist_path()),
+        );
+        pb.detail(
+            &format!("binary: {}", cfg.root_helper),
+            &format!("     binary:       {}", cfg.root_helper),
+        );
     }
-    cmd_install_root_helper(&cfg, &installer);
-    // legacy-sudoers cleanup.
-    if std::path::Path::new(LEGACY_SUDOERS_FILE).is_file() {
-        anstream::println!("  removing legacy sudoers file: {LEGACY_SUDOERS_FILE}");
-        sudo_rm_f(LEGACY_SUDOERS_FILE);
-    }
+    // Suspend the spinner across the privileged block: sudo may prompt for a
+    // password and an active steady-tick would clobber that prompt line.
+    pb.suspend(|| {
+        cmd_install_root_helper(&cfg, &installer, ui);
+        // legacy-sudoers cleanup.
+        if std::path::Path::new(LEGACY_SUDOERS_FILE).is_file() {
+            pb.detail(
+                &format!("removing legacy sudoers file: {LEGACY_SUDOERS_FILE}"),
+                &format!("  removing legacy sudoers file: {LEGACY_SUDOERS_FILE}"),
+            );
+            sudo_rm_f(LEGACY_SUDOERS_FILE);
+        }
+    });
+    pb.done("privileged power helper installed");
 
     // 4. install log rotation (newsyslog → /etc/newsyslog.d/vigil.conf).
-    anstream::println!();
-    anstream::println!("  4. installing log rotation");
+    ui.rail_space();
+    let pb = ui.step("installing log rotation", "  4. installing log rotation");
     let newsyslog = match installer.render_newsyslog(&cfg) {
         Ok(s) => s,
         Err(e) => die(&format!("could not render newsyslog: {e}")),
     };
     if verbose {
-        anstream::println!("     newsyslog preview:");
+        pb.detail("newsyslog preview:", "     newsyslog preview:");
         indent_print(&newsyslog, 7);
     } else {
-        anstream::println!("     newsyslog: {}", cfg.newsyslog_file);
+        pb.detail(
+            &format!("newsyslog: {}", cfg.newsyslog_file),
+            &format!("     newsyslog: {}", cfg.newsyslog_file),
+        );
     }
-    install_newsyslog(&newsyslog, &cfg.newsyslog_file);
-    anstream::println!("  newsyslog: installed");
+    pb.suspend(|| {
+        install_newsyslog(&newsyslog, &cfg.newsyslog_file);
+    });
+    pb.detail("newsyslog: installed", "  newsyslog: installed");
+    pb.done("log rotation installed");
 
     // 5. load user LaunchAgent (write the rendered plist, then start).
-    anstream::println!();
-    anstream::println!("  5. loading user LaunchAgent");
+    ui.rail_space();
+    let pb = ui.step("loading user LaunchAgent", "  5. loading user LaunchAgent");
     if let Err(e) = installer.install_user_agent(&cfg) {
         die(&format!("could not write LaunchAgent plist: {e}"));
     }
-    anstream::println!("     plist: {}", user_plist_path().display());
+    pb.detail(
+        &format!("plist: {}", user_plist_path().display()),
+        &format!("     plist: {}", user_plist_path().display()),
+    );
 
     // Start the LaunchAgent (bootstrap + enable + bounded wait).
     match installer.start_user_agent(&cfg) {
-        Ok(StartState::AlreadyLoaded) => anstream::println!(
-            "  launchd: already loaded (gui/{}/{})",
-            vigil::config::get_uid(),
-            vigil::service::USER_AGENT_LABEL
+        Ok(StartState::AlreadyLoaded) => pb.detail(
+            &format!(
+                "launchd: already loaded (gui/{}/{})",
+                vigil::config::get_uid(),
+                vigil::service::USER_AGENT_LABEL
+            ),
+            &format!(
+                "  launchd: already loaded (gui/{}/{})",
+                vigil::config::get_uid(),
+                vigil::service::USER_AGENT_LABEL
+            ),
         ),
         Ok(StartState::Bootstrapped) => {
-            anstream::println!(
-                "  launchd: bootstrapped {}",
-                vigil::service::USER_AGENT_LABEL
+            pb.detail(
+                &format!("launchd: bootstrapped {}", vigil::service::USER_AGENT_LABEL),
+                &format!(
+                    "  launchd: bootstrapped {}",
+                    vigil::service::USER_AGENT_LABEL
+                ),
             );
-            super::start::wait_for_daemon_scan(&cfg);
+            // wait_for_daemon_scan prints its own progress; suspend the spinner.
+            pb.suspend(|| super::start::wait_for_daemon_scan(&cfg));
         }
         Err(e) => die(&format!("start failed: {e}")),
     }
+    pb.done("user LaunchAgent loaded");
 
-    anstream::println!();
-    anstream::println!("vigil: setup complete");
-    anstream::println!("  next: vigil status");
+    // Outro: rail bottom (interactive) or the verbatim plain completion lines.
+    if ui.is_interactive() {
+        ui.outro("vigil: setup complete");
+        anstream::println!("  next: vigil status");
+    } else {
+        anstream::println!();
+        anstream::println!("vigil: setup complete");
+        anstream::println!("  next: vigil status");
+    }
     std::process::exit(0);
 }
 
@@ -148,6 +230,14 @@ fn dry_run_summary(cfg: &VigilConfig, verbose: bool) {
     anstream::println!("    state dir:        {}", cfg.state_dir);
     anstream::println!("    log dir:          {}", cfg.log_dir);
     anstream::println!("    install dir:      {}", cfg.install_dir);
+    let dev_target = super::resolve_repo_root()
+        .map(|r| format!("{}/target/release/vigil", r.display()))
+        .unwrap_or_else(|| "(vigil dev build, resolved at install time)".to_string());
+    anstream::println!(
+        "    PATH symlink:     {} -> {}",
+        bin_link_path(),
+        dev_target
+    );
     anstream::println!("    LaunchAgent:      {}", user_plist_path().display());
     anstream::println!();
     anstream::println!("  root:");
@@ -192,7 +282,7 @@ fn dry_run_summary(cfg: &VigilConfig, verbose: bool) {
 /// matrix, the Rust `vigil-root-helper` binary (NOT the bash script), the helper
 /// plist, then bootout/bootstrap/enable. ALL sudo — gated behind the admin guard
 /// the caller already enforced.
-fn cmd_install_root_helper<I: ServiceInstaller>(cfg: &VigilConfig, installer: &I) {
+fn cmd_install_root_helper<I: ServiceInstaller>(cfg: &VigilConfig, installer: &I, ui: Tui) {
     // Re-assert the guards at the privileged boundary (bash
     // cmd_install_root_helper re-runs them) so this is never reachable under
     // VIGIL_TEST_NO_ADMIN even if called out of order.
@@ -203,7 +293,10 @@ fn cmd_install_root_helper<I: ServiceInstaller>(cfg: &VigilConfig, installer: &I
 
     let (user, group) = current_user_group();
 
-    anstream::println!("     root helper: installing LaunchDaemon (sudo may prompt)");
+    ui.detail(
+        "root helper: installing LaunchDaemon (sudo may prompt)",
+        "     root helper: installing LaunchDaemon (sudo may prompt)",
+    );
 
     // The asymmetric IPC dir ownership matrix (§4.10 table), in this exact
     // order/owner/mode.
@@ -255,9 +348,12 @@ fn cmd_install_root_helper<I: ServiceInstaller>(cfg: &VigilConfig, installer: &I
         ],
         true,
     );
-    anstream::println!(
-        "     root helper: bootstrapped {}",
-        vigil::service::HELPER_LABEL
+    ui.detail(
+        &format!("root helper: bootstrapped {}", vigil::service::HELPER_LABEL),
+        &format!(
+            "     root helper: bootstrapped {}",
+            vigil::service::HELPER_LABEL
+        ),
     );
 }
 
@@ -327,7 +423,16 @@ fn sudo_launchctl(args: &[&str], ignore_failure: bool) {
     let mut full = vec!["launchctl"];
     full.extend_from_slice(args);
     if ignore_failure {
-        let _ = std::process::Command::new("sudo").args(&full).status();
+        // Best-effort (idempotency) calls — e.g. the bootout-before-bootstrap on
+        // a fresh install where nothing is loaded yet. launchctl writes
+        // "Boot-out failed: 3: No such process" to stderr in exactly that normal
+        // case; since we already ignore the exit code, drop stderr so the benign
+        // noise can't break the rail. A real problem still surfaces at the
+        // (checked) bootstrap that follows.
+        let _ = std::process::Command::new("sudo")
+            .args(&full)
+            .stderr(std::process::Stdio::null())
+            .status();
     } else {
         run_checked("sudo", &full);
     }
@@ -450,11 +555,14 @@ mod tests {
     fn unknown_flag_is_usage_error() {
         // Structural check: an unrecognized arg routes to the usage die. We can't
         // catch the exit, so just assert the parse classifies a bad flag (the
-        // run() loop only accepts --dry-run/--verbose).
+        // run() loop accepts --dry-run/--verbose/--yes/--non-interactive).
         let bad: Vec<OsString> = vec![OsString::from("--nope")];
-        let recognized = bad
-            .iter()
-            .all(|a| matches!(a.to_str(), Some("--dry-run") | Some("--verbose")));
+        let recognized = bad.iter().all(|a| {
+            matches!(
+                a.to_str(),
+                Some("--dry-run") | Some("--verbose") | Some("--yes") | Some("--non-interactive")
+            )
+        });
         assert!(!recognized, "--nope must not be a recognized setup flag");
     }
 

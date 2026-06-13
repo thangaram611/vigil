@@ -49,7 +49,13 @@ pub fn run(args: Vec<OsString>) -> ! {
     let mode = parse(&args);
     let cfg = load_config_or_exit();
     let now = now_unix();
-    let report = CheckEngine::run(&cfg, CheckMode::Status, now);
+    // Animate a spinner on stderr while the snapshot is gathered (the helper
+    // liveness probe can take a beat). Interactive-only → piped/CI output (incl.
+    // --json) stays byte-identical; the spinner draws to stderr and self-clears.
+    let interactive = super::interactive(false);
+    let report = super::tui::with_activity(interactive, "Gathering status…", || {
+        CheckEngine::run(&cfg, CheckMode::Status, now)
+    });
     let snap = &report.snapshot;
 
     match mode {

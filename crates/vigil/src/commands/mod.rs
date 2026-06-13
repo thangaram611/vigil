@@ -15,6 +15,7 @@
 //! uninstall, and reload routes through `require_admin_allowed()` BEFORE any
 //! privileged action.
 
+pub mod conf_writer;
 pub mod doctor;
 pub mod lock;
 pub mod log;
@@ -24,6 +25,7 @@ pub mod setup;
 pub mod start;
 pub mod status;
 pub mod stop;
+pub mod tui;
 pub mod uninstall;
 
 /// Re-exported so the read-only commands (status/doctor/run/log) reach the
@@ -60,6 +62,30 @@ fn load_config_or_exit() -> VigilConfig {
 fn die(msg: &str) -> ! {
     anstream::eprintln!("vigil: {msg}");
     std::process::exit(crate::exit::EX_ERROR);
+}
+
+// ── interactive TUI seam (setup / uninstall) ──────────────────────────────────
+//
+// The crux of the elegant-TUI slice: a SINGLE gate decides whether `tui::Tui`
+// renders the clack rail (dialoguer confirm + static `◇`/`✓` steps + styled
+// glyphs), or falls back to the EXACT plain `anstream::println!` path that
+// scripts/CI/golden-oracle have always seen. When the gate is false the `Tui`
+// touches NONE of the new crates — so NO_COLOR / --color / the byte-frozen
+// dry-run output are unaffected, and a piped/CI run can never hang on a prompt.
+//
+// `tui::Tui::new(interactive(yes))` is constructed once per command and threaded
+// through every step (see `commands::tui`).
+
+use std::io::IsTerminal;
+
+/// True iff we should render the interactive TUI (confirm prompts + spinners).
+///
+/// FALSE when `--yes`/`--non-interactive` was passed (`yes == true`) OR either of
+/// stdin/stdout is not a terminal. In that case callers proceed with defaults and
+/// emit today's plain lines verbatim. The `yes` short-circuit is first so a
+/// non-interactive flag always wins regardless of TTY state.
+pub(super) fn interactive(yes: bool) -> bool {
+    !yes && std::io::stdin().is_terminal() && std::io::stdout().is_terminal()
 }
 
 /// Enforce the admin guard or terminate with the exact bash message
@@ -144,10 +170,98 @@ fn now_unix() -> i64 {
     chrono::Local::now().timestamp()
 }
 
+// ── PATH symlink for the `vigil` CLI ──────────────────────────────────────────
+//
+// `setup`/`reload` rebuild `vigil` from the repo, so the `vigil` on the user's
+// PATH must be able to find the repo. It therefore points at the DEV build
+// (`<repo>/target/release/vigil`, inside the checkout) — exactly where the old
+// bash symlink pointed — NOT at the installed snapshot in `{install_dir}/bin`
+// (which has no repo above it and could never run `reload`). The installed copy
+// exists only for the LaunchAgent daemon (a TCC-stable path). `setup`/`reload`
+// (re)create this PATH symlink; `uninstall` leaves it, because its target (your
+// repo checkout) survives an uninstall and you may want to reinstall.
+//
+// A real (non-symlink) file at the link path is NEVER clobbered.
+
+/// The directory the `vigil` CLI is symlinked into so it lands on `PATH`.
+/// Override with `VIGIL_BIN_LINK_DIR`; default `~/.local/bin`.
+fn bin_link_dir() -> String {
+    match std::env::var("VIGIL_BIN_LINK_DIR") {
+        Ok(d) if !d.is_empty() => d,
+        _ => {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+            format!("{home}/.local/bin")
+        }
+    }
+}
+
+/// The PATH symlink for the `vigil` CLI: `{bin_link_dir}/vigil`.
+fn bin_link_path() -> String {
+    format!("{}/vigil", bin_link_dir())
+}
+
+/// True if `dir` is a component of the current `PATH`.
+fn dir_on_path(dir: &str) -> bool {
+    std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .any(|p| p == dir)
+}
+
+/// (Re)create the managed symlink `link` → `target` under `dir`. A stale symlink
+/// is refreshed; an existing NON-symlink file is left untouched (so we never
+/// clobber an unrelated binary). Returns `(linked, note)` — `linked` is true iff
+/// the symlink now points at `target`.
+fn refresh_managed_symlink(dir: &str, link: &str, target: &str) -> (bool, String) {
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        return (false, format!("skipped (could not create {dir}: {e})"));
+    }
+    match std::fs::symlink_metadata(link) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            let _ = std::fs::remove_file(link);
+        }
+        Ok(_) => {
+            return (
+                false,
+                format!("{link} already exists and is not a symlink — left as-is"),
+            );
+        }
+        Err(_) => {} // absent
+    }
+    match std::os::unix::fs::symlink(target, link) {
+        Ok(()) => (true, format!("{link} -> {target}")),
+        Err(e) => (false, format!("skipped ({e})")),
+    }
+}
+
+/// Symlink the freshly-built dev `vigil` (`target`) onto `PATH` (best-effort; a
+/// failure here never fails the install). Prints a hint if `bin_link_dir` is not
+/// on `PATH`.
+fn link_vigil_onto_path(target: &str, ui: tui::Tui) {
+    let dir = bin_link_dir();
+    let (linked, note) = refresh_managed_symlink(&dir, &bin_link_path(), target);
+    ui.detail(
+        &format!("PATH symlink: {note}"),
+        &format!("     PATH symlink: {note}"),
+    );
+    if linked && !dir_on_path(&dir) {
+        let hint = format!(
+            "{dir} is not on your PATH — add it: echo 'export PATH=\"{dir}:$PATH\"' >> ~/.zshrc"
+        );
+        ui.detail(&format!("note: {hint}"), &format!("     note: {hint}"));
+    }
+}
+
 // ── cmd_sync_install — the TCC copy-out (§4.7, bash cmd_sync_install) ──────────
 
 /// Resolve the source repo root: `$VIGIL_REPO_ROOT` (tests / explicit), else
-/// `target/{debug,release}/vigil` → repo root (3 ancestors up, like the shim).
+/// derive it from the executable. The dev build lives at
+/// `<repo>/target/{debug,release}/vigil`; we **canonicalize** the exe first (so a
+/// PATH symlink like `~/.local/bin/vigil` is followed to the real build path —
+/// `current_exe()` does NOT resolve symlinks on macOS) and walk up to the first
+/// ancestor that looks like the vigil workspace root (`Cargo.toml` +
+/// `native/vigil-lock-helper/`). Returns `None` from an installed copy with no
+/// repo above it — callers then require `$VIGIL_REPO_ROOT`.
 fn resolve_repo_root() -> Option<std::path::PathBuf> {
     if let Some(p) = std::env::var_os("VIGIL_REPO_ROOT") {
         let p = std::path::PathBuf::from(p);
@@ -155,12 +269,12 @@ fn resolve_repo_root() -> Option<std::path::PathBuf> {
             return Some(p);
         }
     }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(repo_root) = exe.ancestors().nth(3)
-    {
-        return Some(repo_root.to_path_buf());
-    }
-    None
+    let exe = std::env::current_exe().ok()?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    exe.ancestors()
+        .skip(1)
+        .find(|a| a.join("Cargo.toml").is_file() && a.join("native/vigil-lock-helper").is_dir())
+        .map(|a| a.to_path_buf())
 }
 
 /// `cargo build --release` the two shipped binaries (`vigil`, `vigil-lock-helper`)
@@ -174,8 +288,10 @@ fn resolve_repo_root() -> Option<std::path::PathBuf> {
 /// `bin/vigil-daemon` or `lib/*.sh` to copy.
 ///
 /// Non-privileged (no sudo) — but it builds + writes the install dir, so it runs
-/// only AFTER the admin guard in setup/reload. Returns `Err(message)` on failure.
-fn cmd_sync_install(cfg: &VigilConfig) -> Result<(), String> {
+/// only AFTER the admin guard in setup/reload. On success returns the path to the
+/// freshly-built dev `vigil` binary (for the PATH symlink); `Err(message)` on
+/// failure.
+fn cmd_sync_install(cfg: &VigilConfig, ui: tui::Tui) -> Result<String, String> {
     let install_bin = format!("{}/bin", cfg.install_dir);
     let install_lib = format!("{}/lib", cfg.install_dir);
     std::fs::create_dir_all(&install_bin)
@@ -211,7 +327,10 @@ fn cmd_sync_install(cfg: &VigilConfig) -> Result<(), String> {
     let vigil_dst = format!("{install_bin}/vigil");
     install_binary(&vigil_src, &vigil_dst, 0o755)
         .map_err(|e| format!("failed to install vigil: {e}"))?;
-    anstream::println!("  daemon: installed to {vigil_dst}");
+    ui.detail(
+        &format!("daemon: installed to {vigil_dst}"),
+        &format!("  daemon: installed to {vigil_dst}"),
+    );
 
     // Darwin-only: build + install the lock helper.
     if cfg!(target_os = "macos") {
@@ -233,10 +352,13 @@ fn cmd_sync_install(cfg: &VigilConfig) -> Result<(), String> {
         let helper_dst = format!("{install_bin}/vigil-lock-helper");
         install_binary(&helper_src, &helper_dst, 0o755)
             .map_err(|e| format!("failed to install vigil-lock-helper: {e}"))?;
-        anstream::println!("  lock helper: installed to {helper_dst}");
+        ui.detail(
+            &format!("lock helper: installed to {helper_dst}"),
+            &format!("  lock helper: installed to {helper_dst}"),
+        );
     }
 
-    Ok(())
+    Ok(vigil_src)
 }
 
 /// Resolve a manifest's cargo `target_directory` via `cargo metadata` (bash
@@ -286,6 +408,30 @@ fn install_binary(src: &str, dst: &str, mode: u32) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The non-interactive guarantee: `--yes`/`--non-interactive` (yes == true)
+    /// short-circuits BEFORE any TTY check, so the interactive TUI is NEVER
+    /// rendered regardless of whether stdin/stdout happen to be terminals. This
+    /// locks the "CI/scripts must never hang and stay byte-identical" contract.
+    #[test]
+    fn interactive_is_false_when_yes() {
+        assert!(
+            !interactive(true),
+            "--yes must always force the non-interactive (plain) path"
+        );
+        // The `Tui` built from this gate must select the inert (plain) path: a
+        // non-interactive spinner is inert and confirm returns the default
+        // without prompting (caller keeps its plain println lines, never hangs).
+        let ui = super::tui::Tui::new(interactive(true));
+        assert!(
+            !ui.is_interactive(),
+            "--yes must always force the non-interactive Tui"
+        );
+        assert!(
+            ui.confirm("anything", true),
+            "--yes confirm must return the default without prompting"
+        );
+    }
 
     #[test]
     fn vigil_tree_path_rejects_non_absolute() {
@@ -339,5 +485,49 @@ mod tests {
     #[test]
     fn legacy_sudoers_is_hardcoded() {
         assert_eq!(LEGACY_SUDOERS_FILE, "/etc/sudoers.d/vigil");
+    }
+
+    #[test]
+    fn managed_symlink_creates_and_refreshes() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        let link = bin.join("vigil");
+        let target = dir.path().join("repo/target/release/vigil");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"#!/bin/true\n").unwrap();
+        let (dir_s, link_s, target_s) = (
+            bin.to_str().unwrap(),
+            link.to_str().unwrap(),
+            target.to_str().unwrap(),
+        );
+
+        // Create.
+        let (linked, _) = refresh_managed_symlink(dir_s, link_s, target_s);
+        assert!(linked);
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+
+        // A stale symlink (e.g. pointing at an old build) is refreshed in place.
+        let stale = dir.path().join("old/vigil");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&stale, &link).unwrap();
+        let (relinked, _) = refresh_managed_symlink(dir_s, link_s, target_s);
+        assert!(relinked);
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+    }
+
+    #[test]
+    fn managed_symlink_never_clobbers_a_real_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let link = bin.join("vigil");
+        std::fs::write(&link, b"a real user binary").unwrap();
+
+        let (linked, note) =
+            refresh_managed_symlink(bin.to_str().unwrap(), link.to_str().unwrap(), "/x/vigil");
+        assert!(!linked, "must not replace a non-symlink file");
+        assert!(note.contains("not a symlink"));
+        // The real file is intact.
+        assert_eq!(std::fs::read(&link).unwrap(), b"a real user binary");
     }
 }

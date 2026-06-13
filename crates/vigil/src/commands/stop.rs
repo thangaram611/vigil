@@ -12,26 +12,61 @@ use std::ffi::OsString;
 
 use vigil::service::{MacosLaunchdInstaller, ServiceInstaller, StopState};
 
-use super::{die, load_config_or_exit};
+use super::tui::Tui;
+use super::{die, interactive, load_config_or_exit};
 
-/// `vigil stop` takes no flags. Run the bootout-poll and print the bash strings.
+/// `vigil stop [--yes|--non-interactive]`. Run the bootout-poll and print the
+/// bash strings.
 pub fn run(args: Vec<OsString>) -> ! {
-    if !args.is_empty() {
-        die("usage: vigil stop");
+    let mut yes = false;
+    for a in &args {
+        match a.to_str() {
+            Some("--yes") | Some("--non-interactive") => yes = true,
+            _ => die("usage: vigil stop [--yes|--non-interactive]"),
+        }
     }
     let cfg = load_config_or_exit();
     let installer = MacosLaunchdInstaller::new();
-    match installer.stop_user_agent(&cfg) {
-        Ok(StopState::BootedOut) => {
-            anstream::println!("  launchd: booted out {}", vigil::service::USER_AGENT_LABEL);
-            std::process::exit(0);
-        }
-        Ok(StopState::NotLoaded) => {
-            anstream::println!("  launchd: not loaded");
-            std::process::exit(0);
-        }
+
+    // The clack-style UI, bound once to the interactive gate. When false (--yes,
+    // piped, CI) the rail is never drawn: `stop` historically printed ONLY the
+    // single `launchd:` line, so the plain path below reproduces exactly those
+    // bytes. The rail (intro / step header / `✓` / outro) is added ONLY in
+    // interactive mode.
+    let ui = Tui::new(interactive(yes));
+    let interactive = ui.is_interactive();
+
+    // Resolve the stop state up front; only the PRINTING differs by mode.
+    let state = match installer.stop_user_agent(&cfg) {
+        Ok(s) => s,
         Err(e) => die(&format!("stop failed: {e}")),
+    };
+
+    if interactive {
+        ui.intro("vigil: stopping");
+        ui.rail_space();
+        let pb = ui.step("stopping user LaunchAgent", "stopping user LaunchAgent");
+        match state {
+            StopState::BootedOut => pb.detail(
+                &format!("launchd: booted out {}", vigil::service::USER_AGENT_LABEL),
+                "",
+            ),
+            StopState::NotLoaded => pb.detail("launchd: not loaded", ""),
+        }
+        pb.done("user LaunchAgent stopped");
+        ui.outro("vigil: stop complete");
+    } else {
+        // Byte-frozen plain path — exactly what `stop` always printed.
+        match state {
+            StopState::BootedOut => {
+                anstream::println!("  launchd: booted out {}", vigil::service::USER_AGENT_LABEL);
+            }
+            StopState::NotLoaded => {
+                anstream::println!("  launchd: not loaded");
+            }
+        }
     }
+    std::process::exit(0);
 }
 
 #[cfg(test)]

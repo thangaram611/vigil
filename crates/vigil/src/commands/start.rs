@@ -13,39 +13,90 @@ use std::ffi::OsString;
 use vigil::check::{CheckEngine, DaemonScanState, RealLoadProbe};
 use vigil::service::{MacosLaunchdInstaller, ServiceError, ServiceInstaller, StartState};
 
-use super::{die, load_config_or_exit};
+use super::tui::Tui;
+use super::{die, interactive, load_config_or_exit};
 
-/// `vigil start` takes no flags.
+/// `vigil start [--yes|--non-interactive]`.
 pub fn run(args: Vec<OsString>) -> ! {
-    if !args.is_empty() {
-        die("usage: vigil start");
+    let mut yes = false;
+    for a in &args {
+        match a.to_str() {
+            Some("--yes") | Some("--non-interactive") => yes = true,
+            _ => die("usage: vigil start [--yes|--non-interactive]"),
+        }
     }
     let cfg = load_config_or_exit();
     let installer = MacosLaunchdInstaller::new();
 
-    match installer.start_user_agent(&cfg) {
-        Ok(StartState::AlreadyLoaded) => {
-            anstream::println!(
-                "  launchd: already loaded (gui/{}/{})",
-                vigil::config::get_uid(),
-                vigil::service::USER_AGENT_LABEL
-            );
-            std::process::exit(0);
-        }
-        Ok(StartState::Bootstrapped) => {
-            anstream::println!(
-                "  launchd: bootstrapped {}",
-                vigil::service::USER_AGENT_LABEL
-            );
-            // Bounded first-scan wait; pending is NOT an error (always return 0).
-            wait_for_daemon_scan(&cfg);
-            std::process::exit(0);
-        }
+    // The clack-style UI, bound once to the interactive gate. When false (--yes,
+    // piped, CI) the rail is never drawn at all: `start` historically printed NO
+    // header/intro/outro, only the `launchd:` line + the daemon-scan progress, so
+    // the plain path below reproduces exactly those bytes. The rail (intro / step
+    // header / `✓` / outro) is added ONLY in interactive mode; the body `launchd:`
+    // line is rendered via `Step::detail` whose plain fallback is the verbatim old
+    // line.
+    let ui = Tui::new(interactive(yes));
+    let interactive = ui.is_interactive();
+
+    // Resolve the start state up front; only the PRINTING differs by mode.
+    let state = match installer.start_user_agent(&cfg) {
+        Ok(s) => s,
         Err(ServiceError::PlistMissing(p)) => {
             die(&format!("plist not found at {p} — run 'vigil setup' first"))
         }
         Err(e) => die(&format!("start failed: {e}")),
+    };
+
+    if interactive {
+        // Full rail: intro → step → body detail (+ scan wait) → done → outro.
+        ui.intro("vigil: starting");
+        ui.rail_space();
+        let pb = ui.step("starting user LaunchAgent", "starting user LaunchAgent");
+        match state {
+            StartState::AlreadyLoaded => {
+                pb.detail(
+                    &format!(
+                        "launchd: already loaded (gui/{}/{})",
+                        vigil::config::get_uid(),
+                        vigil::service::USER_AGENT_LABEL
+                    ),
+                    "",
+                );
+                pb.done("user LaunchAgent already running");
+            }
+            StartState::Bootstrapped => {
+                pb.detail(
+                    &format!("launchd: bootstrapped {}", vigil::service::USER_AGENT_LABEL),
+                    "",
+                );
+                // `wait_for_daemon_scan` prints its own progress (shared with
+                // setup/reload); run it inside the step's suspend region.
+                pb.suspend(|| wait_for_daemon_scan(&cfg));
+                pb.done("user LaunchAgent started");
+            }
+        }
+        ui.outro("vigil: start complete");
+    } else {
+        // Byte-frozen plain path — exactly what `start` always printed.
+        match state {
+            StartState::AlreadyLoaded => {
+                anstream::println!(
+                    "  launchd: already loaded (gui/{}/{})",
+                    vigil::config::get_uid(),
+                    vigil::service::USER_AGENT_LABEL
+                );
+            }
+            StartState::Bootstrapped => {
+                anstream::println!(
+                    "  launchd: bootstrapped {}",
+                    vigil::service::USER_AGENT_LABEL
+                );
+                // Bounded first-scan wait; pending is NOT an error (always exit 0).
+                wait_for_daemon_scan(&cfg);
+            }
+        }
     }
+    std::process::exit(0);
 }
 
 /// The bounded first-scan wait (§2.3.5, bash `cmd_wait_for_daemon_scan`).
