@@ -1,6 +1,11 @@
 # Phase 5 — Cross-OS port
 
-> **Status: SKETCH ONLY.** Replace with a detailed plan before implementation.
+> **Status: SUPERSEDED.** This sketch is replaced by the umbrella plan
+> [`phase-5-rust-rewrite.md`](./phase-5-rust-rewrite.md), which folds the cross-OS
+> port into a vertical-slice Rust rewrite (5.1–5.9) that also covers the UX
+> overhaul and security hardening. This file is kept only as a reference for the
+> verified per-OS sleep-prevention facts and the logging/rotation rationale below;
+> the **plan of record is `phase-5-rust-rewrite.md`** (Linux = 5.8, Windows = 5.9).
 
 ## What
 
