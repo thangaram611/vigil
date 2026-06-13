@@ -403,9 +403,6 @@ mod tests {
 
     #[test]
     fn lock_tap_uses_hid_location() {
-        assert!(matches!(
-            lock_event_tap_location(),
-            CGEventTapLocation::HID
-        ));
+        assert!(matches!(lock_event_tap_location(), CGEventTapLocation::HID));
     }
 }
