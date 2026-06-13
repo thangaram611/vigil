@@ -1153,7 +1153,7 @@ cmd_lock() {
     local listen access tap
     listen="$(cmd_lock_json_field "listen_event_access" "$json")"
     access="$(cmd_lock_json_field "accessibility_trusted" "$json")"
-    tap="$(cmd_lock_json_field "tap_create_active_session_ok" "$json")"
+    tap="$(cmd_lock_json_field "tap_create_active_hid_ok" "$json")"
     if [[ -z "$listen" || -z "$access" || -z "$tap" ]]; then
         echo "vigil lock: failed to parse permission JSON"
         echo "  raw: $json"
@@ -1223,7 +1223,7 @@ cmd_lock_doctor() {
     listen=$(cmd_lock_json_field "listen_event_access" "$json")
     access=$(cmd_lock_json_field "accessibility_trusted" "$json")
     post_event=$(cmd_lock_json_field "post_event_access" "$json")
-    tap=$(cmd_lock_json_field "tap_create_active_session_ok" "$json")
+    tap=$(cmd_lock_json_field "tap_create_active_hid_ok" "$json")
 
     if [[ -z "$listen" || -z "$access" || -z "$post_event" || -z "$tap" ]]; then
         echo "vigil lock doctor: failed to parse permission JSON"
@@ -1235,7 +1235,7 @@ cmd_lock_doctor() {
     echo "  listen_event_access:       $listen"
     echo "  accessibility_trusted:     $access"
     echo "  post_event_access:         $post_event (informational)"
-    echo "  tap_create_active_session_ok: $tap"
+    echo "  tap_create_active_hid_ok:    $tap"
     echo "  helper: $VIGIL_LOCK_HELPER"
     echo
     echo "System Settings > Privacy & Security > Input Monitoring"

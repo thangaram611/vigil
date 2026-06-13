@@ -3,7 +3,7 @@
 ## Current `vigil lock`
 
 `vigil lock` is a local freeze guard for the active logged-in GUI session. It
-creates an active `kCGSessionEventTap` through CoreGraphics, registers itself
+creates an active `kCGHIDEventTap` through CoreGraphics, registers itself
 with Vigil's daemon refcount, and drops keyboard, mouse, drag, and scroll events
 until the configured unlock chord is pressed or a watchdog timeout expires.
 
@@ -47,11 +47,11 @@ Relevant Apple docs:
 ## Event-tap boundary
 
 Apple's SDK headers define three tap locations: HID, session, and annotated
-session. The HID tap is root-only; non-root callers get no tap there. A normal
-user helper should therefore use the session tap:
+session. Vigil uses a HID tap so the guard filters events at the earliest
+CoreGraphics point available to a privacy-granted user helper:
 
 ```text
-CGEventTapLocation::Session
+CGEventTapLocation::HID
 CGEventTapPlacement::HeadInsertEventTap
 CGEventTapOptions::Default
 ```

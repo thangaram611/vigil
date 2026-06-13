@@ -40,7 +40,7 @@ the event-tap boundary and why Codex-style locked use is a separate feature.
 - `vigil lock` — arm with config defaults (`VIGIL_LOCK_COMBO`, `VIGIL_LOCK_MAX_SECS`)
 - `vigil lock --combo <combo>` — custom unlock chord
 - `vigil lock --max-secs <seconds>` — watchdog timeout (`0` means no timeout with explicit CLI override)
-- `vigil lock doctor` — print permission + tap readiness (`listen_event_access`, `accessibility_trusted`, `post_event_access`, `tap_create_active_session_ok`)
+- `vigil lock doctor` — print permission + tap readiness (`listen_event_access`, `accessibility_trusted`, `post_event_access`, `tap_create_active_hid_ok`)
 - `vigil lock doctor --prompt` — request OS permission prompts (if needed)
 - `vigil lock --help` — full lock-mode usage
 

@@ -92,11 +92,11 @@ test_lock_doctor_reports_failed_fields() {
 #!/usr/bin/env bash
 case "$1 $2" in
   "--check-permissions --json")
-    printf '%s\n' '{"platform":"macos","listen_event_access":false,"accessibility_trusted":true,"post_event_access":true,"tap_create_active_session_ok":false}'
+    printf '%s\n' '{"platform":"macos","listen_event_access":false,"accessibility_trusted":true,"post_event_access":true,"tap_create_active_hid_ok":false}'
     exit 20
     ;;
   "--check-permissions --json --prompt")
-    printf '%s\n' '{"platform":"macos","listen_event_access":false,"accessibility_trusted":true,"post_event_access":true,"tap_create_active_session_ok":false}'
+    printf '%s\n' '{"platform":"macos","listen_event_access":false,"accessibility_trusted":true,"post_event_access":true,"tap_create_active_hid_ok":false}'
     exit 20
     ;;
   "--freeze"*)
@@ -121,7 +121,7 @@ EOF
     assert_contains "$out" "listen_event_access:       false" "listen field parsed"
     assert_contains "$out" "accessibility_trusted:     true" "accessibility field parsed"
     assert_contains "$out" "post_event_access:         true (informational)" "post-event field parsed"
-    assert_contains "$out" "tap_create_active_session_ok: false" "tap field parsed"
+    assert_contains "$out" "tap_create_active_hid_ok:    false" "tap field parsed"
     assert_contains "$out" "lock guard readiness: not ready" "doctor reports not ready"
 
     _cleanup_fake_lock_env
@@ -137,7 +137,7 @@ test_lock_requires_doorstep_doctor_before_arming() {
 #!/usr/bin/env bash
 case "\$1 \$2" in
   "--check-permissions --json")
-    printf '%s\n' '{"platform":"macos","listen_event_access":false,"accessibility_trusted":true,"post_event_access":true,"tap_create_active_session_ok":true}'
+    printf '%s\n' '{"platform":"macos","listen_event_access":false,"accessibility_trusted":true,"post_event_access":true,"tap_create_active_hid_ok":true}'
     exit 20
     ;;
   "--freeze"*)
@@ -177,7 +177,7 @@ test_lock_uses_config_and_launches_freeze_with_expected_args() {
 #!/usr/bin/env bash
 case "\$1 \$2" in
   "--check-permissions --json")
-    printf '%s\n' '{"platform":"macos","listen_event_access":true,"accessibility_trusted":true,"post_event_access":true,"tap_create_active_session_ok":true}'
+    printf '%s\n' '{"platform":"macos","listen_event_access":true,"accessibility_trusted":true,"post_event_access":true,"tap_create_active_hid_ok":true}'
     exit 0
     ;;
   "--freeze"*)

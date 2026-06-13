@@ -44,12 +44,12 @@ pub struct PermissionReport {
     pub listen_event_access: bool,
     pub accessibility_trusted: bool,
     pub post_event_access: bool,
-    pub tap_create_active_session_ok: bool,
+    pub tap_create_active_hid_ok: bool,
 }
 
 impl PermissionReport {
     pub fn ready(&self) -> bool {
-        self.listen_event_access && self.accessibility_trusted && self.tap_create_active_session_ok
+        self.listen_event_access && self.accessibility_trusted && self.tap_create_active_hid_ok
     }
 }
 
@@ -57,8 +57,8 @@ impl fmt::Display for PermissionReport {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             out,
-            "{{\"platform\":\"macos\",\"listen_event_access\":{},\"accessibility_trusted\":{},\"post_event_access\":{},\"tap_create_active_session_ok\":{}}}",
-            self.listen_event_access, self.accessibility_trusted, self.post_event_access, self.tap_create_active_session_ok
+            "{{\"platform\":\"macos\",\"listen_event_access\":{},\"accessibility_trusted\":{},\"post_event_access\":{},\"tap_create_active_hid_ok\":{}}}",
+            self.listen_event_access, self.accessibility_trusted, self.post_event_access, self.tap_create_active_hid_ok
         )
     }
 }
@@ -140,6 +140,10 @@ fn event_tap_run_mode() -> CFStringRef {
     unsafe { kCFRunLoopDefaultMode }
 }
 
+fn lock_event_tap_location() -> CGEventTapLocation {
+    CGEventTapLocation::HID
+}
+
 fn session_screen_is_locked() -> bool {
     let session = unsafe { CGSessionCopyCurrentDictionary() };
     if session.is_null() {
@@ -165,7 +169,7 @@ fn create_doctor_tap() -> bool {
         };
 
     let tap = match CGEventTap::new(
-        CGEventTapLocation::Session,
+        lock_event_tap_location(),
         CGEventTapPlacement::HeadInsertEventTap,
         CGEventTapOptions::Default,
         production_events(),
@@ -206,13 +210,13 @@ pub fn check_permissions(prompt: bool) -> PermissionReport {
     } else {
         unsafe { AXIsProcessTrusted() }
     };
-    let tap_create_active_session_ok = create_doctor_tap();
+    let tap_create_active_hid_ok = create_doctor_tap();
 
     PermissionReport {
         listen_event_access,
         accessibility_trusted,
         post_event_access,
-        tap_create_active_session_ok,
+        tap_create_active_hid_ok,
     }
 }
 
@@ -304,7 +308,7 @@ pub fn freeze(combo: &str, max_secs: u64, debug_sleep_ms: Option<u64>) -> Result
         final_keycode: parsed.final_keycode,
     });
     let tap = CGEventTap::new(
-        CGEventTapLocation::Session,
+        lock_event_tap_location(),
         CGEventTapPlacement::HeadInsertEventTap,
         CGEventTapOptions::Default,
         production_events(),
@@ -375,11 +379,11 @@ mod tests {
             listen_event_access: true,
             accessibility_trusted: false,
             post_event_access: false,
-            tap_create_active_session_ok: true,
+            tap_create_active_hid_ok: true,
         };
         assert_eq!(
             report.to_string(),
-            r#"{"platform":"macos","listen_event_access":true,"accessibility_trusted":false,"post_event_access":false,"tap_create_active_session_ok":true}"#
+            r#"{"platform":"macos","listen_event_access":true,"accessibility_trusted":false,"post_event_access":false,"tap_create_active_hid_ok":true}"#
         );
     }
 
@@ -395,5 +399,13 @@ mod tests {
     #[test]
     fn run_loop_uses_specific_mode_not_common_modes_sentinel() {
         assert_ne!(event_tap_run_mode(), event_tap_source_mode());
+    }
+
+    #[test]
+    fn lock_tap_uses_hid_location() {
+        assert!(matches!(
+            lock_event_tap_location(),
+            CGEventTapLocation::HID
+        ));
     }
 }
