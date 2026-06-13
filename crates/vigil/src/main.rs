@@ -1,9 +1,12 @@
-//! vigil — single-binary CLI skeleton (Phase 5.1).
+//! vigil — single-binary CLI skeleton (Phase 5.1) + config/logging substrate (Phase 5.2).
 //!
-//! clap-derive dispatch with exit-code discipline. Only `--version`, help, and
-//! `completions` are handled natively; every real command delegates to the
-//! existing bash `bin/vigil` via `shim::exec_bash` (execv) so exit codes and
-//! signals propagate verbatim.
+//! clap-derive dispatch with exit-code discipline. `--version`, help, `completions`,
+//! and `config` are handled natively; every real command delegates to the existing
+//! bash `bin/vigil` via `shim::exec_bash` (execv) so exit codes and signals propagate
+//! verbatim.
+
+// config and log are declared in lib.rs; reference them via the crate root.
+use vigil::config;
 
 mod exit;
 mod output;
@@ -87,6 +90,21 @@ enum Command {
     Completions {
         /// Shell to generate completions for
         shell: clap_complete::Shell,
+    },
+    /// Show the fully-resolved configuration (native; not delegated to bash).
+    ///
+    /// Reads vigil.conf as strict TOML, merges env overrides, and prints all
+    /// VIGIL_* resolved values. No side effects — does not create directories.
+    Config {
+        /// Print machine-readable JSON object (stable sorted keys).
+        #[arg(long, conflicts_with = "show", conflicts_with = "kv")]
+        json: bool,
+        /// Print human-readable table (default if neither flag given).
+        #[arg(long)]
+        show: bool,
+        /// Print sorted KEY=VALUE lines (used by the parity oracle test).
+        #[arg(long, hide = true)]
+        kv: bool,
     },
 }
 
@@ -195,6 +213,10 @@ fn dispatch(command: Command) -> ! {
             output::generate_completions(shell);
             std::process::exit(0);
         }
+        Command::Config { json, show: _, kv } => {
+            cmd_config(json, kv);
+            std::process::exit(0);
+        }
         Command::Setup { args } => shim::exec_bash("setup", &args),
         Command::Uninstall { args } => shim::exec_bash("uninstall", &args),
         Command::Start { args } => shim::exec_bash("start", &args),
@@ -206,4 +228,50 @@ fn dispatch(command: Command) -> ! {
         Command::Lock { args } => shim::exec_bash("lock", &args),
         Command::Doctor { args } => shim::exec_bash("doctor", &args),
     }
+}
+
+/// Handle `vigil config [--show|--json|--kv]`.
+///
+/// Loads the fully-resolved config (no side effects) and prints it.
+/// On a malformed conf, emits a clear error to stderr and exits EX_USAGE (64).
+fn cmd_config(json: bool, kv: bool) {
+    let conf_path = std::env::var("VIGIL_CONFIG_FILE")
+        .unwrap_or_else(|_| format!("{}/.config/vigil/vigil.conf", home_dir()));
+
+    let cfg = match config::load(&conf_path, None) {
+        Ok(c) => c,
+        Err(e) => {
+            anstream::eprintln!("{e}");
+            std::process::exit(exit::EX_USAGE);
+        }
+    };
+
+    let map = cfg.to_kv_map();
+
+    if json {
+        // Machine-readable: pretty JSON object (stable sorted keys via BTreeMap).
+        match output::print_json(&map) {
+            Ok(()) => {}
+            Err(e) => {
+                anstream::eprintln!("vigil: config --json: {e}");
+                std::process::exit(exit::EX_ERROR);
+            }
+        }
+    } else if kv {
+        // Hidden --kv mode: sorted KEY=VALUE lines (used by the parity oracle test).
+        for (k, v) in &map {
+            anstream::println!("{k}={v}");
+        }
+    } else {
+        // Default: human-readable table (--show or no flag).
+        let mut t = output::table(&["KEY", "VALUE"]);
+        for (k, v) in &map {
+            t.add_row([k.as_str(), v.as_str()]);
+        }
+        anstream::println!("{t}");
+    }
+}
+
+fn home_dir() -> String {
+    std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
 }
