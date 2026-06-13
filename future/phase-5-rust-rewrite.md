@@ -540,6 +540,28 @@ stay on disk until 5.7 (Bash daemon still sources them at startup and per tick).
 parity** or it is a silent policy change. The `=` regex precision is subtle (a
 substring match would false-positive). **Do not claim this cools the machine.**
 
+**Implemented (5.4 slice).** Added `src/thermal/`, `src/battery/`,
+`src/power_guard/` (the `PowerGuard` trait + `EnvPowerGuard` + the pure
+`cooldown_state` window + a read-only `PowerView`), the
+`VIGIL_THERMAL_CPU_LIMIT_FLOOR` config knob (`Option<u32>`, default `None` =
+parity; omitted from `to_kv_map` when `None` so `config --kv` stays byte-identical
+to the bash oracle and `config_parity_test.sh` does not regress), hidden
+`vigil debug thermal`/`vigil debug battery` cut-oracle subcommands, a read-only
+Power section in the `vigil debug` dump, and `tests/thermal_parity_test.sh` +
+`tests/battery_parity_test.sh` cross-engine oracles. Modules are library-only
+(DEAD-FROM-RUST): declared in `lib.rs` but NOT wired into the bash daemon/setup.
+
+**Deferred to 5.7 (5.4-side wiring/obligations).**
+- The daemon must own ONE resident `PowerGuard` and drive `cooldown_state` from
+  the loop cadence (the pure window + guard exist but nothing ticks them yet).
+- The `VIGIL_THERMAL_FIXTURE`/`VIGIL_BATTERY_FIXTURE` release-build assertion on
+  the daemon launch path (test seams must not be honored by the shipped daemon).
+- `bin/vigil-status`/`doctor` reframed thermal/battery surfacing (the
+  `thermal_summary`/`battery_summary` reframed strings + the tick-file raw
+  readings) is a 5.7 status/doctor concern.
+- Physical deletion of `lib/thermal.sh` + `lib/battery.sh` + the bash-daemon
+  cooldown block stays in 5.7 (the bash daemon still sources them).
+
 **Depends on.** 5.1, 5.2.
 
 **Recommended implementation model / agent strategy.** Sonnet for the port
@@ -648,6 +670,51 @@ thermal+battery at startup for `can_hold`. caffeinate liveness-by-identity vs ba
 `kill -0`. pmset SPI deliberately NOT used (Command keeps stability).
 
 **Depends on.** 5.2, 5.3, 5.4.
+
+**Implemented (5.5 slice).** Added the second `[[bin]] vigil-root-helper`
+(`src/bin/vigil-root-helper.rs`, thin `main()`) plus library modules
+`src/helper/` (`mod.rs` request loop + `validate.rs` §3.3 primitives),
+`src/power/` (`mod.rs` state machine + `caffeinate.rs` + `pmset.rs` seams), and
+`src/ipc/` (file-based client). Added `nix 0.31.3` (`fs`,`user`,`process`) and an
+OFF-by-default `[features] helper-test-seam`. Wired `pub mod helper; pub mod ipc;
+pub mod power;` into `lib.rs`. §3.3 hardening is verbatim: every request-file and
+dir check on BOTH sides uses `nix open(O_NOFOLLOW)` + `fstat`-on-fd (NO
+`std::fs::metadata`/`is_file`); claim-then-validate `renameat` into the
+root-owned processing subdir of the validated state dir; response written
+`O_WRONLY|O_CREAT|O_EXCL` + `fchmod 0644` + `renameat` relative to the validated
+response-dir fd; id charset `^[A-Za-z0-9_.-]+$` plus explicit `.`/`..` reject;
+whole-file single-action-line parse (any trailing content, incl. no-final-newline
+=> `extra_content`); error-response-on-every-rejection + always-consume liveness;
+fail-safe baseline parse (release target 0 on corrupt/missing); fixed pmset argv
++ `env_clear()` + pinned PATH; own log subscriber re-guarding the log dir
+(`O_NOFOLLOW`) before each append. Test seams are COMPILE-TIME only: the non-root
+bypass + the pmset/SleepDisabled fakes live behind `cfg(test)` (lib unit tests)
+AND the `helper-test-seam` feature (subprocess adversarial test). All bash stays
+on disk and untouched: `bin/vigil-root-helper`, `tests/root_helper_test.sh`,
+`tests/power_reconcile_test.sh`, `lib/pmset.sh`, `lib/thermal.sh`,
+`lib/battery.sh`, `lib/common.sh` (this DELIBERATELY overrides the §5.5 "DELETED"
+line above — the bash helper is still the live install target via `bin/vigil:214`
+until 5.7). Nothing is wired into the bash daemon/setup/status/doctor
+(DEAD-FROM-RUST). Tests: 130 lib unit tests; `cargo test` (no feature) green incl.
+`root_helper_redteam.rs` (2); `cargo test --features helper-test-seam` green incl.
+`helper_adversarial.rs` (15 subprocess cases); full `tests/run.sh` pass=146 fail=0
+(untouched bash `root_helper_test`/`power_reconcile_test` still green). `cargo fmt
+--check` + `cargo clippy --all-targets -- -D warnings` clean in both profiles.
+
+**Deferred to 5.7 (5.5-side wiring/obligations).** (a) Physical deletion of the
+bash helper + `tests/root_helper_test.sh` + `tests/power_reconcile_test.sh` +
+`lib/pmset.sh`/`lib/thermal.sh`/`lib/battery.sh`, and the bash-setup rewrite
+(`bin/vigil:214` `sudo install … bin/vigil-root-helper` must switch to the Rust
+binary; `bin/vigil:96/170` helper-path references). (b) The daemon must own ONE
+resident `PowerGuard` and drive `power_guard::cooldown_state` from the loop
+cadence (the 5.4 cooldown wiring). (c) The
+`VIGIL_THERMAL_FIXTURE`/`VIGIL_BATTERY_FIXTURE` release-build assertion on the
+daemon launch path (fixtures must not be honorable on a shipped daemon). (d) The
+helper-reachability doctor/status probe: `src/ipc` exposes `HelperClient`
+(exercised by the adversarial test) but the default `vigil debug` dump does NOT do
+a blocking 10s round-trip — the first-class "root helper: reachable/unreachable"
+surfacing is a 5.7 status/doctor concern. (e) The `vigil-root-helper` install path
+must switch from the bash script to the Rust `vigil-root-helper` binary.
 
 **Recommended implementation model / agent strategy.** Opus, **adversarial
 security-review panel**. Highest difficulty + highest blast radius. Opus

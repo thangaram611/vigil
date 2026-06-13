@@ -7,7 +7,7 @@
 
 // config, log, output, and the detection modules are declared in lib.rs;
 // reference them via the crate root.
-use vigil::{config, debug, output};
+use vigil::{battery, config, debug, output, power_guard, thermal};
 
 mod exit;
 mod shim;
@@ -129,6 +129,16 @@ enum DebugSub {
         #[arg(long)]
         ps_cmd: std::path::PathBuf,
     },
+    /// Hidden thermal cut oracle. Runs the LIVE env-driven thermal guard
+    /// (honoring VIGIL_FORCE + VIGIL_THERMAL_FIXTURE + VIGIL_THERMAL_CPU_LIMIT_FLOOR)
+    /// and prints exactly `cut` or `nocut`. Cross-engine parity endpoint.
+    #[command(hide = true)]
+    Thermal,
+    /// Hidden battery cut oracle. Runs the LIVE env-driven battery guard
+    /// (honoring VIGIL_FORCE + VIGIL_BATTERY_FIXTURE + VIGIL_BATTERY_FLOOR_PCT)
+    /// and prints exactly `cut` or `nocut`. Cross-engine parity endpoint.
+    #[command(hide = true)]
+    Battery,
 }
 
 fn main() {
@@ -332,20 +342,65 @@ fn cmd_debug(sub: Option<DebugSub>, json: bool) {
                 println!("{row}");
             }
         }
+        Some(DebugSub::Thermal) => {
+            // Resolve the floor knob from config so the env seam
+            // (VIGIL_THERMAL_CPU_LIMIT_FLOOR) and the config knob are ONE source
+            // of truth.
+            let cfg = load_config_or_exit();
+            let force = std::env::var("VIGIL_FORCE")
+                .map(|v| v == "1")
+                .unwrap_or(false);
+            // VIGIL_FORCE FIRST, before any subprocess — bash short-circuits on
+            // force before forking `pmset -g therm`. Skip the pmset read on force.
+            let cut = if force {
+                false
+            } else {
+                let raw = thermal::read_therm_raw();
+                thermal::live_should_cut(false, &raw, cfg.thermal_cpu_limit_floor)
+            };
+            // Plain println, no ANSI: machine output for the parity oracle.
+            println!("{}", if cut { "cut" } else { "nocut" });
+        }
+        Some(DebugSub::Battery) => {
+            let cfg = load_config_or_exit();
+            let force = std::env::var("VIGIL_FORCE")
+                .map(|v| v == "1")
+                .unwrap_or(false);
+            // VIGIL_FORCE FIRST, before any subprocess (bash lib/battery.sh).
+            let cut = if force {
+                false
+            } else {
+                let raw = battery::read_ps_raw();
+                battery::live_should_cut(false, &raw, cfg.battery_floor_pct)
+            };
+            println!("{}", if cut { "cut" } else { "nocut" });
+        }
         None => {
             // READ-ONLY dump. Load config with NO side effects (no ensure_state_dir).
-            let conf_path = std::env::var("VIGIL_CONFIG_FILE")
-                .unwrap_or_else(|_| format!("{}/.config/vigil/vigil.conf", home_dir()));
-            let cfg = match config::load(&conf_path, None) {
-                Ok(c) => c,
-                Err(e) => {
-                    anstream::eprintln!("{e}");
-                    std::process::exit(exit::EX_USAGE);
-                }
-            };
+            let cfg = load_config_or_exit();
             let now = chrono::Local::now().timestamp();
             let dump = debug::assemble(&cfg, now);
-            debug::render(&dump, json);
+            // Surface READ-ONLY thermal/battery readings alongside the dump.
+            // Reading pmset -g therm/-g ps + fixtures is read-only (no pmset
+            // transition, no file write, no helper engage/release) — the debug
+            // read-only contract is preserved.
+            let power =
+                power_guard::PowerView::read(cfg.thermal_cpu_limit_floor, cfg.battery_floor_pct);
+            debug::render_with_power(&dump, &power, json);
+        }
+    }
+}
+
+/// Load the fully-resolved config for a read-only command, exiting EX_USAGE on a
+/// malformed conf. No side effects (no `ensure_state_dir`).
+fn load_config_or_exit() -> config::VigilConfig {
+    let conf_path = std::env::var("VIGIL_CONFIG_FILE")
+        .unwrap_or_else(|_| format!("{}/.config/vigil/vigil.conf", home_dir()));
+    match config::load(&conf_path, None) {
+        Ok(c) => c,
+        Err(e) => {
+            anstream::eprintln!("{e}");
+            std::process::exit(exit::EX_USAGE);
         }
     }
 }

@@ -3,11 +3,17 @@
 //! The binary crate re-uses these modules; integration tests access them here.
 
 pub mod activity;
+pub mod battery;
 pub mod config;
 pub mod debug;
+pub mod helper;
+pub mod ipc;
 pub mod log;
+pub mod power;
+pub mod power_guard;
 pub mod procscan;
 pub mod refcount;
+pub mod thermal;
 
 // Shared output substrate (anstream prints, comfy-table, --json). Lives in the
 // library so `debug::render` (a library module) and the binary both use it.

@@ -11,6 +11,22 @@ path = "src/lib.rs"
 name = "vigil"
 path = "src/main.rs"
 
+# Phase 5.5: the privileged power helper. A SECOND binary in the same crate so it
+# reuses src/helper, src/power, src/ipc, and the seam traits. Thin main() only;
+# all logic lives in the library so it is cfg(test)-unit-testable.
+[[bin]]
+name = "vigil-root-helper"
+path = "src/bin/vigil-root-helper.rs"
+
+[features]
+# OFF-by-default test seam for the SUBPROCESS adversarial integration test
+# (`cargo test --features helper-test-seam`). It compiles in the non-root bypass
+# and the pmset/SleepDisabled fakes so the real binary can be exercised in a
+# tempdir without root or touching live power state. The SHIPPED binary (no
+# feature) has NONE of this — the red-team test proves VIGIL_ROOT_HELPER_TESTING=1
+# in the env cannot flip it. cfg(test) covers the in-crate lib unit tests.
+helper-test-seam = []
+
 [dependencies]
 anstream = "1.0.0"
 anstyle = "1.0.14"
@@ -22,6 +38,7 @@ comfy-table = "7.2.2"
 dirs = "6.0.0"
 figment = { version = "0.10.19", features = ["toml", "env"] }
 libc = "0.2.186"
+nix = { version = "0.31.3", default-features = false, features = ["fs", "user", "process"] }
 notify = "8.2.0"
 owo-colors = "4.3.0"
 serde = { version = "1.0.228", features = ["derive"] }

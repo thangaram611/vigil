@@ -215,6 +215,12 @@ pub struct RawConfig {
 
     #[serde(default)]
     pub force: u8,
+
+    // ---- thermal cutoff policy (5.4) ----------------------------------------
+    // NEW configurable knob. Option<u32> with NO #[serde(default)] so absence
+    // (in toml AND env) stays None = "unset" = exact bash any-presence parity.
+    // When Some(F), the smarter policy tolerates a CPU_Scheduler_Limit >= F.
+    pub thermal_cpu_limit_floor: Option<u32>,
 }
 
 impl Default for RawConfig {
@@ -255,6 +261,7 @@ impl Default for RawConfig {
             vscode_copilot_recent_mins: default_vscode_copilot_recent_mins(),
             idle_after_sec: default_idle_after_sec(),
             force: 0,
+            thermal_cpu_limit_floor: None,
         }
     }
 }
@@ -325,6 +332,12 @@ pub struct VigilConfig {
     // ---- idle/force ---------------------------------------------------------
     pub idle_after_sec: u32,
     pub force: u8,
+
+    // ---- thermal cutoff policy (5.4) ----------------------------------------
+    /// `None` = unset = exact bash any-presence cut behavior (the parity
+    /// contract). `Some(F)` = the smarter policy: tolerate a numeric
+    /// CPU_Scheduler_Limit >= F (a thermal-warning line always cuts).
+    pub thermal_cpu_limit_floor: Option<u32>,
 }
 
 // ── CLI overrides (passed after Env layer) ────────────────────────────────────
@@ -549,6 +562,7 @@ fn derive_paths(raw: RawConfig) -> VigilConfig {
         vscode_copilot_recent_mins: raw.vscode_copilot_recent_mins,
         idle_after_sec: raw.idle_after_sec,
         force: raw.force,
+        thermal_cpu_limit_floor: raw.thermal_cpu_limit_floor,
     }
 }
 
@@ -853,6 +867,17 @@ impl VigilConfig {
             "VIGIL_THERMAL_COOLDOWN_SECS".into(),
             self.thermal_cooldown_secs.to_string(),
         );
+        // Rust-only knob (the smarter 5.4 policy; bash has no counterpart). The
+        // key is OMITTED entirely when None so that a default-config `vigil
+        // config --kv` stays byte-identical to the bash oracle (whose key list
+        // has no such var) — this keeps tests/config_parity_test.sh green. When
+        // Some(F) the floor is configured and the numeric value is emitted.
+        // (Design note offered "unset" string OR omit-when-None; omit is chosen
+        // because the config parity oracle full-diffs --kv and would otherwise
+        // flag a Rust-only key.)
+        if let Some(v) = self.thermal_cpu_limit_floor {
+            m.insert("VIGIL_THERMAL_CPU_LIMIT_FLOOR".into(), v.to_string());
+        }
         m.insert("VIGIL_TICK_SECS".into(), self.tick_secs.to_string());
         m.insert(
             "VIGIL_VSCODE_COPILOT_DISCOVER_SECS".into(),
@@ -912,6 +937,58 @@ mod tests {
         assert_eq!(
             cfg.idle_after_sec, 999,
             "VIGIL_IDLE_AFTER_SEC must bind via __ split"
+        );
+    }
+
+    #[test]
+    fn env_split_thermal_cpu_limit_floor() {
+        let _g = lock_env();
+        let tmp = make_tmp_home();
+        let home = tmp.path().to_str().unwrap();
+        let conf = tmp.path().join("vigil.conf");
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::set_var("VIGIL_THERMAL_CPU_LIMIT_FLOOR", "75");
+            std::env::remove_var("VIGIL_CONFIG_FILE");
+        }
+        let cfg = load(conf.to_str().unwrap(), None).expect("load");
+        unsafe {
+            std::env::remove_var("VIGIL_THERMAL_CPU_LIMIT_FLOOR");
+        }
+        assert_eq!(
+            cfg.thermal_cpu_limit_floor,
+            Some(75),
+            "VIGIL_THERMAL_CPU_LIMIT_FLOOR must bind to Some(75) via __ split"
+        );
+        assert_eq!(
+            cfg.to_kv_map()
+                .get("VIGIL_THERMAL_CPU_LIMIT_FLOOR")
+                .unwrap(),
+            "75",
+            "to_kv_map emits the numeric value when Some"
+        );
+    }
+
+    #[test]
+    fn thermal_cpu_limit_floor_unset_by_default() {
+        let _g = lock_env();
+        let tmp = make_tmp_home();
+        let home = tmp.path().to_str().unwrap();
+        let conf = tmp.path().join("vigil.conf");
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::remove_var("VIGIL_THERMAL_CPU_LIMIT_FLOOR");
+            std::env::remove_var("VIGIL_CONFIG_FILE");
+        }
+        let cfg = load(conf.to_str().unwrap(), None).expect("load");
+        assert_eq!(
+            cfg.thermal_cpu_limit_floor, None,
+            "absence (toml + env) must leave the floor None = parity"
+        );
+        assert!(
+            !cfg.to_kv_map()
+                .contains_key("VIGIL_THERMAL_CPU_LIMIT_FLOOR"),
+            "to_kv_map OMITS the key when None (keeps config_parity_test green)"
         );
     }
 

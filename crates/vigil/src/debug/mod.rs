@@ -154,6 +154,73 @@ pub fn assemble(cfg: &VigilConfig, now: i64) -> DebugDump {
     }
 }
 
+/// Render the dump PLUS the read-only power view. `json` -> a single
+/// serde_json object combining the dump and the power view; else the three dump
+/// table sections followed by a Power section.
+///
+/// READ-ONLY: the power view was produced by reading `pmset -g therm`/`-g ps`
+/// (or fixtures) and parsing — no transition, no write. This preserves the
+/// `vigil debug` read-only contract.
+pub fn render_with_power(dump: &DebugDump, power: &crate::power_guard::PowerView, json: bool) {
+    if json {
+        // Combine dump + power into one object so the JSON dump stays a single
+        // top-level value.
+        #[derive(Serialize)]
+        struct Combined<'a> {
+            #[serde(flatten)]
+            dump: &'a DebugDump,
+            power: &'a crate::power_guard::PowerView,
+        }
+        let combined = Combined { dump, power };
+        if let Err(e) = crate::output::print_json(&combined) {
+            anstream::eprintln!("vigil: debug --json: {e}");
+        }
+        return;
+    }
+
+    // Non-JSON: the existing three sections, then a Power section.
+    render(dump, false);
+    render_power_section(power);
+}
+
+/// Render just the read-only Power section (thermal + battery) as a table.
+fn render_power_section(power: &crate::power_guard::PowerView) {
+    anstream::println!("Power");
+    let mut t = crate::output::table(&["KEY", "VALUE"]);
+    let thermal_floor = power
+        .thermal_floor
+        .map(|v| format!("{v}%"))
+        .unwrap_or_else(|| "unset".to_string());
+    let cpu_limit = power
+        .cpu_scheduler_limit
+        .map(|v| format!("{v}%"))
+        .unwrap_or_else(|| "-".to_string());
+    let batt_pct = power
+        .battery_pct
+        .map(|v| format!("{v}%"))
+        .unwrap_or_else(|| "?".to_string());
+    t.add_row(["thermal.unavailable", bool_str(power.thermal_unavailable)]);
+    t.add_row([
+        "thermal.warning_present",
+        bool_str(power.thermal_warning_present),
+    ]);
+    t.add_row(["thermal.cpu_scheduler_limit", cpu_limit.as_str()]);
+    t.add_row(["thermal.floor", thermal_floor.as_str()]);
+    t.add_row(["thermal.summary", power.thermal_summary.as_str()]);
+    t.add_row(["battery.power_source", power.power_source.as_str()]);
+    t.add_row(["battery.pct", batt_pct.as_str()]);
+    t.add_row([
+        "battery.floor",
+        format!("{}%", power.battery_floor_pct).as_str(),
+    ]);
+    t.add_row(["battery.summary", power.battery_summary.as_str()]);
+    anstream::println!("{t}");
+}
+
+fn bool_str(b: bool) -> &'static str {
+    if b { "yes" } else { "no" }
+}
+
 /// Render the dump to stdout. `json` -> a single serde_json object; else three
 /// table sections.
 pub fn render(dump: &DebugDump, json: bool) {
