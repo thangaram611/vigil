@@ -4,7 +4,9 @@
 
 pub mod activity;
 pub mod battery;
+pub mod check;
 pub mod config;
+pub mod daemon;
 pub mod debug;
 pub mod helper;
 pub mod ipc;
@@ -13,6 +15,7 @@ pub mod power;
 pub mod power_guard;
 pub mod procscan;
 pub mod refcount;
+pub mod service;
 pub mod thermal;
 
 // Shared output substrate (anstream prints, comfy-table, --json). Lives in the

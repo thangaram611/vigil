@@ -1,0 +1,19 @@
+vigil status
+
+  service
+    launchd:      no
+    daemon pid:    -
+    scan:          not running
+    root helper:   not loaded
+
+  activity
+    refcount:      0 active / 0 total (idle window 5m)
+    agents:        claude=none  codex=idle  copilot=none  vscode_copilot_chat=none
+
+  power
+    hold=released  mode=best-effort  disablesleep=0  baseline=-  caffeinate=no
+    thermal:       ok
+    battery:       AC 90%
+    assertions:    none
+
+  detail: use 'vigil status --verbose' for provider paths and assertion rows

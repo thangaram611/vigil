@@ -41,9 +41,12 @@ libc = "0.2.186"
 nix = { version = "0.31.3", default-features = false, features = ["fs", "user", "process"] }
 notify = "8.2.0"
 owo-colors = "4.3.0"
+plist = "1.9.0"
+quick-xml = "0.40.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 sha2 = "0.11.0"
+signal-hook = "0.4.4"
 sysinfo = "0.39.3"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"

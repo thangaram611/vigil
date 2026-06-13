@@ -19,6 +19,7 @@
 //!   [`PowerMachine::soft_release`] / [`PowerMachine::reconcile_engaged`] /
 //!   [`PowerMachine::recover_startup`].
 
+pub mod assertions;
 pub mod caffeinate;
 pub mod pmset;
 

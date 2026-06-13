@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "launchd_loaded": false,
+  "daemon_pid": null,
+  "daemon_scan_state": "unloaded",
+  "daemon_scan_age_secs": null,
+  "refcount_active": 0,
+  "refcount_total": 0,
+  "pending_active_matches": 0,
+  "idle_window_minutes": 5,
+  "agents": {"claude":"none","codex":"idle","copilot":"none","vscode_copilot_chat":"none"},
+  "provider_roots": {"claude":{"home":"/private/tmp/vigil-golden-sbx/home/provider/claude","session_dir":"/private/tmp/vigil-golden-sbx/home/provider/claude/projects","exists":false,"latest_activity_age_secs":null},"codex":{"home":"/private/tmp/vigil-golden-sbx/home/provider/codex","session_dir":"/private/tmp/vigil-golden-sbx/home/provider/codex/sessions","exists":true,"latest_activity_age_secs":0},"copilot":{"home":"/private/tmp/vigil-golden-sbx/home/provider/copilot","session_dir":"/private/tmp/vigil-golden-sbx/home/provider/copilot/session-state","exists":false,"latest_activity_age_secs":null}},
+  "power_hold_mode": "best-effort",
+  "pmset_disablesleep": 0,
+  "baseline": null,
+  "caffeinate_pid": null,
+  "caffeinate_alive": false,
+  "thermal": "ok",
+  "battery": "AC 90%",
+  "power_helper_ok": false,
+  "power_assertions_state": "none",
+  "power_assertions": []
+}

@@ -111,6 +111,24 @@ impl ProcScanner {
             .filter_map(|r| detect_line(r.pid, &r.exe, &r.cmdline))
             .collect()
     }
+
+    /// Start time (unix secs) for `pid` from the ALREADY-REFRESHED `System`, or
+    /// `None` if the pid is not currently visible. This reads cached process
+    /// metadata populated by the most recent [`collect`](Self::collect) /
+    /// [`detect`](Self::detect) refresh — sysinfo fills `start_time()` on any
+    /// process refresh, so no extra refresh scope is needed.
+    ///
+    /// The daemon writes this into each agent pidfile's `start_ts` so the GC
+    /// pid-reuse branch (on-disk `start_ts` vs live `start_time()`) compares two
+    /// values from the SAME clock source and never false-positives on a
+    /// long-lived agent. Mirrors bash's `vigil_pid_start_ts` feeding both the
+    /// `vigil_refcount_touch` write AND the `vigil_refcount_gc` reuse probe.
+    pub fn start_time(&self, pid: u32) -> Option<i64> {
+        use sysinfo::Pid;
+        self.sys
+            .process(Pid::from(pid as usize))
+            .map(|p| p.start_time() as i64)
+    }
 }
 
 #[cfg(test)]

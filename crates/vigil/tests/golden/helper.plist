@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.thangaram.vigil.helper</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Library/Application Support/vigil/bin/vigil-root-helper</string>
+        <string>--serve</string>
+        <string>--request-dir</string>
+        <string>/private/tmp/vigil-golden-sbx/install/helper/requests/UID</string>
+        <string>--response-dir</string>
+        <string>/private/tmp/vigil-golden-sbx/install/helper/responses/UID</string>
+        <string>--state-dir</string>
+        <string>/Library/Application Support/vigil/helper/state</string>
+        <string>--log-file</string>
+        <string>/Library/Application Support/vigil/helper/logs/helper.log</string>
+        <string>--allowed-uid</string>
+        <string>1993776753</string>
+        <string>--allowed-user</string>
+        <string>thanga-5521</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>ExitTimeOut</key>
+    <integer>10</integer>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Library/Application Support/vigil/helper/logs/helper.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Library/Application Support/vigil/helper/logs/helper.err.log</string>
+</dict>
+</plist>

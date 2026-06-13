@@ -1,0 +1,18 @@
+vigil: setup dry run (no changes will be made)
+
+  user:
+    state dir:        /private/tmp/vigil-golden-sbx/state
+    log dir:          /private/tmp/vigil-golden-sbx/logs
+    install dir:      /private/tmp/vigil-golden-sbx/install
+    LaunchAgent:      /private/tmp/vigil-golden-sbx/home/Library/LaunchAgents/com.thangaram.vigil.plist
+
+  root:
+    helper binary:    /Library/Application Support/vigil/bin/vigil-root-helper
+    LaunchDaemon:     /Library/LaunchDaemons/com.thangaram.vigil.helper.plist
+    helper requests:  /private/tmp/vigil-golden-sbx/install/helper/requests/UID
+    helper responses: /private/tmp/vigil-golden-sbx/install/helper/responses/UID
+    newsyslog:        /etc/newsyslog.d/vigil.conf
+
+  generated file previews: hidden (use --verbose to print plist/newsyslog contents)
+
+vigil: dry run complete. No files were installed and launchd was not changed.

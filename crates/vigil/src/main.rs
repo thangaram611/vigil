@@ -7,7 +7,7 @@
 
 // config, log, output, and the detection modules are declared in lib.rs;
 // reference them via the crate root.
-use vigil::{battery, config, debug, output, power_guard, thermal};
+use vigil::{battery, config, daemon, debug, output, power_guard, thermal};
 
 mod exit;
 mod shim;
@@ -106,6 +106,11 @@ enum Command {
         #[arg(long, hide = true)]
         kv: bool,
     },
+    /// The resident tick loop. Run by launchd via the LaunchAgent plist as
+    /// `vigil daemon`; never invoked directly by users. Hidden from the public
+    /// surface (the plist execs it; humans use start/stop/status).
+    #[command(hide = true)]
+    Daemon,
     /// Read-only diagnostic dump of the detection data model (native; never
     /// mutates state). Hidden from the public surface (parity with the ten bash
     /// subcommands + completions/config).
@@ -250,6 +255,7 @@ fn dispatch(command: Command) -> ! {
             cmd_config(json, kv);
             std::process::exit(0);
         }
+        Command::Daemon => daemon::run(),
         Command::Debug { sub, json } => {
             cmd_debug(sub, json);
             std::process::exit(0);

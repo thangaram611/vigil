@@ -1,0 +1,28 @@
+vigil status
+
+  service
+    launchd:      no
+    daemon pid:    -
+    scan:          not running
+    root helper:   not loaded
+
+  activity
+    refcount:      0 active / 0 total (idle window 5m)
+    agents:        claude=none  codex=idle  copilot=none  vscode_copilot_chat=none
+
+  power
+    hold=released  mode=best-effort  disablesleep=0  baseline=-  caffeinate=no
+    thermal:       ok
+    battery:       AC 90%
+    assertions:    none
+
+  provider roots:
+      claude  home=/private/tmp/vigil-golden-sbx/home/provider/claude
+              session=/private/tmp/vigil-golden-sbx/home/provider/claude/projects exists=no state=none
+      codex   home=/private/tmp/vigil-golden-sbx/home/provider/codex
+              session=/private/tmp/vigil-golden-sbx/home/provider/codex/sessions exists=yes state=idle
+      copilot home=/private/tmp/vigil-golden-sbx/home/provider/copilot
+              session=/private/tmp/vigil-golden-sbx/home/provider/copilot/session-state exists=no state=none
+
+  power assertions:
+    (none)
