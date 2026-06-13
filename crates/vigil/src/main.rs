@@ -5,11 +5,11 @@
 //! bash `bin/vigil` via `shim::exec_bash` (execv) so exit codes and signals propagate
 //! verbatim.
 
-// config and log are declared in lib.rs; reference them via the crate root.
-use vigil::config;
+// config, log, output, and the detection modules are declared in lib.rs;
+// reference them via the crate root.
+use vigil::{config, debug, output};
 
 mod exit;
-mod output;
 mod shim;
 
 use std::ffi::OsString;
@@ -105,6 +105,29 @@ enum Command {
         /// Print sorted KEY=VALUE lines (used by the parity oracle test).
         #[arg(long, hide = true)]
         kv: bool,
+    },
+    /// Read-only diagnostic dump of the detection data model (native; never
+    /// mutates state). Hidden from the public surface (parity with the ten bash
+    /// subcommands + completions/config).
+    #[command(hide = true)]
+    Debug {
+        #[command(subcommand)]
+        sub: Option<DebugSub>,
+        /// Emit machine-readable JSON instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum DebugSub {
+    /// Hidden fixture-mode detect oracle (pure; reads two ps text files).
+    #[command(hide = true)]
+    Detect {
+        #[arg(long)]
+        ps_comm: std::path::PathBuf,
+        #[arg(long)]
+        ps_cmd: std::path::PathBuf,
     },
 }
 
@@ -210,11 +233,15 @@ fn exit_on_clap_error(e: clap::Error) -> ! {
 fn dispatch(command: Command) -> ! {
     match command {
         Command::Completions { shell } => {
-            output::generate_completions(shell);
+            generate_completions(shell);
             std::process::exit(0);
         }
         Command::Config { json, show: _, kv } => {
             cmd_config(json, kv);
+            std::process::exit(0);
+        }
+        Command::Debug { sub, json } => {
+            cmd_debug(sub, json);
             std::process::exit(0);
         }
         Command::Setup { args } => shim::exec_bash("setup", &args),
@@ -269,6 +296,57 @@ fn cmd_config(json: bool, kv: bool) {
             t.add_row([k.as_str(), v.as_str()]);
         }
         anstream::println!("{t}");
+    }
+}
+
+/// Generate a completion script for `shell` to stdout. (Lives here because it
+/// needs the binary-only `Cli` command factory.)
+fn generate_completions(shell: clap_complete::Shell) {
+    use std::io::Write;
+    let mut cmd = Cli::command();
+    let name = cmd.get_name().to_string();
+    // clap_complete writes raw bytes; stdout is fine (scripts have no ANSI).
+    clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
+    let _ = std::io::stdout().flush();
+}
+
+/// Handle `vigil debug [detect ...] [--json]`.
+///
+/// - `debug detect --ps-comm <f> --ps-cmd <f>`: the hidden fixture-mode parity
+///   oracle. Pure: reads two ps text files, prints byte-exact TSV rows via plain
+///   `println!` (NOT anstream-styled — machine output that must match bash).
+/// - `debug [--json]`: the READ-ONLY data-model dump (never mutates state).
+fn cmd_debug(sub: Option<DebugSub>, json: bool) {
+    match sub {
+        Some(DebugSub::Detect { ps_comm, ps_cmd }) => {
+            let comm_text = std::fs::read_to_string(&ps_comm).unwrap_or_else(|e| {
+                anstream::eprintln!("vigil: debug detect: {}: {e}", ps_comm.display());
+                std::process::exit(exit::EX_ERROR);
+            });
+            let cmd_text = std::fs::read_to_string(&ps_cmd).unwrap_or_else(|e| {
+                anstream::eprintln!("vigil: debug detect: {}: {e}", ps_cmd.display());
+                std::process::exit(exit::EX_ERROR);
+            });
+            for row in debug::detect_oracle_rows(&comm_text, &cmd_text) {
+                // Plain println: byte-exact machine output, no ANSI.
+                println!("{row}");
+            }
+        }
+        None => {
+            // READ-ONLY dump. Load config with NO side effects (no ensure_state_dir).
+            let conf_path = std::env::var("VIGIL_CONFIG_FILE")
+                .unwrap_or_else(|_| format!("{}/.config/vigil/vigil.conf", home_dir()));
+            let cfg = match config::load(&conf_path, None) {
+                Ok(c) => c,
+                Err(e) => {
+                    anstream::eprintln!("{e}");
+                    std::process::exit(exit::EX_USAGE);
+                }
+            };
+            let now = chrono::Local::now().timestamp();
+            let dump = debug::assemble(&cfg, now);
+            debug::render(&dump, json);
+        }
     }
 }
 

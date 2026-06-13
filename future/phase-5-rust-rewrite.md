@@ -876,7 +876,19 @@ bootout/bootstrap race poll MUST stay (fast machines fail setup without it).
 `cmd_run` MUST NOT exec (trap/cleanup leak). TCC copy-out-of-Documents is a
 silent-launch-failure if dropped. The `plist` crate needs `skip_serializing_if`
 on optional keys (launchd uses absence). Set MSRV from `sysinfo` (1.95) and
-`plist` (1.88) — take the higher.
+`plist` (1.88) — take the higher. **5.3 wiring carry-overs (the efficiency goal
+is only realized HERE):** the 5.3 cores ship resident-ready but are still called
+ad-hoc — `procscan::host_running(None)`, `refcount::gc`, and the `vigil debug`
+dump each construct their OWN `ProcScanner`/`System` per call (fine one-shot,
+a per-tick full-table alloc in a loop). The daemon must own ONE long-lived
+`ProcScanner`/`System` for its lifetime and thread it (or a single pre-collected
+snapshot) through detect + vscode host-check + gc each tick — never per-subsystem
+construction. `refcount::gc` self-spaces its two `with_cpu()` refreshes with a
+`MINIMUM_CPU_UPDATE_INTERVAL` sleep; once gc runs on the shared tick `System`,
+drive that spacing from the loop cadence instead of sleeping inside gc. The vscode
+`VIGIL_VSCODE_PS_FIXTURE` seam is honored in `host_running(None)`'s live branch
+(parity with bash `_vigil_vscode_ps`); keep that path reachable when the daemon
+supplies a live snapshot so the ported integration tests can still inject it.
 
 **Depends on.** 5.3, 5.4, 5.5.
 

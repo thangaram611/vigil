@@ -22,12 +22,16 @@ comfy-table = "7.2.2"
 dirs = "6.0.0"
 figment = { version = "0.10.19", features = ["toml", "env"] }
 libc = "0.2.186"
+notify = "8.2.0"
 owo-colors = "4.3.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+sha2 = "0.11.0"
+sysinfo = "0.39.3"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter"] }
+walkdir = "2.5.0"
 
 [dev-dependencies]
 regex = "1.12.4"

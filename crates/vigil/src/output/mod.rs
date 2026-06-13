@@ -5,8 +5,6 @@
 //! - serde_json --json helper
 //! - colored clap help styles
 
-use std::io::Write;
-
 use owo_colors::OwoColorize;
 
 // ---- glyphs (the visual language later slices reuse) ------------------------
@@ -70,17 +68,6 @@ pub fn table(headers: &[&str]) -> comfy_table::Table {
     t.load_preset(UTF8_FULL);
     t.set_header(headers.iter().copied());
     t
-}
-
-// ---- completions ------------------------------------------------------------
-/// Generate a completion script for `shell` to stdout.
-pub fn generate_completions(shell: clap_complete::Shell) {
-    use clap::CommandFactory;
-    let mut cmd = crate::Cli::command();
-    let name = cmd.get_name().to_string();
-    // clap_complete writes raw bytes; stdout is fine (scripts have no ANSI).
-    clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
-    let _ = std::io::stdout().flush();
 }
 
 #[cfg(test)]
