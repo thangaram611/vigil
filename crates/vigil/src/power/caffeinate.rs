@@ -42,10 +42,10 @@ pub fn is_stale_display(argv: &str) -> bool {
     false
 }
 
-/// Caffeinate assertion seam. The real impl spawns `caffeinate -i`; a fake drives
-/// unit tests without spawning.
+/// Caffeinate assertion seam. The real impl spawns `caffeinate -i -t N` (idle
+/// hold with a self-timeout backstop); a fake drives unit tests without spawning.
 pub trait CaffeinateAssertion {
-    /// Spawn a fresh `caffeinate -i` and return its pid.
+    /// Spawn a fresh idle assertion (`caffeinate -i -t N`) and return its pid.
     fn spawn(&self) -> std::io::Result<u32>;
     /// True iff `pid` is alive AND is a non-display-holding `caffeinate` (the
     /// alive-BY-IDENTITY check).
@@ -62,7 +62,17 @@ pub trait CaffeinateAssertion {
     fn kill(&self, pid: u32);
 }
 
-/// Real macOS caffeinate. Spawns `caffeinate -i` (no display hold) via
+/// Self-timeout (`caffeinate -i -t N`) backstop, in seconds. Caps the lifetime
+/// of an UNTRACKED orphaned assertion — one the daemon can no longer find or kill
+/// (e.g. a daemon SIGKILL'd in the spawn→pidfile-write gap, or killed with no
+/// restart) — so it cannot hold idle system sleep open indefinitely. 30 min is
+/// far longer than any reconcile interval, so a normally-tracked assertion is
+/// killed on release/shutdown long before it would self-exit; this value only
+/// bounds an orphan. `is_stale_display("-i -t 1800")` is false, so the identity
+/// reconcile still recognizes this as a live, non-display caffeinate.
+const CAFFEINATE_SELF_TIMEOUT_SECS: u32 = 1800;
+
+/// Real macOS caffeinate. Spawns `caffeinate -i -t N` (no display hold) via
 /// `std::process::Command`.
 pub struct MacCaffeinate;
 
@@ -98,6 +108,17 @@ impl CaffeinateAssertion for MacCaffeinate {
     fn spawn(&self) -> std::io::Result<u32> {
         let child = std::process::Command::new("/usr/bin/caffeinate")
             .arg("-i")
+            // Self-timeout backstop (see CAFFEINATE_SELF_TIMEOUT_SECS): bounds an
+            // orphan's lifetime; a tracked assertion is killed on release long
+            // before it self-exits, and the helper's pmset disablesleep covers
+            // the brief per-tick reconcile gap on a hold longer than the timeout.
+            .arg("-t")
+            .arg(CAFFEINATE_SELF_TIMEOUT_SECS.to_string())
+            // Detach stdio so an orphan never pins the daemon's log/stdout/stderr
+            // fds. caffeinate produces no output we consume.
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()?;
         Ok(child.id())
     }
@@ -180,5 +201,19 @@ mod tests {
         assert!(!MacCaffeinate::identity_ok("caffeinate -di"));
         // wrong basename even with -i => not ok.
         assert!(!MacCaffeinate::identity_ok("/bin/sleep -i"));
+    }
+
+    #[test]
+    fn self_timeout_argv_stays_identity_ok() {
+        // The spawned `caffeinate -i -t N` must still be recognized as a live,
+        // non-display caffeinate by the reconcile/kill identity check — otherwise
+        // the daemon could not adopt or replace its own assertion.
+        let argv = format!("/usr/bin/caffeinate -i -t {CAFFEINATE_SELF_TIMEOUT_SECS}");
+        assert!(
+            !is_stale_display(&argv),
+            "self-timeout argv must NOT be stale"
+        );
+        assert!(MacCaffeinate::identity_ok(&argv), "must stay identity-ok");
+        assert_eq!(MacCaffeinate::argv_basename(&argv), "caffeinate");
     }
 }

@@ -40,18 +40,6 @@ fn now_unix() -> i64 {
     chrono::Local::now().timestamp()
 }
 
-/// Read `pmset -g therm` (or its fixture) UNLESS forced. On force the daemon
-/// returns "no cut" before any subprocess, so we skip the read entirely (bash
-/// short-circuits before forking pmset). `live_should_cut(true, …)` also returns
-/// false, so the empty string here is never parsed.
-fn read_therm_or_skip(force: bool) -> String {
-    if force {
-        String::new()
-    } else {
-        thermal::read_therm_raw()
-    }
-}
-
 /// Read `pmset -g ps` (or its fixture) UNLESS forced (same rationale).
 fn read_ps_or_skip(force: bool) -> String {
     if force {
@@ -157,6 +145,10 @@ pub struct Daemon {
     scanner: ProcScanner,
     /// A SECOND bare `System` for the gc cpu probe (Q9 default).
     sys_for_gc: sysinfo::System,
+    /// The joined `ps`-style cmdline text from THIS tick's single `scanner`
+    /// pass, cached by `detect_and_touch` so the vscode host probe reuses it
+    /// instead of spinning up a SECOND full process scan per tick.
+    last_ps_text: String,
     // ── owned PowerMachine seams (borrowed by a thin PowerMachine per use) ──
     ipc: MacHelperClient,
     caffeinate: MacCaffeinate,
@@ -190,9 +182,20 @@ impl Daemon {
     /// `start_ts` = the pid's sysinfo `start_time()` so the gc pid-reuse branch
     /// compares like-with-like.
     fn detect_and_touch(&mut self) {
-        let matches = self.scanner.detect();
+        // ONE process scan per tick. Cache the joined cmdline text so the vscode
+        // host probe in `activity()` reuses it instead of building a fresh
+        // `ProcScanner` and re-walking the whole process table a second time.
+        let records = self.scanner.collect();
+        self.last_ps_text = records
+            .iter()
+            .map(|r| r.cmdline.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         let active_dir = Path::new(&self.cfg.active_dir);
-        for m in matches {
+        for r in &records {
+            let Some(m) = crate::procscan::detect_line(r.pid, &r.exe, &r.cmdline) else {
+                continue;
+            };
             if m.pid == 0 {
                 continue;
             }
@@ -216,9 +219,11 @@ impl Daemon {
 
     /// Per-agent activity, computed once per tick (§2.1.3 step 3).
     ///
-    /// vscode uses `chat_is_active(..., ps_override=None)`: `None` keeps the
-    /// `VIGIL_VSCODE_PS_FIXTURE` seam the first thing checked in `host_running`'s
-    /// live branch (§3.1) — the env fixture wins over a live scan.
+    /// vscode reuses THIS tick's single `scanner` pass via `last_ps_text` rather
+    /// than letting `host_running` spin up a second full process scan. The
+    /// `VIGIL_VSCODE_PS_FIXTURE` seam is preserved: when the fixture is set
+    /// (tests), pass `None` so `host_running` reads the fixture; otherwise hand it
+    /// the cached scan text.
     fn activity(&self, now: i64) -> ActivityFlags {
         let idle = self.cfg.idle_after_sec;
         let claude = scan::is_active(
@@ -242,6 +247,13 @@ impl Daemon {
             idle,
             now,
         );
+        // Reuse this tick's single scan unless a ps fixture is set (test seam),
+        // in which case pass None so host_running reads VIGIL_VSCODE_PS_FIXTURE.
+        let ps_override = if std::env::var_os("VIGIL_VSCODE_PS_FIXTURE").is_some() {
+            None
+        } else {
+            Some(self.last_ps_text.as_str())
+        };
         let vscode = vscode::chat_is_active(
             Path::new(&self.cfg.copilot_home),
             Path::new(&self.cfg.vscode_copilot_state_file),
@@ -249,7 +261,7 @@ impl Daemon {
             idle,
             self.cfg.vscode_copilot_discover_secs,
             self.cfg.vscode_copilot_recent_mins,
-            None, // keep VIGIL_VSCODE_PS_FIXTURE reachable in host_running
+            ps_override,
         );
         ActivityFlags {
             claude,
@@ -291,11 +303,10 @@ impl Daemon {
         // read entirely on force (bash short-circuits before forking pmset).
         let now = now_unix();
         let force = Self::force();
-        let cut_thermal = thermal::live_should_cut(
-            force,
-            &read_therm_or_skip(force),
-            self.cfg.thermal_cpu_limit_floor,
-        );
+        // Fail CLOSED: a genuine pmset read failure cuts the hold so a keep-awake
+        // is never sustained while blind to heat. `force` still short-circuits
+        // the read (no fork), preserving the force contract.
+        let cut_thermal = thermal::cut_thermal_failclosed(force, self.cfg.thermal_cpu_limit_floor);
         let battery_raw = read_ps_or_skip(force);
         let cut_battery = battery::live_should_cut(force, &battery_raw, self.cfg.battery_floor_pct);
         let (cooldown_until, cooling) = crate::power_guard::cooldown_state(
@@ -360,11 +371,8 @@ impl Daemon {
         );
         // 3. startup_can_hold = !thermal && !battery (both at startup).
         let force = Self::force();
-        let thermal_should = thermal::live_should_cut(
-            force,
-            &read_therm_or_skip(force),
-            self.cfg.thermal_cpu_limit_floor,
-        );
+        let thermal_should =
+            thermal::cut_thermal_failclosed(force, self.cfg.thermal_cpu_limit_floor);
         let battery_should =
             battery::live_should_cut(force, &read_ps_or_skip(force), self.cfg.battery_floor_pct);
         let guard = StartupGuard {
@@ -518,6 +526,7 @@ pub fn run() -> ! {
         caffeinate_pidfile: PathBuf::from(&cfg.caffeinate_pidfile),
         scanner: ProcScanner::new(),
         sys_for_gc: sysinfo::System::new(),
+        last_ps_text: String::new(),
         ipc,
         caffeinate: MacCaffeinate,
         sleep: MacSleepReader,

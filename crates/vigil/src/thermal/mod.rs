@@ -187,6 +187,63 @@ pub fn read_therm_raw() -> String {
         .unwrap_or_default()
 }
 
+/// The outcome of a thermal read, distinguishing "pmset ran and produced this
+/// text" from "pmset could not be read at all". The fail-OPEN `read_therm_raw`
+/// above collapses both into an empty string (no cut); this is the fail-CLOSED
+/// view the daemon's HOLD decision uses so a sustained keep-awake is never held
+/// while blind to thermal state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThermRead {
+    /// The `VIGIL_THERMAL_FIXTURE` value, or the stdout of a `pmset -g therm`
+    /// that actually ran (exit 0). Parse it normally.
+    Text(String),
+    /// `pmset -g therm` could not be read — it failed to spawn (e.g. a
+    /// fork-starved, overloaded machine — exactly when thermal pressure is most
+    /// likely) or exited non-zero. The daemon treats this as a cut (fail closed).
+    /// NOTE: an empty stdout from a *successful* pmset is `Text("")`, NOT
+    /// `Unavailable` — a healthy `pmset -g therm` always prints something, so we
+    /// reserve `Unavailable` for a genuine read failure and never cut on a
+    /// quirky-but-working pmset.
+    Unavailable,
+}
+
+/// Read thermal state as a [`ThermRead`]. Honors the same `VIGIL_THERMAL_FIXTURE`
+/// seam as [`read_therm_raw`] (non-empty fixture wins). On the live path, a
+/// spawn failure or a non-success exit yields [`ThermRead::Unavailable`].
+pub fn read_therm() -> ThermRead {
+    if let Ok(fixture) = std::env::var("VIGIL_THERMAL_FIXTURE")
+        && !fixture.is_empty()
+    {
+        return ThermRead::Text(fixture);
+    }
+    match std::process::Command::new("pmset")
+        .args(["-g", "therm"])
+        .output()
+    {
+        Ok(o) if o.status.success() => {
+            ThermRead::Text(String::from_utf8_lossy(&o.stdout).into_owned())
+        }
+        _ => ThermRead::Unavailable,
+    }
+}
+
+/// PURE fail-closed cut decision over a [`ThermRead`]: an unreadable thermal
+/// state cuts; readable text decides via the existing [`should_cut`] policy.
+pub fn decide_cut(read: &ThermRead, floor: Option<u32>) -> bool {
+    match read {
+        ThermRead::Unavailable => true,
+        ThermRead::Text(raw) => should_cut(&parse_therm(raw), floor),
+    }
+}
+
+/// The daemon's fail-CLOSED thermal cut for a HOLD decision. `force` short-
+/// circuits to no-cut WITHOUT reading pmset (preserving the no-fork-under-force
+/// contract); otherwise reads thermal state and applies [`decide_cut`], so a
+/// genuine read failure cuts the hold rather than silently sustaining it.
+pub fn cut_thermal_failclosed(force: bool, floor: Option<u32>) -> bool {
+    !force && decide_cut(&read_therm(), floor)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +294,38 @@ mod tests {
             "thermal warning level = critical",
             None
         ));
+    }
+
+    #[test]
+    fn fail_closed_unavailable_cuts() {
+        // A genuine read failure cuts in BOTH floor modes (the never-blind-to-heat
+        // invariant): an unreadable thermal state must never let a hold persist.
+        assert!(decide_cut(&ThermRead::Unavailable, None));
+        assert!(decide_cut(&ThermRead::Unavailable, Some(80)));
+    }
+
+    #[test]
+    fn fail_closed_text_decides_normally() {
+        // Readable text decides via the existing should_cut policy (unchanged).
+        assert!(!decide_cut(
+            &ThermRead::Text("Note: No thermal warning level has been recorded".into()),
+            None
+        ));
+        assert!(decide_cut(
+            &ThermRead::Text("thermal warning level = warning".into()),
+            None
+        ));
+        // An empty stdout from a *successful* pmset is Text("") => no cut (NOT
+        // treated as Unavailable), so we never false-cut on a quirky pmset.
+        assert!(!decide_cut(&ThermRead::Text(String::new()), None));
+    }
+
+    #[test]
+    fn fail_closed_force_never_reads_or_cuts() {
+        // force short-circuits to no-cut WITHOUT reading pmset (no fork), so a
+        // forced hold is never released by a (possibly failing) live read.
+        assert!(!cut_thermal_failclosed(true, None));
+        assert!(!cut_thermal_failclosed(true, Some(80)));
     }
 
     #[test]

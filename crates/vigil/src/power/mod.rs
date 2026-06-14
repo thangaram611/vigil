@@ -149,7 +149,7 @@ impl<I: HelperClient, C: CaffeinateAssertion, S: SleepReader> PowerMachine<'_, I
         }
     }
 
-    /// Spawn a fresh `caffeinate -i`, replacing a stale/display-holding one.
+    /// Spawn a fresh `caffeinate -i -t N`, replacing a stale/display-holding one.
     /// Writes the BARE pid to the pidfile (byte-identical to bash `echo $!`).
     pub fn spawn_caffeinate(&self) -> std::io::Result<()> {
         if self.caffeinate_alive() {
@@ -169,8 +169,16 @@ impl<I: HelperClient, C: CaffeinateAssertion, S: SleepReader> PowerMachine<'_, I
         }
         let _ = std::fs::remove_file(&self.caffeinate_pidfile);
         let pid = self.caffeinate.spawn()?;
-        // Bare pid, no trailing format drift beyond the newline bash writes.
-        std::fs::write(&self.caffeinate_pidfile, format!("{pid}\n"))
+        // Record the pid; if we cannot, KILL the just-spawned assertion rather
+        // than leak it untracked — a future reconcile/release could never find a
+        // caffeinate whose pid we failed to persist. (The `-t` self-timeout is a
+        // further backstop for a hard daemon kill inside this same spawn→write
+        // gap, which no in-process guard can cover.)
+        if let Err(e) = std::fs::write(&self.caffeinate_pidfile, format!("{pid}\n")) {
+            self.caffeinate.kill(pid);
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Kill + clear the caffeinate child (best-effort). Used by both releases.
@@ -182,8 +190,8 @@ impl<I: HelperClient, C: CaffeinateAssertion, S: SleepReader> PowerMachine<'_, I
     }
 
     /// 0 → >0 transition: capture-baseline-idempotent → helper engage → ONLY
-    /// THEN spawn `caffeinate -i`. Returns Err if the helper engage fails (the
-    /// caffeinate child is NOT spawned in that case, matching bash's early
+    /// THEN spawn `caffeinate -i -t N`. Returns Err if the helper engage fails
+    /// (the caffeinate child is NOT spawned in that case, matching bash's early
     /// return).
     pub fn engage(&self, now_unix: i64) -> Result<(), String> {
         self.capture_baseline(now_unix)
