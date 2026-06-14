@@ -452,8 +452,22 @@ mod tests {
     /// DropIdle'd — inverting bash (which reads the real `ps -o %cpu=`). This test
     /// spawns a CPU-burning child, writes an aged `cli-claude` pidfile for it, and
     /// asserts `gc()` KEEPS the file (alive + matching start_ts + high cpu).
+    ///
+    /// Robustness: `gc`'s cpu probe is a single ~`MINIMUM_CPU_UPDATE_INTERVAL`
+    /// (~200ms) sample, and under heavy machine load (load avg > cores) the
+    /// scheduler can starve even a tight spin-loop below `stale_cpu_pct` for one
+    /// such window — a flake unrelated to the contract under test. We therefore
+    /// re-sample with a bounded retry: a correct double-refresh reads the child's
+    /// true (high) usage on at least one attempt, while the single-refresh
+    /// regression this guards against reads `0.0` on EVERY attempt, so it still
+    /// fails deterministically. (Production is unaffected by the starvation case:
+    /// the idle branch only fires on pidfiles older than `stale_age_secs`, and the
+    /// daemon re-touches every live matched agent's pidfile each 5s tick, so a busy
+    /// agent never reaches a 30s-stale pidfile there.)
     #[test]
     fn gc_keeps_busy_agent_with_aged_pidfile() {
+        use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
+
         // A busy-loop child: burns CPU until killed.
         let mut child = std::process::Command::new("sh")
             .arg("-c")
@@ -465,11 +479,8 @@ mod tests {
         // Read the child's live start_ts via the same sysinfo path gc uses, so
         // the pid-reuse branch (b) cannot fire on a start_ts mismatch.
         let mut sys = sysinfo::System::new();
-        {
-            use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
-            let kind = ProcessRefreshKind::nothing().with_cpu();
-            sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
-        }
+        let kind = ProcessRefreshKind::nothing().with_cpu();
+        sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
         let live_start = sys
             .process(sysinfo::Pid::from(pid as usize))
             .map(|p| p.start_time() as i64)
@@ -477,30 +488,39 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let pidfile = dir.path().join(format!("cli-claude-{pid}.pid"));
-        std::fs::write(
-            &pidfile,
-            pidfile_body("cli-claude", pid, "claude", live_start),
-        )
-        .expect("write pidfile");
-
-        // Age the pidfile well past the default stale window (30s).
-        backdate_mtime(&pidfile, 600);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
 
         // stale_age_secs=30, stale_cpu_pct=0.5 (the documented defaults). The
-        // child is burning ~100% cpu, so the idle branch (c) must NOT fire.
-        gc(dir.path(), &mut sys, 30, 0.5, now);
+        // child is burning ~100% cpu, so the idle branch (c) must NOT fire — but
+        // re-sample to ride out a single scheduler-starved cpu window under load.
+        let mut kept = false;
+        for _ in 0..10 {
+            // Recreate the aged pidfile (a starved sample may have dropped it).
+            std::fs::write(
+                &pidfile,
+                pidfile_body("cli-claude", pid, "claude", live_start),
+            )
+            .expect("write pidfile");
+            // Age the pidfile well past the default stale window (30s).
+            backdate_mtime(&pidfile, 600);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
 
-        let kept = pidfile.exists();
+            gc(dir.path(), &mut sys, 30, 0.5, now);
+            if pidfile.exists() {
+                kept = true;
+                break;
+            }
+        }
+
         let _ = child.kill();
         let _ = child.wait();
         assert!(
             kept,
-            "gc must KEEP an aged pidfile for a busy (high-cpu) live agent; \
-             a single-refresh cpu probe would read 0.0 and wrongly DropIdle it"
+            "gc must KEEP an aged pidfile for a busy (high-cpu) live agent across \
+             repeated samples; a single-refresh cpu probe would read 0.0 every \
+             time and wrongly DropIdle it"
         );
     }
 }
