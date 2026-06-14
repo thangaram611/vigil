@@ -406,6 +406,84 @@ impl HelperClient for FailingIpc {
 }
 
 #[test]
+fn act_reconcile_failure_flips_engaged_false() {
+    // (true, true) branch: reconcile_engaged() must ERROR → the arm returns false.
+    // Setup: engage with the real FakeIpc so baseline + caffeinate exist and the
+    // caffeinate reads alive-by-identity (respawn=false), then drift SleepDisabled
+    // to 0 so reconcile_decision yields reassert=true. Swapping in FailingIpc makes
+    // the reassert helper engage Err → reconcile_engaged returns Err → act → false.
+    let h = Harness::new(0);
+    h.machine().engage(NOW).unwrap();
+    assert!(h.baseline_file.exists(), "engaged: baseline captured");
+    // Drift SleepDisabled=0 → reconcile_decision(0, alive)=(reassert=true, respawn=false).
+    std::fs::write(&h.sleep_file, "0\n").unwrap();
+    let ipc = FailingIpc;
+    let m = h.machine_with_ipc(&ipc);
+    let engaged = act(
+        &m,
+        true,  // desired
+        true,  // engaged
+        2,     // count
+        false, // cut_thermal
+        false, // cut_battery
+        60,    // cooldown_secs
+        "on AC",
+        ActivityFlags::default(),
+        NOW,
+    );
+    assert!(
+        !engaged,
+        "reconcile helper-engage error → reconcile arm returns engaged=false"
+    );
+    assert!(
+        h.baseline_file.exists(),
+        "reconcile NEVER clears baseline (no release on the (true,true) arm)"
+    );
+}
+
+#[test]
+fn act_release_with_no_reason_still_flips_engaged_false() {
+    // (false, true) release arm with NO release reason: cut_thermal=false,
+    // cut_battery=false, count>0 (so the count==0 idle branch does NOT fire).
+    // None of the three release sub-branches run, so NO release call is made — yet
+    // `engaged := false` ALWAYS (the trailing unconditional false), and baseline +
+    // caffeinate are left untouched (neither soft_release nor full_release ran).
+    let h = Harness::new(0);
+    let m = h.machine();
+    m.engage(NOW).unwrap();
+    assert!(h.baseline_file.exists(), "engaged: baseline present");
+    assert!(
+        h.caffeinate_pidfile.exists(),
+        "engaged: caffeinate pidfile present"
+    );
+    let engaged = act(
+        &m,
+        false, // desired
+        true,  // engaged
+        3,     // count > 0 → the count==0 idle release branch is skipped
+        false, // cut_thermal
+        false, // cut_battery
+        60,    // cooldown_secs
+        "on AC",
+        ActivityFlags::default(),
+        NOW,
+    );
+    assert!(!engaged, "no-reason release arm still flips engaged=false");
+    assert!(
+        !h.events().contains(&"helper release".to_string()),
+        "no release sub-branch fired → NO helper release request"
+    );
+    assert!(
+        h.baseline_file.exists(),
+        "no release ran → baseline.json untouched"
+    );
+    assert!(
+        h.caffeinate_pidfile.exists(),
+        "no release ran → caffeinate pidfile untouched"
+    );
+}
+
+#[test]
 fn act_engage_failure_keeps_engaged_false() {
     let h = Harness::new(0);
     let ipc = FailingIpc;

@@ -213,4 +213,45 @@ mod tests {
         assert!(Agent::Copilot.pattern().matches("events.jsonl"));
         assert!(!Agent::Copilot.pattern().matches("notes.txt"));
     }
+
+    /// Set a file's mtime to `secs` unix epoch (whole seconds; no new dependency).
+    fn set_mtime(path: &Path, secs: i64) {
+        use std::fs::{File, FileTimes};
+        use std::time::{Duration, SystemTime};
+        let f = File::options().write(true).open(path).unwrap();
+        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64);
+        f.set_times(FileTimes::new().set_accessed(t).set_modified(t))
+            .unwrap();
+    }
+
+    #[test]
+    fn is_active_strict_less_than_window_boundary() {
+        // window_secs(300) == 300; is_active uses STRICT `(now - m) < window`.
+        // Place ONE matching file at a fixed mtime, then sweep `now` across the
+        // boundary. Expecteds derived from `(now - m) < 300`:
+        //   now - m = 299 -> 299 < 300 == true  (active)
+        //   now - m = 300 -> 300 < 300 == false (idle: equal is NOT recent)
+        //   now - m = 301 -> 301 < 300 == false (idle: older)
+        //   now - m = 0   -> 0 < 300   == true  (active: just modified)
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let f = dir.join("a.jsonl"); // matches Claude Suffix(".jsonl")
+        std::fs::write(&f, b"x").unwrap();
+        let m: i64 = 1_000_000;
+        set_mtime(&f, m);
+        let pat = Agent::Claude.pattern();
+        let cases: &[(i64, bool, &str)] = &[
+            (m, true, "now==mtime -> age 0 < 300"),
+            (m + 299, true, "age 299 < 300"),
+            (m + 300, false, "age 300 NOT < 300 (strict boundary)"),
+            (m + 301, false, "age 301 NOT < 300"),
+        ];
+        for &(now, want, label) in cases {
+            assert_eq!(
+                is_active(dir, pat, 300, now),
+                want,
+                "is_active boundary: {label}"
+            );
+        }
+    }
 }

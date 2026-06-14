@@ -161,7 +161,10 @@ fn assert_invalid_request_file(e: &Env, id: &str) {
         e.response(id)
     );
     assert_eq!(e.sleepdisabled(), "0", "{id}: pmset untouched");
-    assert!(e.no_leftover(id), "{id}: no leftover request/processing file");
+    assert!(
+        e.no_leftover(id),
+        "{id}: no leftover request/processing file"
+    );
 }
 
 #[test]

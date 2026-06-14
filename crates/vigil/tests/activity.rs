@@ -285,4 +285,3 @@ fn vscode_state_is_none_without_host() {
         "empty ps text means no VS Code host"
     );
 }
-

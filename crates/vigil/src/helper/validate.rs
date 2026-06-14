@@ -455,4 +455,49 @@ mod tests {
         w.st_uid = 0;
         assert!(!dir_stat_ok(&w, 0));
     }
+
+    #[test]
+    fn dir_stat_ok_refuses_world_and_group_writable_request_dir() {
+        // The request-DIR per-poll re-check uses dir_stat_ok(st, allowed_uid):
+        // a correctly-owned directory is STILL refused if mode & 0o022 != 0
+        // (group- or other-writable). One row per bad mode + the secure pass.
+        let cases: &[(u32, bool, &str)] = &[
+            (0o755, true, "0o755: other-READ only, mode&0o022==0 => ok"),
+            (0o700, true, "0o700: owner-only => ok"),
+            (0o002, false, "0o002: other-WRITABLE => refused"),
+            (0o020, false, "0o020: group-WRITABLE => refused"),
+            (0o022, false, "0o022: group+other-writable => refused"),
+            (0o777, false, "0o777: world-writable => refused"),
+        ];
+        for (perm, want, label) in cases {
+            let mut st = blank_stat();
+            st.st_mode = (libc::S_IFDIR as u32 | perm) as _;
+            st.st_uid = 501;
+            assert_eq!(dir_stat_ok(&st, 501), *want, "{label}");
+        }
+    }
+
+    #[test]
+    fn open_nofollow_dir_success_and_enotdir() {
+        // SUCCESS: a real directory opens (O_NOFOLLOW|O_DIRECTORY).
+        let dir = tempfile::tempdir().unwrap();
+        let dir_path = dir.path().to_str().unwrap();
+        let fd = open_nofollow_dir(dir_path).expect("a real dir must open");
+        // the returned fd fstats as a dir owned by us.
+        let st = fstat_fd(&fd).unwrap();
+        // SAFETY: geteuid is always safe.
+        let uid = unsafe { libc::geteuid() };
+        assert!(dir_stat_ok(&st, uid), "opened fd is a dir owned by us");
+
+        // ENOTDIR: a regular file fails O_DIRECTORY with ENOTDIR.
+        let file = dir.path().join("reg");
+        std::fs::write(&file, b"x").unwrap();
+        let err = open_nofollow_dir(file.to_str().unwrap())
+            .expect_err("a regular file must fail O_DIRECTORY");
+        assert_eq!(
+            err,
+            nix::errno::Errno::ENOTDIR,
+            "a non-dir path fails open(O_DIRECTORY) with ENOTDIR"
+        );
+    }
 }

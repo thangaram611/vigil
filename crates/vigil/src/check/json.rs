@@ -181,4 +181,96 @@ mod tests {
         assert_eq!(opt_num(Some(42u32)), "42");
         assert_eq!(opt_num(Some(-3i64)), "-3");
     }
+
+    use crate::check::{DaemonScanState, ProviderRoot, TriState};
+
+    /// Build a provider root with the given dynamic strings.
+    fn provider(home: &str, session_dir: &str) -> ProviderRoot {
+        ProviderRoot {
+            home: home.to_string(),
+            session_dir: session_dir.to_string(),
+            exists: false,
+            latest_activity_age_secs: None,
+        }
+    }
+
+    /// Emitter-level test: the WHOLE `to_json()` output must apply `json_escape`
+    /// to the DYNAMIC provider/assertion strings (not just the unit-level
+    /// json_escape fn). Special chars (`"`, `\`, TAB, LF) in provider home/
+    /// session_dir and in assertion process/type must be escaped in the object;
+    /// closed-enum fields (agents, scan_state) are emitted plain.
+    #[test]
+    fn to_json_escapes_provider_and_assertion_strings() {
+        let snap = StatusSnapshot {
+            launchd_loaded: true,
+            daemon_pid: Some(1234),
+            daemon_scan_state: DaemonScanState::Fresh,
+            daemon_scan_age_secs: Some(3),
+            refcount_active: 1,
+            refcount_total: 2,
+            pending_active_matches: 0,
+            idle_window_minutes: 10,
+            agent_claude: TriState::Active,
+            agent_codex: TriState::Idle,
+            agent_copilot: TriState::None,
+            agent_vscode_copilot_chat: TriState::None,
+            // a quote + a backslash in home; a TAB + a LF in session_dir.
+            provider_claude: provider("~/Li\"b\\c", "se\tss\nion"),
+            provider_codex: provider("", ""),
+            provider_copilot: provider("", ""),
+            power_hold_mode: "best-effort".to_string(),
+            pmset_disablesleep: 0,
+            baseline: Some(0),
+            caffeinate_pid: None,
+            caffeinate_alive: false,
+            thermal: "ok".to_string(),
+            battery: "AC 90%".to_string(),
+            power_helper_ok: true,
+            power_assertions_state: "ok".to_string(),
+            // a quote in process, a backslash in type.
+            power_assertions: vec![Assertion {
+                pid: 1234,
+                process: "Goog\"le".to_string(),
+                atype: "Pre\\vent".to_string(),
+                vigil: true,
+            }],
+            cut_thermal: false,
+            cut_battery: false,
+            hold_engaged: false,
+        };
+        let json = snap.to_json();
+
+        // provider home: `"` -> `\"`, `\` -> `\\`.
+        assert!(
+            json.contains(r##""home":"~/Li\"b\\c""##),
+            "provider home escaped in the object: {json}"
+        );
+        // provider session_dir: TAB -> `\t`, LF -> `\n`.
+        assert!(
+            json.contains(r#""session_dir":"se\tss\nion""#),
+            "provider session_dir escaped in the object: {json}"
+        );
+        // assertion array: process `"` -> `\"`, type `\` -> `\\`.
+        assert!(
+            json.contains(
+                r##"[{"pid":1234,"process":"Goog\"le","type":"Pre\\vent","vigil":true}]"##
+            ),
+            "assertion strings escaped in the object: {json}"
+        );
+        // closed enums are emitted plain (no escape path).
+        assert!(
+            json.contains(r#""claude":"active""#),
+            "agent enum plain: {json}"
+        );
+        assert!(
+            json.contains(r#""daemon_scan_state": "fresh""#),
+            "scan_state enum plain: {json}"
+        );
+        // NEGATIVE: the raw (unescaped) TAB+LF run must NOT survive into the
+        // single-line session_dir value.
+        assert!(
+            !json.contains("ss\nion"),
+            "the raw newline must have been escaped away"
+        );
+    }
 }

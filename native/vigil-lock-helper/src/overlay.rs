@@ -331,6 +331,35 @@ mod tests {
     }
 
     #[test]
+    fn status_text_some_zero_and_boundaries() {
+        // status_text appends the countdown suffix for ANY Some(secs), including
+        // Some(0) (a fully-elapsed-but-not-yet-expired tick) — the suffix is not
+        // suppressed at zero. None prints the bare status line.
+        let cases: &[(&str, Option<u64>, &str)] = &[
+            (
+                "zero still shows suffix",
+                Some(0),
+                "Vigil lock active — 0s remaining",
+            ),
+            ("one second", Some(1), "Vigil lock active — 1s remaining"),
+            (
+                "large value",
+                Some(3600),
+                "Vigil lock active — 3600s remaining",
+            ),
+            ("no deadline", None, "Vigil lock active"),
+        ];
+        for (label, secs, want) in cases {
+            let st = OverlayState {
+                armed: true,
+                seconds_remaining: *secs,
+                status_line: "Vigil lock active".to_string(),
+            };
+            assert_eq!(&st.status_text(), want, "{label}");
+        }
+    }
+
+    #[test]
     fn status_and_chord_text_formats() {
         let with_deadline = OverlayState {
             armed: true,

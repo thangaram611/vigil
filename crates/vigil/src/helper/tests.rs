@@ -625,3 +625,66 @@ fn parse_args_missing_required() {
     let err = parse_args(["--once", "--allowed-uid", "0"]).unwrap_err();
     assert!(matches!(err, ArgError::Missing(_)));
 }
+
+// ── cold-start idle release: a release with NO prior engage is a no-op ─────────
+
+#[test]
+fn cold_start_idle_release_is_noop() {
+    let _g = lock_env();
+    let l = Layout::new();
+    l.set_env();
+
+    // Never engaged. Externally set SleepDisabled=1; a COLD release (no engage
+    // ever ran) must report ok WITHOUT clobbering SleepDisabled and WITHOUT a
+    // pmset transition.
+    std::fs::write(&l.sleep_file, "1\n").unwrap();
+    l.write_request("cold_release", "release\n");
+    l.run();
+
+    let resp = l.response("cold_release");
+    assert!(resp.contains("status=ok"), "cold idle release ok: {resp}");
+    assert!(
+        resp.contains("action=release"),
+        "echoes the release action: {resp}"
+    );
+    assert_eq!(
+        l.sleepdisabled(),
+        "1",
+        "cold idle release does not clobber external SleepDisabled"
+    );
+    assert!(!l.engaged_exists(), "never engaged => no engaged marker");
+    // No pmset transition issued by a cold release.
+    assert!(
+        !l.events().contains("disablesleep"),
+        "cold idle release issues no pmset call: {}",
+        l.events()
+    );
+}
+
+// ── status response echoes action=status (and message=ok) ─────────────────────
+
+#[test]
+fn status_response_echoes_action_status() {
+    let _g = lock_env();
+    let l = Layout::new();
+    l.set_env();
+    l.write_request("st", "status\n");
+    l.run();
+    let resp = l.response("st");
+    assert!(resp.contains("status=ok"), "status => ok: {resp}");
+    assert!(
+        resp.contains("action=status"),
+        "status response echoes action=status: {resp}"
+    );
+    assert!(
+        resp.contains("message=ok"),
+        "status carries message=ok: {resp}"
+    );
+    // a pure status query never engages pmset.
+    assert!(
+        !l.events().contains("disablesleep 1"),
+        "status does not engage: {}",
+        l.events()
+    );
+    assert_eq!(l.sleepdisabled(), "0");
+}

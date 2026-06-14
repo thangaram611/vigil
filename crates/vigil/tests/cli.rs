@@ -24,8 +24,14 @@ fn help_exits_zero() {
 fn unknown_command_exits_64() {
     let out = bin().arg("definitely-not-a-command").output().unwrap();
     assert_eq!(out.status.code(), Some(64));
-    // usage/error goes to stderr
-    assert!(!out.stderr.is_empty());
+    // usage/error goes to stderr — and it must NAME the offending token, not just
+    // be non-empty (clap's `unrecognized subcommand '<arg>'` wording).
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.is_empty(), "error goes to stderr");
+    assert!(
+        stderr.contains("unrecognized subcommand 'definitely-not-a-command'"),
+        "stderr must name the unrecognized subcommand, got: {stderr}"
+    );
 }
 
 #[test]
@@ -123,5 +129,12 @@ fn completions_bash_generates() {
 fn bad_completions_shell_exits_64() {
     let out = bin().args(["completions", "notashell"]).output().unwrap();
     assert_eq!(out.status.code(), Some(64));
-    assert!(!out.stderr.is_empty());
+    // The error must NAME the rejected shell token and the <SHELL> arg, not just
+    // be non-empty (clap's `invalid value '<v>' for '<SHELL>'` wording).
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.is_empty(), "error goes to stderr");
+    assert!(
+        stderr.contains("invalid value 'notashell' for '<SHELL>'"),
+        "stderr must name the invalid shell value, got: {stderr}"
+    );
 }

@@ -393,6 +393,133 @@ mod tests {
         unsafe { std::env::remove_var("VIGIL_VSCODE_PS_FIXTURE") };
     }
 
+    /// Set a file's mtime to `secs` unix epoch (whole seconds; no new dependency).
+    fn set_mtime(path: &std::path::Path, secs: i64) {
+        use std::fs::{File, FileTimes};
+        use std::time::{Duration, SystemTime};
+        let f = File::options().write(true).open(path).unwrap();
+        let t = SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64);
+        f.set_times(FileTimes::new().set_accessed(t).set_modified(t))
+            .unwrap();
+    }
+
+    /// Create a file (and parents) at `path` with `body`, mtime set to `secs`.
+    fn write_at(path: &std::path::Path, body: &[u8], secs: i64) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+        set_mtime(path, secs);
+    }
+
+    #[test]
+    fn recent_state_files_shape_roots_and_recency() {
+        // Exercises recent_state_files: the 4-component path glob, BOTH the Code
+        // and Code - Insiders workspaceStorage roots, and the strict recency
+        // window (`(now - m) >= window` excludes). recent_mins=10 -> window=600.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let code_root = home.join("Library/Application Support/Code/User/workspaceStorage");
+        let ins_root =
+            home.join("Library/Application Support/Code - Insiders/User/workspaceStorage");
+        let now: i64 = 2_000_000;
+
+        // --- VALID 4-component shapes, recent, one per root (must be collected).
+        // <hash>/chatEditingSessions/<session>/state.json
+        let code_ok = code_root.join("wsA/chatEditingSessions/sess1/state.json");
+        write_at(&code_ok, b"code-body", now); // age 0 < 600 -> recent
+        let ins_ok = ins_root.join("wsB/chatEditingSessions/sess2/state.json");
+        write_at(&ins_ok, b"ins-body", now - 599); // age 599 < 600 -> recent
+
+        // --- VALID shape but STALE (recency strict boundary): age == window=600
+        // -> `(now - m) >= 600` is true -> EXCLUDED.
+        let code_stale = code_root.join("wsC/chatEditingSessions/sess3/state.json");
+        write_at(&code_stale, b"stale-body", now - 600);
+
+        // --- WRONG SHAPES under the Code root (all must be skipped):
+        // wrong middle dir name (comps[1] != "chatEditingSessions").
+        write_at(
+            &code_root.join("wsD/otherSessions/sess4/state.json"),
+            b"wrong-mid",
+            now,
+        );
+        // too shallow: only 3 components (len != 4).
+        write_at(
+            &code_root.join("wsE/chatEditingSessions/state.json"),
+            b"too-shallow",
+            now,
+        );
+        // too deep: 5 components (len != 4) -- within maxdepth 6 yet still rejected
+        // by the exact-shape check.
+        write_at(
+            &code_root.join("wsF/chatEditingSessions/sess6/extra/state.json"),
+            b"too-deep",
+            now,
+        );
+        // right shape but file not named state.json (file_name filter).
+        write_at(
+            &code_root.join("wsG/chatEditingSessions/sess7/other.json"),
+            b"wrong-name",
+            now,
+        );
+
+        let mut got = recent_state_files(home, 10, now);
+        got.sort_by(|a, b| a.path.cmp(&b.path));
+
+        // Exactly the two recent, correctly-shaped files (one per root) survive.
+        let want_paths: Vec<String> = {
+            let mut v = vec![
+                code_ok.to_string_lossy().into_owned(),
+                ins_ok.to_string_lossy().into_owned(),
+            ];
+            v.sort();
+            v
+        };
+        let got_paths: Vec<String> = got.iter().map(|r| r.path.clone()).collect();
+        assert_eq!(
+            got_paths, want_paths,
+            "only the two recent <hash>/chatEditingSessions/<sess>/state.json files \
+             (Code + Insiders) are collected; stale + mis-shaped files excluded"
+        );
+        // Hashes are the sha256 of the exact file bodies.
+        let by_path: std::collections::HashMap<&str, &str> = got
+            .iter()
+            .map(|r| (r.path.as_str(), r.sha256.as_str()))
+            .collect();
+        assert_eq!(
+            by_path[code_ok.to_string_lossy().as_ref()],
+            sha256_hex(b"code-body"),
+            "Code-root file hashed by content"
+        );
+        assert_eq!(
+            by_path[ins_ok.to_string_lossy().as_ref()],
+            sha256_hex(b"ins-body"),
+            "Insiders-root file hashed by content"
+        );
+    }
+
+    #[test]
+    fn recent_state_files_recency_strict_lower_boundary() {
+        // Strict boundary the OTHER side: age == window-1 is recent (included),
+        // age == window is stale (excluded). recent_mins=10 -> window=600.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let root = home.join("Library/Application Support/Code/User/workspaceStorage");
+        let now: i64 = 3_000_000;
+        let p = root.join("ws/chatEditingSessions/s/state.json");
+        write_at(&p, b"q", 0); // mtime placeholder, overwritten per-case below
+
+        let cases: &[(i64, usize, &str)] = &[
+            (now - 599, 1, "age 599 < 600 -> recent (included)"),
+            (now - 600, 0, "age 600 NOT < 600 -> stale (excluded)"),
+            (now - 601, 0, "age 601 -> stale (excluded)"),
+            (now, 1, "age 0 -> recent (included)"),
+        ];
+        for &(mtime, want_len, label) in cases {
+            set_mtime(&p, mtime);
+            let got = recent_state_files(home, 10, now);
+            assert_eq!(got.len(), want_len, "recency boundary: {label}");
+        }
+    }
+
     #[test]
     fn parse_roundtrip_byte_identical() {
         let s = VscodeState {
@@ -495,5 +622,56 @@ mod tests {
             }
             (c.check_new)(&new);
         }
+    }
+
+    #[test]
+    fn discover_secs_clamps_to_floor_of_five() {
+        // vscode_transition clamps discover_secs to a floor of 5 (line 141:
+        // `discover_secs.max(5)`). With now=1000, last_scan=997 the gap is
+        // now - last_scan = 3. Throttle fires when gap < clamped_discover:
+        //   discover_secs=0 -> clamp 5, 3 < 5  -> THROTTLED (new=None)
+        //   discover_secs=3 -> clamp 5, 3 < 5  -> THROTTLED (proves clamp: an
+        //       UN-clamped discover=3 would give 3 < 3 == false -> NOT throttled)
+        //   discover_secs=4 -> clamp 5, 3 < 5  -> THROTTLED
+        //   discover_secs=5 -> clamp 5, 3 < 5  -> THROTTLED (already at floor)
+        //   discover_secs=2 with gap exactly 5 (last_scan=995): 5 < 5 == false
+        //       -> NOT throttled (scan runs, primes, new=Some).
+        // Throttled returns cached active = (active_until=2000 > now=1000) = true.
+        let throttled: &[(u32, &str)] = &[
+            (0, "requested 0 clamps to 5"),
+            (3, "requested 3 clamps to 5 (un-clamped would NOT throttle)"),
+            (4, "requested 4 clamps to 5"),
+            (5, "requested 5 is the floor"),
+        ];
+        for &(discover, label) in throttled {
+            let prior = VscodeState {
+                active_until: 2000,
+                last_scan: 997, // gap = 1000 - 997 = 3, below the clamped floor 5
+                primed: true,
+                files: vec![],
+            };
+            let (new, active) = vscode_transition(&prior, &[], 1000, 300, discover);
+            assert!(
+                new.is_none(),
+                "clamp floor: {label} -> gap 3 < 5 must throttle (no rewrite)"
+            );
+            assert!(
+                active,
+                "clamp floor: {label} -> throttled returns cached active_until(2000) > now(1000)"
+            );
+        }
+        // Boundary: gap exactly equal to the clamped floor (5) is NOT throttled
+        // (throttle uses strict `<`), so a real scan runs and primes the state.
+        let prior = VscodeState {
+            active_until: 0,
+            last_scan: 995, // gap = 1000 - 995 = 5, equal to floor -> NOT < 5
+            primed: false,
+            files: vec![],
+        };
+        let (new, active) = vscode_transition(&prior, &[], 1000, 300, 2);
+        let st = new.expect("gap == floor is not throttled: a real scan must rewrite");
+        assert!(st.primed, "un-throttled first scan primes");
+        assert_eq!(st.last_scan, 1000, "un-throttled scan stamps last_scan=now");
+        assert!(!active, "un-throttled first scan does not arm active");
     }
 }

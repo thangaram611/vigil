@@ -306,6 +306,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_response_unknown_keys_ignored_missing_keys_default_empty() {
+        // The `_ => {}` arm drops keys we don't model; lines without `=` are
+        // skipped by `split_once`. Only the two recognized keys are populated; the
+        // other three default to the empty string (their `String::new()` seed). An
+        // empty status is NOT "ok".
+        let text = "bogus=zzz\nstatus=ok\nno-equals-here\naction=engage\n";
+        let r = parse_response(text);
+        assert_eq!(r.status, "ok", "recognized status set");
+        assert_eq!(r.action, "engage", "recognized action set");
+        assert_eq!(r.baseline, "", "missing key -> empty default");
+        assert_eq!(r.current, "", "missing key -> empty default");
+        assert_eq!(r.message, "", "missing key -> empty default");
+        assert!(r.is_ok(), "status=ok is ok");
+
+        // An entirely empty body leaves every field empty and is_ok() false.
+        let empty = parse_response("");
+        assert_eq!(empty.status, "");
+        assert_eq!(empty.action, "");
+        assert_eq!(empty.baseline, "");
+        assert_eq!(empty.current, "");
+        assert_eq!(empty.message, "");
+        assert!(!empty.is_ok(), "empty status is not ok");
+    }
+
+    #[test]
     fn ids_are_distinct() {
         let a = MacHelperClient::new_id();
         let b = MacHelperClient::new_id();
@@ -350,6 +375,39 @@ mod tests {
             }
             other => panic!("expected InvalidResponse, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn ipc_error_display_operator_text() {
+        // The operator-facing Display strings are part of the doctor/status UX
+        // contract; pin them byte-exact. DirsMissing points the user at setup/
+        // doctor; Timeout names the root helper; InvalidResponse/HelperError/Io
+        // interpolate their payload.
+        assert_eq!(
+            IpcError::DirsMissing.to_string(),
+            "root helper IPC dirs missing — run 'vigil setup' or 'vigil doctor'"
+        );
+        assert_eq!(IpcError::Timeout.to_string(), "root helper timed out");
+        assert_eq!(
+            IpcError::InvalidResponse("not a regular file".into()).to_string(),
+            "invalid helper response: not a regular file"
+        );
+        let helper_err = IpcError::HelperError(Response {
+            status: "error".into(),
+            action: "release".into(),
+            baseline: "none".into(),
+            current: "1".into(),
+            message: "pmset_release_failed".into(),
+        });
+        assert_eq!(
+            helper_err.to_string(),
+            "root helper error: pmset_release_failed"
+        );
+        let io_err = IpcError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        ));
+        assert_eq!(io_err.to_string(), "ipc io error: denied");
     }
 
     #[test]

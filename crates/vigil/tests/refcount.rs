@@ -133,6 +133,39 @@ fn filename_parser_handles_all_prefixes() {
     );
 }
 
+#[test]
+fn count_on_missing_active_dir_is_zero() {
+    // read_entries' read_dir fails on a path that does not exist -> empty Vec, so
+    // both the activity-filtered count and the raw total report 0 (no panic).
+    let d = tempfile::tempdir().unwrap();
+    let missing = d.path().join("does-not-exist");
+    assert!(!missing.exists());
+    assert_eq!(
+        count(&missing, true, true, true, true),
+        0,
+        "missing dir -> filtered count 0"
+    );
+    assert_eq!(count_total(&missing), 0, "missing dir -> total 0");
+}
+
+#[test]
+fn unknown_prefix_never_counts_but_is_in_total() {
+    // prefix gating's `_ => false` arm: an unrecognized name is gated out of the
+    // activity-filtered count under EVERY flag-on, yet count_total still sees the
+    // raw `*.pid` file (total parses the filename, not the prefix table).
+    let (_d, a) = seed(&["unknown-77", "wrapper-1234"]);
+    assert_eq!(
+        count(&a, true, true, true, true),
+        1,
+        "unknown prefix gated out under all flags; only wrapper counts"
+    );
+    assert_eq!(
+        count_total(&a),
+        2,
+        "total still sees the unknown *.pid file"
+    );
+}
+
 // ── field extraction (parser_test) ──────────────────────────────────────────
 
 #[test]
@@ -214,6 +247,35 @@ fn gc_decision_table() {
         ("busy agent kept",         "cli-claude", 9999, true,  Some(1), Some(1), Some(0.9), Keep),
         ("dead beats reuse",        "cli-claude", 9999, false, Some(1), Some(2), Some(0.0), DropDead),
         ("reuse beats idle",        "cli-claude", 9999, true,  Some(1), Some(2), Some(0.0), DropPidReuse),
+    ];
+    for (label, name, age, alive, on_disk, live, cpu, want) in cases {
+        assert_eq!(
+            gc_decision(
+                name, *age, *alive, *on_disk, *live, *cpu, STALE_AGE, STALE_CPU
+            ),
+            *want,
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn gc_decision_probe_gap_keeps() {
+    // The live-probe gap: kill(pid,0) says alive, but sysinfo did NOT see the
+    // process this tick, so `live_start` and `cpu` (both derived from the same
+    // `proc_.map(...)`) come back None TOGETHER. gc_decision must fall through to
+    // Keep — neither the reuse branch (needs both start_ts Some) nor the idle
+    // branch (needs cpu Some) can fire on a missing probe, even for an aged agent.
+    const STALE_AGE: u32 = 30;
+    const STALE_CPU: f64 = 0.5;
+    use GcDecision::*;
+    #[rustfmt::skip]
+    #[allow(clippy::type_complexity)]
+    let cases: &[(&str, &str, i64, bool, Option<i64>, Option<i64>, Option<f64>, GcDecision)] = &[
+        // cpu None alone short-circuits the idle branch even with a matching start.
+        ("none-cpu keeps aged agent",         "cli-claude", 9999, true, Some(1), Some(1), None, Keep),
+        // Whole probe gap: live_start AND cpu None -> reuse skipped, idle skipped.
+        ("none-live+none-cpu keeps agent",    "cli-claude", 9999, true, Some(1), None,    None, Keep),
     ];
     for (label, name, age, alive, on_disk, live, cpu, want) in cases {
         assert_eq!(

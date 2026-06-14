@@ -735,4 +735,286 @@ mod tests {
             "soft release kills caffeinate"
         );
     }
+
+    // ── G6: anti-leak / failure-arm tests ─────────────────────────────────────
+
+    /// A helper that ALWAYS errors (mirrors daemon/tests.rs `FailingIpc`). It
+    /// never touches the sleep_file, so SleepDisabled stays at its prior value.
+    struct FailingIpc;
+    impl HelperClient for FailingIpc {
+        fn request(&self, _action: crate::helper::validate::Action) -> Result<Response, IpcError> {
+            Err(IpcError::Timeout)
+        }
+    }
+
+    #[test]
+    fn engage_helper_failure_propagates_and_spawns_nothing() {
+        // engage(): capture_baseline -> ipc.engage() -> spawn_caffeinate(). A
+        // failing helper engage returns Err BEFORE spawn_caffeinate is reached
+        // (mirrors bash's early return), so NO caffeinate is ever spawned and the
+        // pidfile is never written — yet capture_baseline ran first, so
+        // baseline.json IS present (captured the pre-existing SleepDisabled).
+        // The error string is `format!("helper engage: {e}")` where `{e}` is
+        // IpcError::Timeout's Display => "root helper timed out".
+        let h = Harness::new(1);
+        let failing = FailingIpc;
+        let m = PowerMachine {
+            ipc: &failing,
+            caffeinate: &h.caffeinate,
+            sleep: &h.sleep,
+            baseline_file: h.baseline_file.clone(),
+            caffeinate_pidfile: h.caffeinate_pidfile.clone(),
+        };
+        let err = m.engage(1700000000).unwrap_err();
+        assert_eq!(
+            err, "helper engage: root helper timed out",
+            "engage propagates the helper Display error verbatim"
+        );
+        // capture_baseline ran first => baseline.json present, recording SD=1.
+        assert!(
+            h.baseline_file.exists(),
+            "capture_baseline runs before the failing engage"
+        );
+        assert_eq!(
+            m.baseline_value(),
+            1,
+            "baseline captured the pre-existing SleepDisabled=1"
+        );
+        // spawn_caffeinate was NEVER reached: no spawn, no kill, no pidfile.
+        assert!(
+            h.caffeinate.spawns.borrow().is_empty(),
+            "no caffeinate spawned when helper engage fails"
+        );
+        assert!(
+            h.caffeinate.killed.borrow().is_empty(),
+            "no caffeinate killed when helper engage fails"
+        );
+        assert!(
+            !h.caffeinate_pidfile.exists(),
+            "no caffeinate pidfile written when helper engage fails"
+        );
+        assert!(
+            !m.caffeinate_alive(),
+            "no live caffeinate hold after failed engage"
+        );
+    }
+
+    #[test]
+    fn full_release_cleans_up_even_when_helper_release_fails() {
+        // full_release(): `let _ = ipc.release()` (result IGNORED) -> kill_caffeinate
+        // -> clear_baseline. A failing helper release does NOT short-circuit the
+        // cleanup (mirrors bash `vigil_pmset_release`, which never returns early on
+        // a failed release): the recorded caffeinate is still SIGTERMed, the pidfile
+        // and baseline.json are still removed. Because the failing helper never
+        // writes the sleep_file, SleepDisabled stays stuck at 1 — proving the file
+        // cleanup is independent of (and survives) the helper-release failure.
+        let h = Harness::new(1);
+        // Manually stand up the engaged on-disk state WITHOUT going through the
+        // (failing) helper: a live caffeinate pid in the pidfile + a baseline.json.
+        let live = h.caffeinate.spawn().unwrap();
+        std::fs::write(&h.caffeinate_pidfile, format!("{live}\n")).unwrap();
+        std::fs::write(
+            &h.baseline_file,
+            "{\"SleepDisabled\":0,\"captured_at\":1700000000}\n",
+        )
+        .unwrap();
+        let failing = FailingIpc;
+        let m = PowerMachine {
+            ipc: &failing,
+            caffeinate: &h.caffeinate,
+            sleep: &h.sleep,
+            baseline_file: h.baseline_file.clone(),
+            caffeinate_pidfile: h.caffeinate_pidfile.clone(),
+        };
+        assert!(
+            m.caffeinate_alive(),
+            "precondition: live caffeinate before release"
+        );
+        m.full_release();
+        // cleanup happened despite the failing helper release:
+        assert!(
+            h.caffeinate.killed.borrow().contains(&live),
+            "full_release SIGTERMs the recorded caffeinate even when helper release fails"
+        );
+        assert!(
+            !h.caffeinate_pidfile.exists(),
+            "full_release clears the pidfile even when helper release fails"
+        );
+        assert!(
+            !h.baseline_file.exists(),
+            "full_release clears baseline.json even when helper release fails"
+        );
+        assert!(
+            !m.caffeinate_alive(),
+            "no live caffeinate after full_release"
+        );
+        // The failing helper never wrote the sleep_file => SD remains 1.
+        assert_eq!(
+            h.sd(),
+            1,
+            "failing helper release leaves SleepDisabled untouched (cleanup is fs-only)"
+        );
+    }
+
+    #[test]
+    fn spawn_caffeinate_pidfile_write_failure_kills_the_orphan() {
+        // spawn_caffeinate(): after a successful spawn it writes the bare pid to the
+        // pidfile; if THAT write errors it kills the just-spawned assertion rather
+        // than leak an untracked caffeinate, and returns Err. We force the write to
+        // fail by pointing caffeinate_pidfile inside a non-existent directory
+        // (ENOENT on the parent), so spawn() succeeds but std::fs::write() fails.
+        let h = Harness::new(0);
+        let bad_pidfile = h._dir.path().join("missing-subdir").join("caffeinate.pid");
+        let m = PowerMachine {
+            ipc: &h.ipc,
+            caffeinate: &h.caffeinate,
+            sleep: &h.sleep,
+            baseline_file: h.baseline_file.clone(),
+            caffeinate_pidfile: bad_pidfile.clone(),
+        };
+        let err = m.spawn_caffeinate().unwrap_err();
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::NotFound,
+            "pidfile write fails with ENOENT (missing parent dir)"
+        );
+        // Exactly one spawn occurred, and that same pid was killed: no orphan.
+        let spawns = h.caffeinate.spawns.borrow().clone();
+        assert_eq!(spawns.len(), 1, "spawn_caffeinate spawned exactly once");
+        let orphan = spawns[0];
+        assert!(
+            h.caffeinate.killed.borrow().contains(&orphan),
+            "the just-spawned caffeinate is SIGTERMed when the pidfile write fails"
+        );
+        assert!(
+            !h.caffeinate.is_alive_by_identity(orphan),
+            "the orphaned assertion is not left alive"
+        );
+        assert!(
+            !bad_pidfile.exists(),
+            "no pidfile is left behind on the write-failure path"
+        );
+    }
+
+    #[test]
+    fn spawn_caffeinate_replaces_stale_caffeinate_by_basename() {
+        // spawn_caffeinate() kill-gating: a recorded pid that is NOT
+        // alive-by-identity but IS a caffeinate-by-basename (a STALE
+        // display-holding caffeinate) must be SIGTERMed and replaced — bash's
+        // `[[ "$old_base" == "caffeinate" ]]` guard. The existing FakeCaffeinate
+        // ties basename to alive, so we model the stale case with a dedicated
+        // fake: identity=false but basename=true for the planted stale pid.
+        struct StaleCaffeinate {
+            stale_pid: u32,
+            next_pid: RefCell<u32>,
+            alive: RefCell<std::collections::HashSet<u32>>,
+            killed: RefCell<Vec<u32>>,
+        }
+        impl CaffeinateAssertion for StaleCaffeinate {
+            fn spawn(&self) -> std::io::Result<u32> {
+                let mut p = self.next_pid.borrow_mut();
+                *p += 1;
+                let pid = *p;
+                self.alive.borrow_mut().insert(pid);
+                Ok(pid)
+            }
+            fn is_alive_by_identity(&self, pid: u32) -> bool {
+                // The stale pid is explicitly NOT alive-by-identity.
+                self.alive.borrow().contains(&pid)
+            }
+            fn is_caffeinate_basename(&self, pid: u32) -> bool {
+                // The stale pid IS a caffeinate by basename (display-holding),
+                // as are our own live spawns.
+                pid == self.stale_pid || self.alive.borrow().contains(&pid)
+            }
+            fn kill(&self, pid: u32) {
+                self.alive.borrow_mut().remove(&pid);
+                self.killed.borrow_mut().push(pid);
+            }
+        }
+
+        const STALE: u32 = 777;
+        let h = Harness::new(1);
+        let caff = StaleCaffeinate {
+            stale_pid: STALE,
+            next_pid: RefCell::new(2000),
+            alive: RefCell::new(std::collections::HashSet::new()),
+            killed: RefCell::new(Vec::new()),
+        };
+        let m = PowerMachine {
+            ipc: &h.ipc,
+            caffeinate: &caff,
+            sleep: &h.sleep,
+            baseline_file: h.baseline_file.clone(),
+            caffeinate_pidfile: h.caffeinate_pidfile.clone(),
+        };
+        // Record the stale caffeinate pid as the current hold.
+        std::fs::write(&h.caffeinate_pidfile, format!("{STALE}\n")).unwrap();
+        assert!(
+            !m.caffeinate_alive(),
+            "stale display-holding caffeinate is not alive-by-identity"
+        );
+        m.spawn_caffeinate().unwrap();
+        // The stale caffeinate was SIGTERMed (basename guard passed)...
+        assert!(
+            caff.killed.borrow().contains(&STALE),
+            "stale caffeinate (basename==caffeinate) is replaced"
+        );
+        // ...and a fresh, live, distinct assertion took its place.
+        let new_pid: u32 = std::fs::read_to_string(&h.caffeinate_pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_ne!(new_pid, STALE, "a new caffeinate replaced the stale one");
+        assert!(
+            caff.is_alive_by_identity(new_pid),
+            "the replacement caffeinate is alive-by-identity"
+        );
+    }
+
+    #[test]
+    fn recover_startup_recaptures_baseline_when_pidfile_only() {
+        // recover_startup(): a pidfile present WITHOUT a baseline (an unclean
+        // restart where the hold survived but the baseline file did not) must
+        // recapture the baseline BEFORE reconciling. With active_count>0 and
+        // can_hold, recover_decision => Reconcile; the
+        // `!baseline_present && pidfile_present` guard then recaptures the baseline
+        // from the CURRENT SleepDisabled (read by capture_baseline) before
+        // reconcile_engaged reasserts. Initial SD=1 here, so the recaptured
+        // baseline records SleepDisabled=1.
+        let h = Harness::new(1);
+        let m = h.machine();
+        // Plant a pidfile-only engaged remnant: a live caffeinate pid, no baseline.
+        let live = h.caffeinate.spawn().unwrap();
+        std::fs::write(&h.caffeinate_pidfile, format!("{live}\n")).unwrap();
+        assert!(!h.baseline_file.exists(), "precondition: no baseline file");
+        assert!(
+            h.caffeinate_pidfile.exists(),
+            "precondition: pidfile present"
+        );
+
+        let engaged = m.recover_startup(1, &FixedGuard { hold: true }, 1700000000);
+        assert!(
+            engaged,
+            "pidfile + active refs + can_hold => reconcile (engaged)"
+        );
+        // The baseline was RECAPTURED from the current SleepDisabled (1), byte-exact.
+        assert!(
+            h.baseline_file.exists(),
+            "recover_startup recaptures the missing baseline"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&h.baseline_file).unwrap(),
+            "{\"SleepDisabled\":1,\"captured_at\":1700000000}\n",
+            "recaptured baseline records the current SleepDisabled byte-identically"
+        );
+        // reconcile_engaged kept the live caffeinate (alive-by-identity) and SD==1,
+        // so no respawn and no reassert were needed.
+        assert_eq!(h.sd(), 1, "SleepDisabled stays asserted after reconcile");
+        assert!(
+            m.caffeinate_alive(),
+            "the surviving caffeinate is still the hold"
+        );
+    }
 }

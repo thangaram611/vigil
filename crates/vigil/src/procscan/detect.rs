@@ -263,4 +263,145 @@ mod tests {
         assert_eq!(m.get(&3670).unwrap(), "/opt/homebrew/bin/copilot --acp");
         assert_eq!(m.len(), 2);
     }
+
+    #[test]
+    fn cli_basename_maps_each_kind_with_path_prefix() {
+        // Step 4: basename(comm) in {claude,codex,copilot} -> cli-<basename>.
+        // A full path prefix is stripped to the basename; exe stays the full
+        // comm and args are recovered (one-space strip).
+        let cases: &[(&str, &str, AgentKind, &str)] = &[
+            (
+                "/opt/homebrew/bin/claude",
+                "/opt/homebrew/bin/claude --resume",
+                AgentKind::CliClaude,
+                "--resume",
+            ),
+            (
+                "/usr/local/bin/codex",
+                "/usr/local/bin/codex app-server",
+                AgentKind::CliCodex,
+                "app-server",
+            ),
+            (
+                "/opt/homebrew/bin/copilot",
+                "/opt/homebrew/bin/copilot",
+                AgentKind::CliCopilot,
+                "",
+            ),
+            // bare basename (no '/') also matches.
+            ("claude", "claude", AgentKind::CliClaude, ""),
+        ];
+        for (comm, cmd, kind, args) in cases {
+            let m = detect_line(4242, comm, cmd)
+                .unwrap_or_else(|| panic!("basename {comm:?} must match"));
+            assert_eq!(m.kind, *kind, "kind for {comm:?}");
+            assert_eq!(m.exe, *comm, "exe stays the full comm for {comm:?}");
+            assert_eq!(m.args, *args, "args for {comm:?}");
+            assert_eq!(m.pid, 4242);
+        }
+        // a basename that is none of the three -> no row.
+        assert!(detect_line(7, "/bin/bash", "/bin/bash -lc x").is_none());
+    }
+
+    #[test]
+    fn agent_match_tsv_is_exact_three_tab_format() {
+        // <pid>\t<name>\t<exe>\t<args> — four fields, three tabs, no trailing
+        // newline. Byte-exact rows for a path-prefixed match (with args) and a
+        // bare match (empty args -> trailing tab).
+        let with_args = detect_line(
+            18355,
+            "/opt/homebrew/bin/copilot",
+            "/opt/homebrew/bin/copilot --acp",
+        )
+        .unwrap();
+        assert_eq!(
+            agent_match_tsv(&with_args),
+            "18355\tcli-copilot\t/opt/homebrew/bin/copilot\t--acp"
+        );
+        // empty args -> the args field is empty (a bare trailing tab, no newline).
+        let no_args = detect_line(3670, "claude", "claude").unwrap();
+        assert_eq!(agent_match_tsv(&no_args), "3670\tcli-claude\tclaude\t");
+        // app-codex name column.
+        let app = detect_line(
+            22,
+            "/Applications/Codex.app/Contents/MacOS/Codex",
+            "/Applications/Codex.app/Contents/MacOS/Codex",
+        )
+        .unwrap();
+        assert_eq!(
+            agent_match_tsv(&app),
+            "22\tapp-codex\t/Applications/Codex.app/Contents/MacOS/Codex\t"
+        );
+    }
+
+    #[test]
+    fn is_excluded_cmd_matches_new_bare_substrings() {
+        // crashpad / chrome-native-host / node_repl are bare substrings anywhere
+        // in the FULL command line.
+        assert!(is_excluded_cmd(
+            "/Users/x/Library/.../chrome_crashpad_handler"
+        ));
+        assert!(is_excluded_cmd("node /path/to/chrome-native-host.js"));
+        assert!(is_excluded_cmd("node --experimental node_repl helper"));
+        // none present -> not excluded.
+        assert!(!is_excluded_cmd("/opt/homebrew/bin/copilot --acp"));
+    }
+
+    #[test]
+    fn excluded_substring_suppresses_a_basename_match() {
+        // The exclusion (step 3) runs BEFORE the basename match (step 4), so a
+        // comm whose basename IS one of the three is still dropped when the FULL
+        // command line carries an excluded substring. One row per substring.
+        let cases: &[(&str, &str)] = &[
+            ("/x/claude", "/x/claude crashpad-handler"),
+            ("/x/codex", "/x/codex --chrome-native-host"),
+            ("/x/copilot", "/x/copilot node_repl"),
+        ];
+        for (comm, cmd) in cases {
+            assert!(
+                detect_line(9, comm, cmd).is_none(),
+                "excluded substring in {cmd:?} must suppress the basename match"
+            );
+        }
+    }
+
+    #[test]
+    fn ps_join_emits_pids_in_both_maps_file_order_dup_overwrite() {
+        // comm map: {100,200}; cmd map walked in FILE order. pid 100 appears
+        // twice in cmd_text (awk-overwrite: the LAST value wins, but it is
+        // emitted at its FIRST file position); pid 300 is only in cmd_text
+        // (not in comm) so it is NOT emitted; pid 200 precedes pid 100 because
+        // that is the cmd_text order.
+        let comm_text = "100 /bin/claude\n200 /bin/codex\n";
+        let cmd_text = "200 codex serve\n100 claude --first\n100 claude --last\n300 ghost\n";
+        let joined = ps_join(comm_text, cmd_text);
+        assert_eq!(
+            joined,
+            vec![
+                (200u32, "/bin/codex".to_string(), "codex serve".to_string()),
+                // file-order: 100 emitted once, at its first position, with the
+                // OVERWRITTEN (last) cmd value.
+                (
+                    100u32,
+                    "/bin/claude".to_string(),
+                    "claude --last".to_string()
+                ),
+            ],
+            "pid-in-both-maps, file-order, duplicate-pid overwrite"
+        );
+    }
+
+    #[test]
+    fn detect_all_text_joins_then_classifies() {
+        // End-to-end over two ps blobs: only pids in both maps reach detect_line,
+        // in join (cmd-file) order; pid 300 (cmd-only) is dropped.
+        let comm_text = "100 /opt/homebrew/bin/copilot\n200 /bin/bash\n";
+        let cmd_text = "200 /bin/bash -lc x\n100 /opt/homebrew/bin/copilot --acp\n300 ghost\n";
+        let rows = detect_all_text(comm_text, cmd_text);
+        // pid 200 -> /bin/bash basename not in the set -> no row; pid 100 matches.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].pid, 100);
+        assert_eq!(rows[0].kind, AgentKind::CliCopilot);
+        assert_eq!(rows[0].args, "--acp");
+    }
 }

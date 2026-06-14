@@ -242,4 +242,47 @@ mod tests {
         assert_eq!(first_pct("id=12345 then 42%"), Some(42));
         assert_eq!(first_pct("no percent here"), None);
     }
+
+    #[test]
+    fn ac_overrides_a_low_pct_no_cut() {
+        // AC Power present with a LOW percentage must NOT cut: the AcState::Ac
+        // arm of should_cut returns false unconditionally (AC overrides pct).
+        let r = parse_ps("Now drawing from 'AC Power'\n 5%; charging");
+        assert_eq!(r.ac, AcState::Ac);
+        assert_eq!(r.pct, Some(5), "the low pct is still parsed");
+        assert!(
+            !should_cut(&r, 20),
+            "AC overrides a 5% reading (5 < 20 but on AC => no cut)"
+        );
+        // and via the live collector too.
+        assert!(!live_should_cut(
+            "Now drawing from 'AC Power'\n 5%; charging",
+            20
+        ));
+    }
+
+    #[test]
+    fn battery_summary_unknown_and_question_mark_branches() {
+        // Unknown source -> the literal "unknown" (pct ignored).
+        let unknown = parse_ps("no power marker but 9% appears");
+        assert_eq!(unknown.ac, AcState::Unknown);
+        assert_eq!(battery_summary(&unknown, 20), "unknown");
+
+        // Battery source with an unparseable pct -> '?' placeholder.
+        let batt_no_pct = BatteryReading {
+            ac: AcState::Battery,
+            pct: None,
+        };
+        assert_eq!(
+            battery_summary(&batt_no_pct, 20),
+            "on battery ?% (floor 20%)"
+        );
+
+        // AC source with an unparseable pct -> '?' placeholder, no floor shown.
+        let ac_no_pct = BatteryReading {
+            ac: AcState::Ac,
+            pct: None,
+        };
+        assert_eq!(battery_summary(&ac_no_pct, 20), "AC ?%");
+    }
 }

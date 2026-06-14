@@ -203,11 +203,7 @@ mod tests {
             let state = installer.stop_user_agent(&cfg).unwrap();
             assert_eq!(state, c.expect_state, "{}: state", c.label);
             let o = obs.borrow();
-            assert_eq!(
-                o.booted_out, c.expect_booted_out,
-                "{}: booted_out",
-                c.label
-            );
+            assert_eq!(o.booted_out, c.expect_booted_out, "{}: booted_out", c.label);
             if let Some(sleeps) = c.expect_sleeps {
                 assert_eq!(o.sleeps, sleeps, "{}: sleeps", c.label);
             }

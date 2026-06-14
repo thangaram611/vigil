@@ -250,6 +250,88 @@ fn log_large_file_is_paged_not_dumped_whole() {
     );
 }
 
+/// The no-follow paging boundary is EXACT at LINE_LIMIT (2000): a file with
+/// exactly 2000 lines prints all 2000 and emits NO truncation hint (total ==
+/// window.len(), so the `total > window.len()` guard is false); a file with 2001
+/// lines drops the oldest line and DOES emit the hint ("showing the last 2000 of
+/// 2001 lines"). This pins the off-by-one around `if window.len() > LINE_LIMIT`.
+#[test]
+fn log_paging_boundary_is_exact_at_line_limit() {
+    const LINE_LIMIT: usize = 2000;
+
+    // Build a body of `n` numbered lines ("line-0\n".."line-{n-1}\n").
+    let body_of = |n: usize| -> String {
+        let mut s = String::with_capacity(n * 8);
+        for i in 0..n {
+            s.push_str(&format!("line-{i}\n"));
+        }
+        s
+    };
+
+    // (a) Exactly LINE_LIMIT lines: all printed, no hint.
+    {
+        let sb = Sandbox::new("boundary-eq");
+        std::fs::write(sb.log_file(), body_of(LINE_LIMIT)).unwrap();
+        let mut cmd = bin();
+        sb.apply_env(&mut cmd);
+        cmd.arg("log");
+        let out = cmd.output().expect("run vigil log (==limit)");
+        assert_eq!(out.status.code(), Some(0), "==limit exits 0");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            stdout.lines().count(),
+            LINE_LIMIT,
+            "exactly {LINE_LIMIT} lines must all be printed"
+        );
+        // The first AND last line are present (nothing dropped).
+        assert!(stdout.contains("line-0\n"), "first line kept at ==limit");
+        assert!(
+            stdout.contains(&format!("line-{}\n", LINE_LIMIT - 1)),
+            "last line kept at ==limit"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !stderr.contains("showing the last"),
+            "no hint when total == LINE_LIMIT, got: {stderr}"
+        );
+    }
+
+    // (b) LINE_LIMIT + 1 lines: oldest dropped, hint emitted with exact counts.
+    {
+        let sb = Sandbox::new("boundary-plus1");
+        std::fs::write(sb.log_file(), body_of(LINE_LIMIT + 1)).unwrap();
+        let mut cmd = bin();
+        sb.apply_env(&mut cmd);
+        cmd.arg("log");
+        let out = cmd.output().expect("run vigil log (limit+1)");
+        assert_eq!(out.status.code(), Some(0), "limit+1 exits 0");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            stdout.lines().count(),
+            LINE_LIMIT,
+            "output capped to exactly {LINE_LIMIT} lines"
+        );
+        // The very first line (line-0) is dropped; the last (line-2000) is kept.
+        assert!(
+            !stdout.contains("line-0\n"),
+            "oldest line dropped at limit+1"
+        );
+        assert!(
+            stdout.contains(&format!("line-{}\n", LINE_LIMIT)),
+            "newest line kept at limit+1"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(&format!(
+                "showing the last {} of {} lines",
+                LINE_LIMIT,
+                LINE_LIMIT + 1
+            )),
+            "exact truncation hint required at limit+1, got: {stderr}"
+        );
+    }
+}
+
 /// `vigil log` (no-follow) on a SMALL log prints the whole file (no truncation
 /// hint) — paging only kicks in past the cap.
 #[test]
@@ -269,6 +351,32 @@ fn log_small_file_prints_all_no_hint() {
         !stderr.contains("showing the last"),
         "no truncation hint for a sub-cap file"
     );
+}
+
+/// `vigil log -f` / `vigil log --follow` on a MISSING log takes the same
+/// missing-log fast path as no-follow: the soft message to STDOUT, exit 0. The
+/// missing-file check runs BEFORE the follow branch, so neither flag spins up the
+/// unbounded `tail -f` loop when there is no file.
+#[test]
+fn log_follow_on_missing_file_exits_0_with_soft_message() {
+    let cases: &[(&str, &str)] = &[("short flag", "-f"), ("long flag", "--follow")];
+    for &(label, flag) in cases {
+        let sb = Sandbox::new("nolog-follow");
+        let mut cmd = bin();
+        sb.apply_env(&mut cmd);
+        cmd.args(["log", flag]);
+        let out = cmd.output().expect("run vigil log -f (no log)");
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{label}: follow on a missing log still exits 0"
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.contains("no log yet at") && stdout.contains("daemon.log"),
+            "{label}: must print 'no log yet at {{log_file}}', got: {stdout}"
+        );
+    }
 }
 
 /// `vigil log` ignores a non-`-f` first argument (no error) — bash-faithful.

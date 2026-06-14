@@ -430,4 +430,64 @@ mod tests {
         assert!(cut.contains("paused"), "cut summary reframed: {cut}");
         assert!(cut.contains("50%"), "exposes parsed numeric value: {cut}");
     }
+
+    // ── first numeric Scheduler_Limit wins (don't-clobber guard) ──────────────
+
+    #[test]
+    fn first_numeric_scheduler_limit_wins() {
+        // Two numeric lines: the FIRST parsed value wins (the `.is_none()` guard
+        // blocks the second from clobbering it).
+        assert_eq!(
+            parse_therm("CPU_Scheduler_Limit = 60\nCPU_Scheduler_Limit = 75").cpu_scheduler_limit,
+            Some(60),
+            "first numeric wins"
+        );
+        // Numeric then non-numeric: the parsed value is NOT clobbered by a later
+        // non-numeric line.
+        assert_eq!(
+            parse_therm("CPU_Scheduler_Limit = 60\nCPU_Scheduler_Limit = n/a").cpu_scheduler_limit,
+            Some(60),
+            "later non-numeric does not clobber a parsed value"
+        );
+        // Non-numeric FIRST then numeric: the guard is still open (None) when the
+        // numeric line arrives, so the numeric value fills in.
+        assert_eq!(
+            parse_therm("CPU_Scheduler_Limit = n/a\nCPU_Scheduler_Limit = 75").cpu_scheduler_limit,
+            Some(75),
+            "non-numeric-first leaves the slot open for a later numeric"
+        );
+    }
+
+    #[test]
+    fn live_should_cut_is_thin_collector() {
+        // live_should_cut(raw, floor) == should_cut(parse_therm(raw), floor) for
+        // every fixture class. One row per branch.
+        let cases: &[(&str, Option<u32>, bool)] = &[
+            ("thermal warning level = warning", None, true),
+            ("CPU_Scheduler_Limit = 50", None, true),
+            ("", None, false),
+            (
+                "Note: No thermal warning level has been recorded",
+                None,
+                false,
+            ),
+            // SET-floor smarter policy through the collector.
+            ("CPU_Scheduler_Limit = 90", Some(80), false),
+            ("CPU_Scheduler_Limit = 50", Some(80), true),
+            ("thermal warning level = warning", Some(80), true),
+        ];
+        for (raw, floor, want) in cases {
+            assert_eq!(
+                live_should_cut(raw, *floor),
+                *want,
+                "live_should_cut({raw:?}, {floor:?}) should be {want}"
+            );
+            // and it must equal the parse-then-decide composition exactly.
+            assert_eq!(
+                live_should_cut(raw, *floor),
+                should_cut(&parse_therm(raw), *floor),
+                "thin collector == parse_therm |> should_cut for {raw:?}"
+            );
+        }
+    }
 }

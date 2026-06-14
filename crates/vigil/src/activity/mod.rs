@@ -183,4 +183,45 @@ mod tests {
         let mut sw = SessionWatcher::new(tmp.path());
         assert_eq!(sw.poll(), 0);
     }
+
+    #[test]
+    fn watcher_none_degrades_without_panic() {
+        // The `watcher == None` fallback (notify failed to construct): arm() and
+        // rearm() early-return when `self.watcher` is None, so no path is ever
+        // armed and poll() drains an empty/closed channel to 0 without panicking.
+        // We construct directly (bypassing new()'s arm()) to force watcher=None.
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("sessions"); // exists (tmp) up the chain
+        let (tx, rx) = channel::<notify::Result<Event>>();
+        drop(tx); // closed sender: try_recv yields Disconnected immediately
+        let mut sw = SessionWatcher {
+            target: target.clone(),
+            watched: None,
+            watcher: None,
+            rx,
+        };
+        // arm() with watcher None never sets `watched`.
+        sw.arm();
+        assert_eq!(
+            sw.watched_path(),
+            None,
+            "watcher None -> arm() early-returns, nothing watched"
+        );
+        // poll() drains the closed channel to 0 and the inner rearm() is a no-op
+        // (watcher None), so it does not panic and stays unwatched.
+        assert_eq!(sw.poll(), 0, "watcher None -> poll drains to 0");
+        assert_eq!(
+            sw.watched_path(),
+            None,
+            "watcher None -> still nothing watched after poll"
+        );
+        // Even if the target dir now exists, rearm() with watcher None stays None.
+        std::fs::create_dir_all(&target).unwrap();
+        sw.rearm();
+        assert_eq!(
+            sw.watched_path(),
+            None,
+            "watcher None -> rearm() cannot arm even once target exists"
+        );
+    }
 }

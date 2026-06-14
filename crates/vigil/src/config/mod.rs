@@ -1206,4 +1206,395 @@ mod tests {
             );
         }
     }
+
+    // ── derive_one_home cascade matrix (pure logic, env-free) ─────────────────
+
+    #[test]
+    fn derive_one_home_cascade_matrix() {
+        // Exhaustive table over the three `derive_one_home` match arms, with the
+        // auto-default fixed at "/h/.claude". Tuple is
+        // (label, vigil_home_field, vigil_home_from_process_env,
+        //  provider_env_effective, default) -> expected (home, auto).
+        // Expected values read straight off the function body:
+        //   Some(explicit) & from_process_env.is_some()            -> (explicit, false)
+        //   Some(explicit) & !from_process_env & explicit==default -> (provider.unwrap_or(default), true)
+        //   Some(explicit) & !from_process_env & explicit!=default -> (explicit, true)
+        //   None                                                    -> (provider.unwrap_or(default), true)
+        let default = "/h/.claude".to_string();
+        #[allow(clippy::type_complexity)]
+        let cases: &[(&str, Option<&str>, Option<&str>, Option<&str>, (&str, bool))] = &[
+            // None arm — auto cascade with NO provider-env → default, auto=1 (Case A/B).
+            (
+                "auto-cascade: all unset → default",
+                None,
+                None,
+                None,
+                ("/h/.claude", true),
+            ),
+            // None arm — provider-env present, VIGIL_*_HOME unset → provider, auto=1 (Case D).
+            (
+                "Case D: provider-env, no vigil home",
+                None,
+                None,
+                Some("/provider/d"),
+                ("/provider/d", true),
+            ),
+            // Some + from_process_env → env-explicit, auto=0, NEVER clobbered (Case C/E).
+            (
+                "Case C/E: env-explicit not clobbered",
+                Some("/explicit/env"),
+                Some("/explicit/env"),
+                Some("/provider/ignored"),
+                ("/explicit/env", false),
+            ),
+            // Some + !from_process_env + explicit != default → toml wins, auto=1 (Case F/G).
+            (
+                "Case F: toml vigil home, no provider-env",
+                Some("/toml/f"),
+                None,
+                None,
+                ("/toml/f", true),
+            ),
+            // Some + !from_process_env + explicit == default → provider-env wins, auto=1 (Case H).
+            (
+                "Case H: toml home == auto-default → provider wins",
+                Some("/h/.claude"),
+                None,
+                Some("/provider/h"),
+                ("/provider/h", true),
+            ),
+            // Case H with provider-env also absent → unwrap_or(default), auto=1.
+            (
+                "Case H pathological: home==default, no provider → default",
+                Some("/h/.claude"),
+                None,
+                None,
+                ("/h/.claude", true),
+            ),
+        ];
+        for (label, field, from_env, provider, (exp_home, exp_auto)) in cases {
+            let (home, auto) = derive_one_home(
+                field.map(str::to_string),
+                from_env.map(str::to_string),
+                provider.map(str::to_string),
+                default.clone(),
+            );
+            assert_eq!(&home, exp_home, "{label}: resolved home");
+            assert_eq!(auto, *exp_auto, "{label}: auto flag");
+        }
+    }
+
+    // ── Auto-cascade through the full load() plumbing (Case A/B) ──────────────
+
+    #[test]
+    fn case_ab_auto_cascade_fresh_home_defaults_to_dot_claude() {
+        // Fresh HOME, NO toml, NO VIGIL_CLAUDE_HOME, NO CLAUDE_CONFIG_DIR →
+        // derive_one_home(None, None, None, "{home}/.claude") = ({home}/.claude, true).
+        let (_g, tmp, conf) = fixture();
+        let home = tmp.path().to_str().unwrap();
+        unsafe {
+            std::env::remove_var("VIGIL_CLAUDE_HOME");
+            std::env::remove_var("CLAUDE_CONFIG_DIR");
+        }
+        let cfg = load(conf.to_str().unwrap(), None).expect("load");
+        assert_eq!(
+            cfg.claude_home,
+            format!("{home}/.claude"),
+            "Case A/B: unset everywhere → {{home}}/.claude auto-default"
+        );
+        assert!(
+            cfg.claude_home_auto,
+            "Case A/B: AUTO must be 1 for the auto-cascade default"
+        );
+    }
+
+    #[test]
+    fn case_d_provider_env_no_vigil_home_uses_provider_auto_one() {
+        // CLAUDE_CONFIG_DIR set, VIGIL_CLAUDE_HOME unset, NO toml →
+        // derive_one_home(None, None, Some("/provider/d"), default) = ("/provider/d", true).
+        let (_g, _tmp, conf) = fixture();
+        unsafe {
+            std::env::remove_var("VIGIL_CLAUDE_HOME");
+            std::env::set_var("CLAUDE_CONFIG_DIR", "/provider/d");
+        }
+        let cfg = load(conf.to_str().unwrap(), None).expect("load");
+        unsafe {
+            std::env::remove_var("CLAUDE_CONFIG_DIR");
+        }
+        assert_eq!(
+            cfg.claude_home, "/provider/d",
+            "Case D: provider-env value flows through when VIGIL_*_HOME unset"
+        );
+        assert!(
+            cfg.claude_home_auto,
+            "Case D: AUTO stays 1 (None arm of derive_one_home)"
+        );
+    }
+
+    #[test]
+    fn case_h_toml_home_equals_auto_default_falls_back_to_provider_env() {
+        // toml claude_home == the auto-default "{home}/.claude", VIGIL_CLAUDE_HOME env
+        // unset, provider-env present (CLAUDE_CONFIG_DIR) →
+        // Some(default) + !from_process_env + explicit==default → (provider, true).
+        let _g = lock_env();
+        let tmp = make_tmp_home();
+        let home = tmp.path().to_str().unwrap();
+        let conf_path = tmp.path().join("vigil.conf");
+        let auto_default = format!("{home}/.claude");
+        {
+            let mut f = std::fs::File::create(&conf_path).unwrap();
+            writeln!(f, r#"claude_home = "{auto_default}""#).unwrap();
+        }
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::remove_var("VIGIL_CLAUDE_HOME");
+            std::env::set_var("CLAUDE_CONFIG_DIR", "/provider/h");
+            std::env::remove_var("VIGIL_CONFIG_FILE");
+        }
+        let cfg = load(conf_path.to_str().unwrap(), None).expect("load");
+        unsafe {
+            std::env::remove_var("CLAUDE_CONFIG_DIR");
+        }
+        assert_eq!(
+            cfg.claude_home, "/provider/h",
+            "Case H: toml home == auto-default → provider-env wins"
+        );
+        assert!(cfg.claude_home_auto, "Case H: AUTO must be 1");
+    }
+
+    #[test]
+    fn case_f_toml_vigil_home_no_provider_env() {
+        // toml claude_home set (!= auto-default), VIGIL_CLAUDE_HOME env unset, NO
+        // provider-env (no claude_config_dir in toml, CLAUDE_CONFIG_DIR unset) →
+        // Some("/toml/f") + !from_process_env + explicit!=default → ("/toml/f", true).
+        let _g = lock_env();
+        let tmp = make_tmp_home();
+        let home = tmp.path().to_str().unwrap();
+        let conf_path = tmp.path().join("vigil.conf");
+        {
+            let mut f = std::fs::File::create(&conf_path).unwrap();
+            writeln!(f, r#"claude_home = "/toml/f""#).unwrap();
+        }
+        unsafe {
+            std::env::set_var("HOME", home);
+            std::env::remove_var("VIGIL_CLAUDE_HOME");
+            std::env::remove_var("CLAUDE_CONFIG_DIR");
+            std::env::remove_var("VIGIL_CONFIG_FILE");
+        }
+        let cfg = load(conf_path.to_str().unwrap(), None).expect("load");
+        assert_eq!(
+            cfg.claude_home, "/toml/f",
+            "Case F: toml VIGIL_CLAUDE_HOME wins with no provider-env"
+        );
+        assert!(
+            cfg.claude_home_auto,
+            "Case F: AUTO stays 1 for toml-explicit"
+        );
+    }
+
+    // ── ensure_state_dir: creates dirs + chmod 0700 on state_dir ──────────────
+
+    #[test]
+    fn ensure_state_dir_creates_dirs_and_chmods_state_dir_0700() {
+        let (_g, _tmp, conf) = fixture();
+        let cfg = load(conf.to_str().unwrap(), None).expect("load");
+        // Pre-condition: none of the target dirs exist yet.
+        assert!(
+            !Path::new(&cfg.state_dir).exists(),
+            "state_dir must not pre-exist in a fresh temp HOME"
+        );
+        cfg.ensure_state_dir().expect("ensure_state_dir");
+        // All three dirs are created.
+        let created: &[(&str, &String)] = &[
+            ("state_dir", &cfg.state_dir),
+            ("active_dir", &cfg.active_dir),
+            ("log_dir", &cfg.log_dir),
+        ];
+        for (label, dir) in created {
+            assert!(
+                Path::new(dir).is_dir(),
+                "{label} must be created by ensure_state_dir: {dir}"
+            );
+        }
+        // chmod 0700 applies to state_dir ONLY (bash vigil_ensure_dirs line 263).
+        let mode = std::fs::metadata(&cfg.state_dir)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o700,
+            "state_dir permission bits must be exactly 0700, got {:o}",
+            mode & 0o777
+        );
+    }
+
+    // ── CliOverrides precedence: CLI beats Env ────────────────────────────────
+
+    #[test]
+    fn cli_override_idle_after_sec_beats_env() {
+        // Env layer sets VIGIL_IDLE_AFTER_SEC=10; the CLI layer
+        // (Serialized::defaults(cli_opts)) is merged ON TOP → CLI wins (777).
+        let (_g, _tmp, conf) = fixture();
+        unsafe {
+            std::env::set_var("VIGIL_IDLE_AFTER_SEC", "10");
+        }
+        let cli = CliOverrides {
+            idle_after_sec: Some(777),
+        };
+        let cfg = load(conf.to_str().unwrap(), Some(cli)).expect("load");
+        unsafe {
+            std::env::remove_var("VIGIL_IDLE_AFTER_SEC");
+        }
+        assert_eq!(
+            cfg.idle_after_sec, 777,
+            "CLI override must win over the VIGIL_IDLE_AFTER_SEC env layer"
+        );
+    }
+
+    // ── to_kv_map golden key set (default config, floor None ⇒ omitted) ────────
+
+    #[test]
+    fn to_kv_map_default_key_set_golden() {
+        // The full sorted key set emitted by to_kv_map() for a default config.
+        // VIGIL_THERMAL_CPU_LIMIT_FLOOR is OMITTED here (floor is None by default);
+        // the conditional emit is covered by env_split_thermal_cpu_limit_floor. The
+        // remaining 43 keys are unconditional m.insert()s, asserted EXACTLY (set
+        // equality), so any added/removed/renamed key fails this golden.
+        let (_g, _tmp, conf) = fixture();
+        unsafe {
+            std::env::remove_var("VIGIL_THERMAL_CPU_LIMIT_FLOOR");
+        }
+        let cfg = load(conf.to_str().unwrap(), None).expect("load");
+        let actual: Vec<String> = cfg.to_kv_map().keys().cloned().collect();
+        let expected: &[&str] = &[
+            "VIGIL_ACTIVE_DIR",
+            "VIGIL_BASELINE_FILE",
+            "VIGIL_BATTERY_FLOOR_PCT",
+            "VIGIL_CAFFEINATE_PIDFILE",
+            "VIGIL_CLAUDE_HOME",
+            "VIGIL_CLAUDE_HOME_AUTO",
+            "VIGIL_CODEX_HOME",
+            "VIGIL_CODEX_HOME_AUTO",
+            "VIGIL_CONFIG_FILE",
+            "VIGIL_COPILOT_HOME",
+            "VIGIL_COPILOT_HOME_AUTO",
+            "VIGIL_DAEMON_PIDFILE",
+            "VIGIL_DAEMON_TICK_FILE",
+            "VIGIL_IDLE_AFTER_SEC",
+            "VIGIL_INSTALL_DIR",
+            "VIGIL_LOCK_COMBO",
+            "VIGIL_LOCK_FILE",
+            "VIGIL_LOCK_HELPER",
+            "VIGIL_LOCK_MAX_SECS",
+            "VIGIL_LOG_DIR",
+            "VIGIL_LOG_FILE",
+            "VIGIL_NEWSYSLOG_FILE",
+            "VIGIL_POWER_HELPER_DIR",
+            "VIGIL_POWER_HELPER_TIMEOUT_SECS",
+            "VIGIL_POWER_LOG_DIR",
+            "VIGIL_POWER_LOG_FILE",
+            "VIGIL_POWER_REQUEST_BASE",
+            "VIGIL_POWER_REQUEST_DIR",
+            "VIGIL_POWER_RESPONSE_BASE",
+            "VIGIL_POWER_RESPONSE_DIR",
+            "VIGIL_POWER_STATE_DIR",
+            "VIGIL_ROOT_BIN_DIR",
+            "VIGIL_ROOT_DIR",
+            "VIGIL_ROOT_HELPER",
+            "VIGIL_STALE_AGE_SECS",
+            "VIGIL_STALE_CPU_PCT",
+            "VIGIL_START_WAIT_SECS",
+            "VIGIL_STATE_DIR",
+            "VIGIL_THERMAL_COOLDOWN_SECS",
+            "VIGIL_TICK_SECS",
+            "VIGIL_VSCODE_COPILOT_DISCOVER_SECS",
+            "VIGIL_VSCODE_COPILOT_RECENT_MINS",
+            "VIGIL_VSCODE_COPILOT_STATE_FILE",
+        ];
+        assert_eq!(
+            actual, expected,
+            "to_kv_map default key set must match the golden (sorted, floor omitted)"
+        );
+        assert!(
+            !cfg.to_kv_map()
+                .contains_key("VIGIL_THERMAL_CPU_LIMIT_FLOOR"),
+            "floor key must be omitted when None"
+        );
+    }
+
+    // ── load() on a non-existent conf path → all defaults ─────────────────────
+
+    #[test]
+    fn load_missing_conf_path_yields_all_defaults() {
+        // fixture()'s conf path does not exist → the Toml layer is silently skipped
+        // and every field falls back to its default. Expected values come from the
+        // default_* fns + the auto-cascade ({home} from the temp HOME).
+        let (_g, tmp, conf) = fixture();
+        let home = tmp.path().to_str().unwrap();
+        assert!(
+            !conf.exists(),
+            "precondition: the fixture conf path must not exist"
+        );
+        // Clear every VIGIL_* / provider var these assertions depend on.
+        for k in [
+            "VIGIL_IDLE_AFTER_SEC",
+            "VIGIL_TICK_SECS",
+            "VIGIL_LOCK_COMBO",
+            "VIGIL_LOCK_MAX_SECS",
+            "VIGIL_STALE_AGE_SECS",
+            "VIGIL_BATTERY_FLOOR_PCT",
+            "VIGIL_START_WAIT_SECS",
+            "VIGIL_INSTALL_DIR",
+            "VIGIL_ROOT_DIR",
+            "VIGIL_CLAUDE_HOME",
+            "CLAUDE_CONFIG_DIR",
+            "VIGIL_THERMAL_CPU_LIMIT_FLOOR",
+            "VIGIL_POWER_HELPER_TIMEOUT_SECS",
+        ] {
+            unsafe { std::env::remove_var(k) };
+        }
+        let cfg = load(conf.to_str().unwrap(), None).expect("load");
+        // Scalar defaults (from the default_* helpers above).
+        assert_eq!(cfg.idle_after_sec, 300, "default_idle_after_sec");
+        assert_eq!(cfg.tick_secs, 5, "default_tick_secs");
+        assert_eq!(cfg.stale_age_secs, 30, "default_stale_age_secs");
+        assert_eq!(cfg.battery_floor_pct, 20, "default_battery_floor_pct");
+        assert_eq!(cfg.start_wait_secs, 6, "default_start_wait_secs");
+        assert_eq!(cfg.lock_max_secs, 28800, "default_lock_max_secs");
+        assert_eq!(
+            cfg.power_helper_timeout_secs, 10,
+            "default_power_helper_timeout_secs"
+        );
+        assert_eq!(cfg.lock_combo, "ctrl+alt+shift+cmd+l", "default_lock_combo");
+        assert_eq!(
+            cfg.thermal_cpu_limit_floor, None,
+            "floor stays None by default"
+        );
+        // HOME-derived path defaults.
+        assert_eq!(
+            cfg.install_dir,
+            format!("{home}/Library/Application Support/vigil"),
+            "default_install_dir from temp HOME"
+        );
+        assert_eq!(
+            cfg.log_dir,
+            format!("{home}/Library/Logs/vigil"),
+            "default_log_dir from temp HOME"
+        );
+        assert_eq!(
+            cfg.config_file,
+            format!("{home}/.config/vigil/vigil.conf"),
+            "default_config_file from temp HOME"
+        );
+        // Auto-cascade default home.
+        assert_eq!(
+            cfg.claude_home,
+            format!("{home}/.claude"),
+            "claude_home auto-default"
+        );
+        assert!(cfg.claude_home_auto, "claude_home_auto default true");
+        // Canonical (never-overridable) security root.
+        assert_eq!(cfg.root_dir, VIGIL_ROOT, "root_dir canonical default");
+    }
 }

@@ -222,6 +222,36 @@ mod tests {
     }
 
     #[test]
+    fn non_numeric_pid_file_is_treated_as_stale() {
+        // A garbage (non-numeric) pid file: `cat | trim | parse::<u32>()` yields
+        // None (exactly like an absent/empty pid file), so the `if let Some(other)`
+        // liveness check is skipped and acquire falls through to the stale-takeover
+        // path → TookOver (NOT LiveContention, NOT Failed).
+        let dir = tempfile::tempdir().unwrap();
+        let lock_file = dir.path().join("state.lock");
+        let lockdir = {
+            let mut d = lock_file.as_os_str().to_os_string();
+            d.push(".d");
+            PathBuf::from(d)
+        };
+        std::fs::create_dir(&lockdir).unwrap();
+        // Non-numeric content (trailing junk a real pid never has).
+        std::fs::write(lockdir.join("pid"), "not-a-pid\n").unwrap();
+        // Plant a marker the takeover's remove_dir_all must wipe.
+        std::fs::write(lockdir.join("marker"), "x").unwrap();
+        match acquire(&lock_file) {
+            LockOutcome::TookOver(g) => {
+                assert!(g.dir().is_dir(), "took-over dir re-created");
+                assert!(
+                    !g.dir().join("marker").exists(),
+                    "stale contents wiped on takeover"
+                );
+            }
+            other => panic!("expected TookOver on non-numeric pid file, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn finalize_writes_pidfiles_and_clears_tick() {
         let dir = tempfile::tempdir().unwrap();
         let lock_file = dir.path().join("state.lock");

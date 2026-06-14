@@ -667,6 +667,86 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ready_requires_three_grants_and_ignores_post_event_access() {
+        // ready() == listen_event_access && accessibility_trusted &&
+        // tap_create_active_hid_ok. post_event_access is reported but is NOT a
+        // gate — the lock only RECEIVES input via the tap, it never POSTS events,
+        // so a denied post-event grant must not block readiness. Each row toggles
+        // exactly one field; post_event_access flips with no effect on ready().
+        let base = PermissionReport {
+            listen_event_access: true,
+            accessibility_trusted: true,
+            post_event_access: false,
+            tap_create_active_hid_ok: true,
+        };
+        assert!(base.ready(), "all three required grants present -> ready");
+
+        // Flipping post_event_access (true OR false) never changes ready().
+        let cases: &[(&str, PermissionReport, bool)] = &[
+            (
+                "post_event true, others ready",
+                PermissionReport {
+                    post_event_access: true,
+                    ..PermissionReport {
+                        listen_event_access: true,
+                        accessibility_trusted: true,
+                        post_event_access: false,
+                        tap_create_active_hid_ok: true,
+                    }
+                },
+                true,
+            ),
+            (
+                "listen denied",
+                PermissionReport {
+                    listen_event_access: false,
+                    ..PermissionReport {
+                        listen_event_access: true,
+                        accessibility_trusted: true,
+                        post_event_access: true,
+                        tap_create_active_hid_ok: true,
+                    }
+                },
+                false,
+            ),
+            (
+                "accessibility denied",
+                PermissionReport {
+                    accessibility_trusted: false,
+                    ..PermissionReport {
+                        listen_event_access: true,
+                        accessibility_trusted: true,
+                        post_event_access: true,
+                        tap_create_active_hid_ok: true,
+                    }
+                },
+                false,
+            ),
+            (
+                "tap create denied",
+                PermissionReport {
+                    tap_create_active_hid_ok: false,
+                    ..PermissionReport {
+                        listen_event_access: true,
+                        accessibility_trusted: true,
+                        post_event_access: true,
+                        tap_create_active_hid_ok: true,
+                    }
+                },
+                false,
+            ),
+        ];
+        for (label, report, want) in cases {
+            assert_eq!(report.ready(), *want, "{label}");
+        }
+        // post_event_access denied with the other three present is still ready.
+        assert!(
+            base.ready(),
+            "post_event_access=false does not block readiness"
+        );
+    }
+
+    #[test]
     fn permission_json_uses_required_fields_in_stable_order() {
         let report = PermissionReport {
             listen_event_access: true,
@@ -712,6 +792,110 @@ mod tests {
     fn events_mask_sets_one_bit_per_event() {
         let mask = events_mask(&[CGEventType::KeyDown, CGEventType::KeyUp]);
         assert_eq!(mask, (1u64 << 10) | (1u64 << 11));
+    }
+
+    #[test]
+    fn production_events_and_supported_set_are_in_parity() {
+        // The freeze/capture taps mask on production_events(); the callbacks drop
+        // is_supported_event_type(). The two MUST be the same set, or some event
+        // would be subscribed-but-passed-through (a leak) or dropped-but-never-
+        // subscribed (dead arm). Assert every production event is supported AND
+        // every supported event is in production_events — full bidirectional parity
+        // over all 14 KeyUp/FlagsChanged/mouse variants.
+        let prod = production_events();
+        for &ev in &prod {
+            assert!(
+                is_supported_event_type(ev),
+                "{ev:?} is masked in but not in the droppable set"
+            );
+        }
+        // Reverse direction: every variant is_supported_event_type accepts must be
+        // produced. We enumerate the exact 14 supported variants here so a future
+        // edit to either list (adding/removing one) trips this assertion.
+        let supported: &[CGEventType] = &[
+            CGEventType::KeyDown,
+            CGEventType::KeyUp,
+            CGEventType::FlagsChanged,
+            CGEventType::LeftMouseDown,
+            CGEventType::LeftMouseUp,
+            CGEventType::RightMouseDown,
+            CGEventType::RightMouseUp,
+            CGEventType::MouseMoved,
+            CGEventType::LeftMouseDragged,
+            CGEventType::RightMouseDragged,
+            CGEventType::ScrollWheel,
+            CGEventType::OtherMouseDown,
+            CGEventType::OtherMouseUp,
+            CGEventType::OtherMouseDragged,
+        ];
+        for &ev in supported {
+            assert!(is_supported_event_type(ev), "{ev:?} must be supported");
+            assert!(
+                prod.contains(&ev),
+                "{ev:?} is supported but not in production_events()"
+            );
+        }
+        // Same cardinality both ways -> exact set equality (no extra/missing).
+        assert_eq!(
+            prod.len(),
+            supported.len(),
+            "production_events and the supported set must have equal cardinality"
+        );
+        assert_eq!(prod.len(), 14, "the supported set is exactly 14 events");
+        // A non-subscribed type (Null) is neither supported nor produced.
+        assert!(!is_supported_event_type(CGEventType::Null));
+        assert!(!prod.contains(&CGEventType::Null));
+    }
+
+    #[test]
+    fn events_mask_empty_and_full_popcount() {
+        // events_mask folds `mask | (1 << ev.0)`. Empty input -> 0 bits. The full
+        // production set sets exactly one bit per DISTINCT event type, so the mask's
+        // popcount equals the number of production events (no two share a type id).
+        assert_eq!(events_mask(&[]), 0, "empty mask has no bits");
+        let prod = production_events();
+        let mask = events_mask(&prod);
+        assert_eq!(
+            mask.count_ones() as usize,
+            prod.len(),
+            "one distinct bit per production event"
+        );
+        assert_eq!(
+            mask.count_ones(),
+            14,
+            "the full production mask sets exactly 14 bits"
+        );
+    }
+
+    #[test]
+    fn overlay_state_ceils_and_saturates_remaining() {
+        // Exercises the REAL overlay_state arithmetic
+        // (`saturating_duration_since(now).as_secs_f64().ceil() as u64`), not just
+        // status_text rendering: a partial second ceils up, an exact second stays,
+        // a past deadline saturates to 0 (no underflow/panic), and None → no count.
+        let now = Instant::now();
+        assert_eq!(
+            overlay_state(Some(now + Duration::from_millis(2001)), now).seconds_remaining,
+            Some(3),
+            "2.001s remaining ceils to 3"
+        );
+        assert_eq!(
+            overlay_state(Some(now + Duration::from_secs(3)), now).seconds_remaining,
+            Some(3),
+            "an exact 3s stays 3"
+        );
+        let past = now.checked_sub(Duration::from_secs(5)).unwrap_or(now);
+        assert_eq!(
+            overlay_state(Some(past), now).seconds_remaining,
+            Some(0),
+            "a past deadline saturates to 0"
+        );
+        assert_eq!(
+            overlay_state(None, now).seconds_remaining,
+            None,
+            "no deadline => no countdown"
+        );
+        assert!(overlay_state(None, now).armed, "overlay is armed");
     }
 
     #[test]

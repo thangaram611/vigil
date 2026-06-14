@@ -657,8 +657,8 @@ mod tests {
             ),
         ];
         for (label, input, want_err) in rejects {
-            let err = parse_chord(input)
-                .expect_err(&format!("{label}: {input:?} must be rejected"));
+            let err =
+                parse_chord(input).expect_err(&format!("{label}: {input:?} must be rejected"));
             assert_eq!(&err, want_err, "{label}: {input:?}");
         }
     }
@@ -739,6 +739,35 @@ mod tests {
         m.on_up(B);
         assert!(!m.on_down(A)); // fresh attempt
         assert!(m.on_down(B));
+    }
+
+    #[test]
+    fn matcher_on_up_noop_when_pos_ge_progress_or_foreign() {
+        // on_up resets progress ONLY when the released key is a matched-PREFIX key
+        // (its target position `pos < progress`). Two non-reset branches:
+        //
+        //  (1) pos >= progress: release a chord key we have NOT consumed yet (its
+        //      position is at/after the current progress). progress is untouched, so
+        //      the in-order completion still fires.
+        //  (2) foreign key: a key not in the target at all -> position() is None ->
+        //      the `if let Some(pos)` is skipped -> progress untouched.
+        //
+        // Chord [CTRL, A, ALT]. Press CTRL (progress 1). Then:
+        let mut m = seq(&[CTRL, A, ALT]);
+        assert!(!m.on_down(CTRL)); // progress -> 1 (CTRL is target[0])
+
+        // (1) Release ALT (target[2]); pos=2 >= progress=1 -> NOT < progress -> no
+        //     reset. progress stays 1.
+        m.on_up(ALT);
+        // (2) Release B (foreign, not in target) -> position None -> no reset.
+        m.on_up(B);
+
+        // progress survived both releases: A then ALT still completes in order.
+        assert!(!m.on_down(A), "A advances progress 1 -> 2");
+        assert!(
+            m.on_down(ALT),
+            "completing in order fires; the two on_up calls did not reset progress"
+        );
     }
 
     #[test]

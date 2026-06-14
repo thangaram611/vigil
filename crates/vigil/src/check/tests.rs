@@ -105,6 +105,47 @@ fn classify_scan_state_threshold_table() {
     }
 }
 
+#[test]
+fn classify_scan_state_edge_cases_table() {
+    // Edge arms NOT exercised by the threshold table: the negative-age clamp on
+    // BOTH age fields (a future-dated tick or pidfile must clamp to 0, never go
+    // negative), the `pidfile_mtime == 0` sentinel (treated as "no mtime" → never
+    // promotes Pending to Missing), and the non-numeric tick_secs fallback to the
+    // cfg tick_secs. Expecteds derived directly from classify_scan_state:
+    //   * future tick  (pid match, updated_at = now+100): age = now-(now+100) =
+    //     -100 → clamped to 0; stale_after = max(15, 5*2+5) = 15; 0 ≤ 15 → Fresh,
+    //     Some(0).
+    //   * future pidfile (pid MISmatch, mtime = now+100): pid_age = now-(now+100)
+    //     = -100 → clamped to 0; missing_after = max(10, 6+5+3) = 14; 0 > 14 is
+    //     false → Pending, None.
+    //   * mtime == 0 sentinel (pid MISmatch, mtime = Some(0)): the `mtime != 0`
+    //     guard skips the missing check entirely even though now-0 ≫ missing_after
+    //     → Pending (NOT Missing), None.
+    //   * non-numeric tick_secs (pid match, updated_at = now-30, tick_secs="abc"):
+    //     the is_numeric filter drops it → fall back to cfg tick_secs = 20;
+    //     stale_after = max(15, 20*2+5) = 45; age 30 ≤ 45 → Fresh, Some(30) (with
+    //     a numeric tick_secs=5 this same age 30 would be Stale, so this row proves
+    //     the cfg fallback fired).
+    use DaemonScanState::{Fresh, Pending};
+    let now = FIXED_NOW;
+    let future_tick = (now + 100).to_string();
+    let recent_tick = (now - 30).to_string();
+    // (label, loaded, daemon_pid, tick, pidfile_mtime, cfg_tick, wait, want_state, want_age)
+    #[rustfmt::skip]
+    #[allow(clippy::type_complexity)]
+    let cases: Vec<(&str, bool, Option<&str>, Option<TickFields>, Option<i64>, u32, u32, DaemonScanState, Option<i64>)> = vec![
+        ("neg-age clamp: future-dated tick (updated_at=now+100) → age 0, Fresh", true, Some("4242"), Some(tick("4242", &future_tick, "5")), Some(now), 5, 6, Fresh, Some(0)),
+        ("neg-age clamp: future-dated pidfile (mtime=now+100), pid mismatch → pid_age 0, Pending", true, Some("4242"), Some(tick("9999", "1699999998", "5")), Some(now + 100), 5, 6, Pending, None),
+        ("mtime==0 sentinel: pid mismatch, mtime Some(0) → skip missing check → Pending", true, Some("4242"), Some(tick("9999", "1699999998", "5")), Some(0), 5, 6, Pending, None),
+        ("non-numeric tick_secs falls back to cfg(20): age 30 < 45 → Fresh", true, Some("4242"), Some(tick("4242", &recent_tick, "abc")), Some(now), 20, 6, Fresh, Some(30)),
+    ];
+    for (label, loaded, dpid, t, mtime, ct, wait, want_st, want_age) in &cases {
+        let (st, age) = classify_scan_state(*loaded, *dpid, t.as_ref(), *mtime, now, *ct, *wait);
+        assert_eq!(st, *want_st, "{label}: state");
+        assert_eq!(age, *want_age, "{label}: age");
+    }
+}
+
 // ── tick-file parse ───────────────────────────────────────────────────────────
 
 #[test]
