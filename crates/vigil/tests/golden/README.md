@@ -1,12 +1,14 @@
 # Gate-0 golden fixtures (Phase 5.7)
 
-Frozen byte-for-byte captures of the **current bash `bin/vigil`** output, taken
-in a fully sandboxed, deterministic environment. The later Rust render code
-(`src/service/`, `src/check/`, `commands::{setup,status}`) must reproduce these
-bytes exactly. See `future/phase-5.7-daemon-service-cutover.md` §7 and §5.
+Frozen byte-for-byte captures of the **original bash `bin/vigil`** output, taken
+in a fully sandboxed, deterministic environment. The Rust render code
+(`src/service/`, `src/check/`, `commands::{setup,status}`) reproduces these bytes
+exactly — they are the parity oracle for the 5.7 Bash→Rust cutover. (The Phase
+5.7 plan that defined this gate-0 step now lives in git history.)
 
-> These were produced by the **bash** binary (`bin/vigil`), NOT the Rust binary.
-> They are the ABI oracle. Do not regenerate them against the Rust binary.
+> These were produced by the **bash** binary (`bin/vigil`), since deleted, NOT
+> the Rust binary. They are the ABI oracle. Do not regenerate them against the
+> Rust binary.
 
 ## The single allowed diff: `version`
 

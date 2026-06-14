@@ -188,7 +188,7 @@ fn event_tap_run_mode() -> Option<&'static CFRunLoopMode> {
 /// swallow *all* hardware input during the freeze; a session tap can miss
 /// lower-level synthetic/HID paths. The HID choice is the shipped, working
 /// behavior (commit "Use HID event tap for vigil lock") and supersedes the
-/// stale phase-4 spec text. See future/phase-5.6-lock-overlay-cf-migration.md.
+/// stale phase-4 spec text.
 fn lock_event_tap_location() -> CGEventTapLocation {
     CGEventTapLocation::HIDEventTap
 }
