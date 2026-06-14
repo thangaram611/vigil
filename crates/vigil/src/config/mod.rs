@@ -1136,14 +1136,9 @@ mod tests {
 
     #[test]
     fn security_default_passes() {
-        let _g = lock_env();
-        let tmp = make_tmp_home();
-        let home = tmp.path().to_str().unwrap();
-        let conf = tmp.path().join("vigil.conf");
+        let (_g, _tmp, conf) = fixture();
         unsafe {
-            std::env::set_var("HOME", home);
             std::env::remove_var("VIGIL_ROOT_DIR");
-            std::env::remove_var("VIGIL_CONFIG_FILE");
         }
         let cfg = load(conf.to_str().unwrap(), None).expect("load");
         assert!(
@@ -1153,95 +1148,62 @@ mod tests {
     }
 
     #[test]
-    fn security_evil_root_dir_rejected() {
-        let _g = lock_env();
-        let tmp = make_tmp_home();
-        let home = tmp.path().to_str().unwrap();
-        let conf = tmp.path().join("vigil.conf");
-        unsafe {
-            std::env::set_var("HOME", home);
-            std::env::set_var("VIGIL_ROOT_DIR", "/tmp/evil");
-            std::env::remove_var("VIGIL_CONFIG_FILE");
+    fn security_non_standard_root_dir_rejected() {
+        // Any VIGIL_ROOT_DIR != the canonical path is rejected by EXACT equality
+        // — so even a prefix-of-canonical ("...-evil") fails — and the error names
+        // the field. Both attack vectors are rows; each asserts the field-naming
+        // message (the prefix row's check is strengthened: same error format).
+        let (_g, _tmp, conf) = fixture();
+        let conf = conf.to_str().unwrap();
+        let vectors = [
+            ("/tmp/evil", "unrelated path"),
+            (
+                "/Library/Application Support/vigil-evil",
+                "prefix-of-canonical (exact-equality)",
+            ),
+        ];
+        for (root_dir, label) in vectors {
+            unsafe { std::env::set_var("VIGIL_ROOT_DIR", root_dir) };
+            let cfg = load(conf, None).expect("load");
+            unsafe { std::env::remove_var("VIGIL_ROOT_DIR") };
+            let msg = cfg
+                .validate_security_paths()
+                .expect_err(&format!("{label} root_dir must be rejected"));
+            assert!(
+                msg.contains("refusing non-standard VIGIL_ROOT_DIR"),
+                "{label}: error must identify the field: {msg}"
+            );
         }
-        let cfg = load(conf.to_str().unwrap(), None).expect("load");
-        unsafe {
-            std::env::remove_var("VIGIL_ROOT_DIR");
-        }
-        let result = cfg.validate_security_paths();
-        assert!(result.is_err(), "non-standard root_dir must be rejected");
-        let msg = result.unwrap_err();
-        assert!(
-            msg.contains("refusing non-standard VIGIL_ROOT_DIR"),
-            "error message must identify the field: {msg}"
-        );
-    }
-
-    #[test]
-    fn security_prefix_root_dir_rejected() {
-        let _g = lock_env();
-        let tmp = make_tmp_home();
-        let home = tmp.path().to_str().unwrap();
-        let conf = tmp.path().join("vigil.conf");
-        unsafe {
-            std::env::set_var("HOME", home);
-            // A prefix of the canonical path — must fail exact-equality check.
-            std::env::set_var("VIGIL_ROOT_DIR", "/Library/Application Support/vigil-evil");
-            std::env::remove_var("VIGIL_CONFIG_FILE");
-        }
-        let cfg = load(conf.to_str().unwrap(), None).expect("load");
-        unsafe {
-            std::env::remove_var("VIGIL_ROOT_DIR");
-        }
-        let result = cfg.validate_security_paths();
-        assert!(
-            result.is_err(),
-            "prefix-of-canonical root_dir must be rejected (exact-equality)"
-        );
     }
 
     // ── Shell-syntax conf detection ───────────────────────────────────────────
 
     #[test]
-    fn shell_syntax_conf_gives_clear_error() {
-        let tmp = make_tmp_home();
-        let conf_path = tmp.path().join("vigil.conf");
-        {
-            let mut f = std::fs::File::create(&conf_path).unwrap();
-            // Shell-style: ALL_CAPS key + `=` + `$HOME` expansion — should be rejected.
-            writeln!(f, r#"VIGIL_LOG_DIR="$HOME/logs""#).unwrap();
+    fn shell_syntax_conf_rejected_with_clear_error() {
+        // vigil.conf is strict TOML; the shell-syntax detector rejects each shell
+        // indicator branch with a "not valid TOML" error. One row per branch.
+        let cases: &[(&str, &str)] = &[
+            // ALL_CAPS key + `=` + `$HOME` expansion.
+            ("export-style $-expansion", "VIGIL_LOG_DIR=\"$HOME/logs\"\n"),
+            // A shebang is a valid TOML comment, so this guards that the shebang
+            // branch runs BEFORE the generic `#` comment-skip — else it parses as
+            // empty TOML and silently succeeds.
+            (
+                "shebang-before-comment",
+                "#!/usr/bin/env bash\nidle_after_sec = 42\n",
+            ),
+        ];
+        for (label, body) in cases {
+            let tmp = make_tmp_home();
+            let conf_path = tmp.path().join("vigil.conf");
+            std::fs::write(&conf_path, body).unwrap();
+            let msg = load(conf_path.to_str().unwrap(), None)
+                .expect_err(&format!("{label}: shell-syntax conf must error"))
+                .to_string();
+            assert!(
+                msg.contains("not valid TOML"),
+                "{label}: error must mention TOML: {msg}"
+            );
         }
-        let result = load(conf_path.to_str().unwrap(), None);
-        assert!(result.is_err(), "shell-syntax conf must error");
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("not valid TOML"),
-            "error must mention TOML: {msg}"
-        );
-    }
-
-    #[test]
-    fn shebang_only_conf_gives_clear_error() {
-        // A conf that begins with a shebang and has NO other shell indicators.
-        // The shebang is a valid TOML comment, so without the shebang branch
-        // running BEFORE the generic `#` comment-skip this would parse as empty
-        // TOML and silently succeed. This guards that the shebang check is live.
-        let tmp = make_tmp_home();
-        let conf_path = tmp.path().join("vigil.conf");
-        {
-            let mut f = std::fs::File::create(&conf_path).unwrap();
-            writeln!(f, "#!/usr/bin/env bash").unwrap();
-            // Otherwise-valid TOML below — only the shebang flags this as shell.
-            writeln!(f, "idle_after_sec = 42").unwrap();
-        }
-        let result = load(conf_path.to_str().unwrap(), None);
-        assert!(
-            result.is_err(),
-            "shebang-prefixed conf must be detected as shell syntax"
-        );
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("not valid TOML"),
-            "error must mention TOML: {msg}"
-        );
     }
 }

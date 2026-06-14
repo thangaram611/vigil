@@ -20,6 +20,30 @@ fn vigil_log_regex() -> regex::Regex {
     .unwrap()
 }
 
+/// Shared read+assert tail: read the first line of `log_path`, assert it matches
+/// the bash-format regex, then assert it `contains` the given level/message
+/// substring. This ONLY reads the file and asserts — it never sets up or scopes
+/// a tracing subscriber, so each caller keeps full control of its own subscriber
+/// lifecycle (global `init_file_subscriber` vs scoped `with_default`).
+fn assert_first_line(log_path: &std::path::Path, substr: &str) -> String {
+    let content = fs::read_to_string(log_path).expect("read log file");
+    let line = content
+        .lines()
+        .next()
+        .expect("log file must have at least one line")
+        .to_string();
+    let re = vigil_log_regex();
+    assert!(
+        re.is_match(&line),
+        "log line does not match bash format regex.\nLine: {line:?}\nRegex: {re}"
+    );
+    assert!(
+        line.contains(substr),
+        "log line must contain {substr:?}.\nLine: {line:?}"
+    );
+    line
+}
+
 #[test]
 fn log_line_matches_bash_format() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -35,20 +59,11 @@ fn log_line_matches_bash_format() {
     // Flush: drop the guard to ensure NonBlocking flushes before we read.
     drop(guard);
 
-    let content = fs::read_to_string(&log_path).expect("read log file");
-    let line = content
-        .lines()
-        .next()
-        .expect("log file must have at least one line");
+    // Shared read + regex-format + level/message-substring tail.
+    let line = assert_first_line(&log_path, " INFO hello world");
 
-    // Assert exact format match.
-    let re = vigil_log_regex();
-    assert!(
-        re.is_match(line),
-        "log line does not match bash format regex.\nLine: {line:?}\nRegex: {re}"
-    );
-
-    // Assert it ends with "INFO hello world" (exact message, no target, no span).
+    // Stronger than the shared `contains`: the line must END with the exact
+    // message (no target, no span).
     assert!(
         line.ends_with(" INFO hello world"),
         "log line must end with ' INFO hello world'.\nLine: {line:?}"
@@ -87,19 +102,7 @@ fn log_line_warn_level() {
 
     drop(guard);
 
-    let content = fs::read_to_string(&log_path).expect("read log file");
-    let line = content
-        .lines()
-        .next()
-        .expect("log file must have at least one line");
-
-    let re = vigil_log_regex();
-    assert!(
-        re.is_match(line),
-        "WARN log line does not match bash format.\nLine: {line:?}"
-    );
-    assert!(
-        line.contains(" WARN "),
-        "WARN line must contain ' WARN '.\nLine: {line:?}"
-    );
+    // Shared read + regex-format + level-substring tail. The with_default scope
+    // above is this test's own concern; the helper only reads + asserts.
+    assert_first_line(&log_path, " WARN ");
 }

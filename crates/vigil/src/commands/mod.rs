@@ -433,32 +433,50 @@ mod tests {
         );
     }
 
+    /// Table-driven guard coverage for `assert_vigil_tree_path` — one row per
+    /// bash rule plus the Q4 ~/Documents hardening delta. HOME is pinned to
+    /// `/Users/x` (save/restore) so the HOME-equality (rule #4) and ~/Documents
+    /// (rule #6) branches are deterministic.
     #[test]
-    fn vigil_tree_path_rejects_non_absolute() {
-        assert!(assert_vigil_tree_path("install dir", "relative/vigil").is_err());
-    }
+    fn vigil_tree_path_guard_rules() {
+        // SAFETY: single-threaded unit test; HOME set/restored locally.
+        let saved = std::env::var("HOME").ok();
+        unsafe { std::env::set_var("HOME", "/Users/x") };
 
-    #[test]
-    fn vigil_tree_path_rejects_root() {
-        assert!(assert_vigil_tree_path("install dir", "/").is_err());
-    }
+        // (label, path, expect_ok)
+        let cases: &[(&str, &str, bool)] = &[
+            // rule 1: must be absolute.
+            ("non-absolute", "relative/vigil", false),
+            // rule 2: no newline / carriage return.
+            ("newline", "/opt/vi\ngil/vigil", false),
+            // rule 3: not `/`.
+            ("root", "/", false),
+            // rule 4: not `$HOME` (HOME pinned to /Users/x above).
+            ("equals HOME", "/Users/x", false),
+            // rule 5: basename must be `vigil`.
+            ("non-vigil basename", "/opt/notvigil", false),
+            // rule 6 (Q4 delta): not under ~/Documents (TCC).
+            ("under ~/Documents", "/Users/x/Documents/vigil", false),
+            // accepts a standard install path.
+            (
+                "standard install dir",
+                "/Users/x/Library/Application Support/vigil",
+                true,
+            ),
+        ];
+        for (label, path, expect_ok) in cases {
+            let r = assert_vigil_tree_path("install dir", path);
+            assert_eq!(
+                r.is_ok(),
+                *expect_ok,
+                "{label}: {path} expected ok={expect_ok}, got {r:?}"
+            );
+        }
 
-    #[test]
-    fn vigil_tree_path_rejects_non_vigil_basename() {
-        assert!(assert_vigil_tree_path("install dir", "/opt/notvigil").is_err());
-    }
-
-    #[test]
-    fn vigil_tree_path_rejects_newline() {
-        assert!(assert_vigil_tree_path("install dir", "/opt/vi\ngil/vigil").is_err());
-    }
-
-    #[test]
-    fn vigil_tree_path_accepts_standard() {
-        assert!(
-            assert_vigil_tree_path("install dir", "/Users/x/Library/Application Support/vigil")
-                .is_ok()
-        );
+        match saved {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
     }
 
     #[test]
@@ -467,19 +485,6 @@ mod tests {
             helper_plist_path(),
             "/Library/LaunchDaemons/com.thangaram.vigil.helper.plist"
         );
-    }
-
-    #[test]
-    fn vigil_tree_path_rejects_under_documents() {
-        // SAFETY: single-threaded unit test; HOME set/restored locally.
-        let saved = std::env::var("HOME").ok();
-        unsafe { std::env::set_var("HOME", "/Users/x") };
-        let r = assert_vigil_tree_path("install dir", "/Users/x/Documents/vigil");
-        match saved {
-            Some(h) => unsafe { std::env::set_var("HOME", h) },
-            None => unsafe { std::env::remove_var("HOME") },
-        }
-        assert!(r.is_err(), "must reject ~/Documents path (Q4 hardening)");
     }
 
     #[test]

@@ -289,19 +289,19 @@ fn rejects_request_files_not_owned_by_expected_user() {
     );
 }
 
-// ── port: rejects_request_files_not_owned (FILE-level via real uid match) ─────
+// ── dir-owner check passes => well-formed request yields status=ok ───────────
 
 #[test]
-fn rejects_request_file_owner_at_file_level() {
+fn owned_request_dir_accepts_request() {
     let _g = lock_env();
     let l = Layout::new();
     l.set_env();
-    // Keep allowed_uid == dir owner (us) so the DIR check passes, then validate
-    // the FILE-level owner check by constructing the file_stat_ok predicate over
-    // a wrong-uid stat directly. (We cannot chown to another uid unprivileged,
-    // so the file-level branch is also covered by validate::file_stat_ok tests.)
-    // Here we assert the happy file is accepted to prove the dir check passes,
-    // bounding the wrong-owner case above to the dir-level guard.
+    // allowed_uid == dir owner (us), so the per-poll request-DIR owner check
+    // passes and a well-formed request is accepted (status=ok). This bounds the
+    // wrong-owner case in rejects_request_files_not_owned_by_expected_user to the
+    // dir-level guard. The FILE-level owner branch (a wrong st_uid) cannot be
+    // exercised unprivileged — we cannot chown to another uid — so it is covered
+    // by the pure validate::file_stat_ok_rejects_wrong_owner predicate test.
     l.write_request("ok_owner", "status\n");
     l.run();
     assert!(l.response("ok_owner").contains("status=ok"));
@@ -499,45 +499,59 @@ fn dot_and_dotdot_ids_rejected() {
     assert!(!l.cfg.request_dir.join("req...").exists());
 }
 
-// ── §3.3: symlinked state dir rejected at open(O_NOFOLLOW|O_DIRECTORY) ─────────
+// ── §3.3: symlinked root dir rejected at open(O_NOFOLLOW|O_DIRECTORY) ──────────
 
 #[test]
-fn symlinked_state_dir_rejected() {
+fn symlinked_root_dir_rejected() {
     let _g = lock_env();
-    let l = Layout::new();
-    l.set_env();
-    // Replace state_dir with a symlink to a sibling real dir.
-    let real = l._dir.path().join("real_state");
-    std::fs::create_dir_all(&real).unwrap();
-    std::fs::remove_dir_all(&l.cfg.state_dir).unwrap();
-    std::os::unix::fs::symlink(&real, &l.cfg.state_dir).unwrap();
-    let err = match validate_dirs(&l.cfg) {
-        Ok(_) => panic!("symlinked state dir should be rejected"),
-        Err(e) => e,
-    };
-    assert!(
-        err.contains("state directory"),
-        "symlinked state dir rejected: {err}"
-    );
-}
-
-#[test]
-fn symlinked_response_dir_rejected() {
-    let _g = lock_env();
-    let l = Layout::new();
-    l.set_env();
-    let real = l._dir.path().join("real_resp");
-    std::fs::create_dir_all(&real).unwrap();
-    std::fs::remove_dir_all(&l.cfg.response_dir).unwrap();
-    std::os::unix::fs::symlink(&real, &l.cfg.response_dir).unwrap();
-    let err = match validate_dirs(&l.cfg) {
-        Ok(_) => panic!("symlinked response dir should be rejected"),
-        Err(e) => e,
-    };
-    assert!(
-        err.contains("response directory"),
-        "symlinked response dir rejected: {err}"
-    );
+    // Each row replaces ONE validated root dir with a symlink to a sibling real
+    // dir and asserts validate_dirs rejects it with that dir's error substring.
+    // O_NOFOLLOW|O_DIRECTORY on the final component fails the open. A fresh
+    // Layout per row keeps each row isolated (validate_dirs checks response
+    // before state, so a stale symlink from a prior row would mask the row under
+    // test); BOTH original error substrings stay asserted, one per row.
+    struct Row {
+        label: &'static str,
+        real_name: &'static str,
+        // returns the validated root dir to replace with a symlink.
+        target: fn(&Layout) -> std::path::PathBuf,
+        panic_msg: &'static str,
+        substr: &'static str,
+    }
+    let cases: &[Row] = &[
+        Row {
+            label: "state",
+            real_name: "real_state",
+            target: |l| l.cfg.state_dir.clone(),
+            panic_msg: "symlinked state dir should be rejected",
+            substr: "state directory",
+        },
+        Row {
+            label: "response",
+            real_name: "real_resp",
+            target: |l| l.cfg.response_dir.clone(),
+            panic_msg: "symlinked response dir should be rejected",
+            substr: "response directory",
+        },
+    ];
+    for row in cases {
+        let l = Layout::new();
+        l.set_env();
+        let dir = (row.target)(&l);
+        let real = l._dir.path().join(row.real_name);
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(&real, &dir).unwrap();
+        let err = match validate_dirs(&l.cfg) {
+            Ok(_) => panic!("{}", row.panic_msg),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains(row.substr),
+            "symlinked {} dir rejected: {err}",
+            row.label
+        );
+    }
 }
 
 // ── §3.3: liveness — every rejection writes an error response (no timeout) ────

@@ -243,23 +243,37 @@ mod tests {
     // ── The 8 ported `tests/assertions_test.sh` cases (Phase 5.7 §5.5, GAP #1) ──
 
     #[test]
-    fn empty_output_is_none() {
-        // test_empty_output_is_none — VIGIL_ASSERTIONS_FIXTURE="" → (none).
-        assert_eq!(parse_assertions("", None), AssertionsSummary::None);
-    }
-
-    #[test]
-    fn header_only_is_none() {
-        // test_header_only_is_none — no "Listed by owning process:" block.
-        let fixture = "Assertion status system-wide:\n   PreventUserIdleSystemSleep    0\n   UserIsActive                  0";
-        assert_eq!(parse_assertions(fixture, None), AssertionsSummary::None);
-    }
-
-    #[test]
-    fn block_present_but_empty_is_none() {
-        // test_block_present_but_empty_is_none — header but zero holder rows.
-        let fixture = "Assertion status system-wide:\n   PreventUserIdleSystemSleep    0\nListed by owning process:\nNo new entries";
-        assert_eq!(parse_assertions(fixture, None), AssertionsSummary::None);
+    fn pure_none_golden_cases() {
+        // The four pure-equality `parse_assertions(...) == None` golden cases
+        // (mirror of tests/assertions_test.sh). Each fixture stays byte-identical
+        // and individually labeled; this is a golden/parity set.
+        let cases: &[(&str, &str)] = &[
+            // test_empty_output_is_none — VIGIL_ASSERTIONS_FIXTURE="" → (none).
+            ("empty_output_is_none", ""),
+            // test_header_only_is_none — no "Listed by owning process:" block.
+            (
+                "header_only_is_none",
+                "Assertion status system-wide:\n   PreventUserIdleSystemSleep    0\n   UserIsActive                  0",
+            ),
+            // test_block_present_but_empty_is_none — header but zero holder rows.
+            (
+                "block_present_but_empty_is_none",
+                "Assertion status system-wide:\n   PreventUserIdleSystemSleep    0\nListed by owning process:\nNo new entries",
+            ),
+            // test_no_assertions_literal_is_none — "No assertions." informational
+            // → (none), NOT parse-failed.
+            (
+                "no_assertions_literal_is_none",
+                "Assertion status system-wide:\nListed by owning process:\n   No assertions.\nNo new entries",
+            ),
+        ];
+        for (label, fixture) in cases {
+            assert_eq!(
+                parse_assertions(fixture, None),
+                AssertionsSummary::None,
+                "{label}"
+            );
+        }
     }
 
     #[test]
@@ -347,14 +361,6 @@ mod tests {
             "raw output (first 10 lines) should include the malformed rows"
         );
         assert_eq!(parse_assertions(fixture, None).state(), "parse_failed");
-    }
-
-    #[test]
-    fn no_assertions_literal_is_none() {
-        // test_no_assertions_literal_is_none — "No assertions." informational →
-        // (none), NOT parse-failed.
-        let fixture = "Assertion status system-wide:\nListed by owning process:\n   No assertions.\nNo new entries";
-        assert_eq!(parse_assertions(fixture, None), AssertionsSummary::None);
     }
 
     // ── State-mapping + edge coverage ──────────────────────────────────────

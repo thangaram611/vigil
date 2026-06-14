@@ -938,34 +938,13 @@ mod tests {
         assert_eq!(parse_non_negative(""), None);
         assert_eq!(parse_non_negative("-1"), None);
         assert_eq!(parse_non_negative("12x"), None);
-    }
-
-    /// The --countdown flag parser: pure-predicate mirror of the lock_run parse
-    /// arm. Default is 3 (the 3-2-1 countdown); positive ints parse; non-digit/
-    /// empty is rejected. Mirrors the --max-secs predicate style.
-    #[test]
-    fn countdown_defaults_three_and_parses_non_negative_int() {
-        // Pure predicate mirror of the lock_run --countdown arm: returns the
-        // parsed value, or None for invalid input (which the run path turns into
-        // a die()).
-        fn parse_countdown(v: &str) -> Option<u32> {
-            if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
-                return None;
-            }
-            v.parse::<u32>().ok()
-        }
-        // Default is 3 when the flag is absent (the run path initializes to 3).
-        let default_countdown: u32 = 3;
-        assert_eq!(default_countdown, 3);
-        // Positive integers parse.
-        assert_eq!(parse_countdown("3"), Some(3));
-        assert_eq!(parse_countdown("0"), Some(0));
-        assert_eq!(parse_countdown("10"), Some(10));
-        // Non-digits / empty are rejected (→ die in the run path).
-        assert_eq!(parse_countdown("abc"), None);
-        assert_eq!(parse_countdown(""), None);
-        assert_eq!(parse_countdown("3s"), None);
-        assert_eq!(parse_countdown("-1"), None);
+        // Distinct inputs folded in from the deleted countdown test (its
+        // parse_countdown was byte-identical to parse_non_negative): positive
+        // ints parse, trailing-suffix / alpha reject.
+        assert_eq!(parse_non_negative("3"), Some(3));
+        assert_eq!(parse_non_negative("10"), Some(10));
+        assert_eq!(parse_non_negative("abc"), None);
+        assert_eq!(parse_non_negative("3s"), None);
     }
 
     /// Doctor remediation gating: hints only when NOT ready; the async-prompt

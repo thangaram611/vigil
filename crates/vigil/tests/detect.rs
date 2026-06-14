@@ -31,20 +31,6 @@ fn tsv_blob() -> String {
 }
 
 #[test]
-fn fixture_exists() {
-    assert!(
-        repo_root()
-            .join("tests/fixtures/ps-axww-snapshot.txt")
-            .exists()
-    );
-    assert!(
-        repo_root()
-            .join("tests/fixtures/ps-axww-comm-snapshot.txt")
-            .exists()
-    );
-}
-
-#[test]
 fn picks_up_known_cli_processes() {
     let out = tsv_blob();
     assert!(

@@ -142,6 +142,28 @@ fn chmod(p: &Path, mode: u32) {
     fs::set_permissions(p, perms).unwrap();
 }
 
+/// Shared assertion tail for the §3.3 `invalid_request_file` rejections. The
+/// DISTINCT attack SETUP (symlink / hardlink / group-writable) stays inline in
+/// each test; only the identical tail — `status=error` +
+/// `message=invalid_request_file`, pmset untouched (SleepDisabled stays "0"),
+/// and no leftover request/processing file — is factored here. Every original
+/// assertion is preserved exactly (no contains->eq weakening; the byte-exact
+/// SleepDisabled check stays `assert_eq!`).
+fn assert_invalid_request_file(e: &Env, id: &str) {
+    assert!(
+        e.response(id).contains("status=error"),
+        "{id}: status=error: {}",
+        e.response(id)
+    );
+    assert!(
+        e.response(id).contains("message=invalid_request_file"),
+        "{id}: message=invalid_request_file: {}",
+        e.response(id)
+    );
+    assert_eq!(e.sleepdisabled(), "0", "{id}: pmset untouched");
+    assert!(e.no_leftover(id), "{id}: no leftover request/processing file");
+}
+
 #[test]
 fn status_request_is_ok() {
     let e = Env::new();
@@ -192,10 +214,8 @@ fn symlink_request_rejected() {
     fs::write(&target, "engage\n").unwrap();
     std::os::unix::fs::symlink(&target, e.request_dir.join("req.lnk")).unwrap();
     e.run(false);
-    assert!(e.response("lnk").contains("status=error"));
-    assert!(e.response("lnk").contains("message=invalid_request_file"));
-    assert_eq!(e.sleepdisabled(), "0", "symlink did not change pmset");
-    assert!(e.no_leftover("lnk"));
+    // symlink did not change pmset; rejected + removed.
+    assert_invalid_request_file(&e, "lnk");
 }
 
 #[test]
@@ -206,10 +226,7 @@ fn hardlink_request_rejected() {
     chmod(&target, 0o600);
     fs::hard_link(&target, e.request_dir.join("req.hl")).unwrap();
     e.run(false);
-    assert!(e.response("hl").contains("status=error"));
-    assert!(e.response("hl").contains("message=invalid_request_file"));
-    assert_eq!(e.sleepdisabled(), "0");
-    assert!(e.no_leftover("hl"));
+    assert_invalid_request_file(&e, "hl");
 }
 
 #[test]
@@ -219,10 +236,7 @@ fn group_writable_request_rejected() {
     fs::write(&p, "engage\n").unwrap();
     chmod(&p, 0o660); // group-writable
     e.run(false);
-    assert!(e.response("gw").contains("status=error"));
-    assert!(e.response("gw").contains("message=invalid_request_file"));
-    assert_eq!(e.sleepdisabled(), "0");
-    assert!(e.no_leftover("gw"));
+    assert_invalid_request_file(&e, "gw");
 }
 
 #[test]

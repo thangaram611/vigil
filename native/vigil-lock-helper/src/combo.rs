@@ -609,25 +609,58 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn parse_rejects_too_short_dupes_escape_unknown() {
-        // Below the floor.
-        assert!(
-            parse_chord("ctrl+l").is_err(),
-            "two keys is below the floor"
-        );
-        // Duplicate key (a held key cannot fire twice).
-        assert!(
-            parse_chord("ctrl+l+ctrl").is_err(),
-            "duplicate modifier rejected"
-        );
-        assert!(parse_chord("ctrl+l+l").is_err(), "duplicate key rejected");
-        // Alias of an already-present modifier is still a duplicate.
-        assert!(parse_chord("ctrl+control+l").is_err());
-        // Escape forbidden anywhere.
-        assert!(parse_chord("ctrl+escape+l").is_err());
-        // Unknown / unmapped key.
-        assert!(parse_chord("ctrl+alt+f13").is_err());
-        // Empty token.
-        assert!(parse_chord("ctrl++l").is_err());
+        // (label, input, exact Err message). Asserting the discriminator message
+        // per row strictly increases coverage over a bare is_err() — it pins
+        // WHICH guard fired, not just that one did.
+        let rejects: &[(&str, &str, &str)] = &[
+            // Below the floor (2 keys < MIN_CHORD_KEYS).
+            (
+                "two keys is below the floor",
+                "ctrl+l",
+                "chord must include at least 3 keys",
+            ),
+            // Duplicate modifier (a held key cannot fire twice).
+            (
+                "duplicate modifier rejected",
+                "ctrl+l+ctrl",
+                "duplicate key in chord: ctrl",
+            ),
+            // Duplicate regular key.
+            (
+                "duplicate key rejected",
+                "ctrl+l+l",
+                "duplicate key in chord: l",
+            ),
+            // Alias of an already-present modifier is still a duplicate.
+            (
+                "alias of present modifier is a duplicate",
+                "ctrl+control+l",
+                "duplicate key in chord: control",
+            ),
+            // Escape forbidden anywhere.
+            (
+                "escape forbidden anywhere",
+                "ctrl+escape+l",
+                "escape is not allowed in an unlock chord",
+            ),
+            // Unknown / unmapped key.
+            (
+                "unknown / unmapped key",
+                "ctrl+alt+f13",
+                "unsupported key: f13",
+            ),
+            // Empty token (double `+`).
+            (
+                "empty token rejected",
+                "ctrl++l",
+                "chord tokens cannot be empty",
+            ),
+        ];
+        for (label, input, want_err) in rejects {
+            let err = parse_chord(input)
+                .expect_err(&format!("{label}: {input:?} must be rejected"));
+            assert_eq!(&err, want_err, "{label}: {input:?}");
+        }
     }
 
     #[cfg(target_os = "macos")]

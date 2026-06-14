@@ -77,6 +77,9 @@ fn count_with_vscode_copilot_chat_gated_on_activity_flag() {
 
 #[test]
 fn count_when_all_idle() {
+    // All agent flags false: every cli-* is gated out and only the wrapper counts,
+    // both alongside idle agents AND as the lone entry (wrapper ALWAYS counts,
+    // regardless of agent flags — formerly wrappers_count_regardless_of_agent_flags).
     let (_d, a) = seed(&[
         "cli-claude-1001",
         "cli-claude-1002",
@@ -84,6 +87,14 @@ fn count_when_all_idle() {
         "wrapper-1004",
     ]);
     assert_eq!(count(&a, false, false, false, false), 1, "wrapper only");
+
+    // Lone-wrapper branch: no agents present at all.
+    let (_d2, b) = seed(&["wrapper-1234"]);
+    assert_eq!(
+        count(&b, false, false, false, false),
+        1,
+        "lone wrapper counts with all flags false"
+    );
 }
 
 #[test]
@@ -120,12 +131,6 @@ fn filename_parser_handles_all_prefixes() {
         6,
         "all six prefixes count"
     );
-}
-
-#[test]
-fn wrappers_count_regardless_of_agent_flags() {
-    let (_d, a) = seed(&["wrapper-1234"]);
-    assert_eq!(count(&a, false, false, false, false), 1);
 }
 
 // ── field extraction (parser_test) ──────────────────────────────────────────

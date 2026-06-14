@@ -126,58 +126,105 @@ mod tests {
         cfg
     }
 
+    /// Table-driven bootout-poll coverage. One row per scenario:
+    /// - polls until `print` fails (loaded_for=4): 1 initial + 4 poll prints
+    ///   (3 loaded + 1 unloaded) ⇒ 3 sleeps, booted out, print_calls==5.
+    /// - always-loaded (loaded_for=usize::MAX): bounded at exactly
+    ///   BOOTOUT_POLL_MAX sleeps, booted out.
+    /// - never-loaded (loaded_for=0): idempotent — no bootout, no poll.
+    ///
+    /// The non-uniform extra assertions are modeled as per-row `Option` fields:
+    /// `expect_print_calls` (only checked for the first scenario) and
+    /// `expect_sleeps_is_poll_max` (the second scenario, where sleeps must equal
+    /// BOOTOUT_POLL_MAX rather than a fixed count). The `BOOTOUT_POLL_MAX == 50`
+    /// literal assertion is kept once, after the loop.
     #[test]
-    fn bootout_polls_until_print_fails() {
-        // print#0 = initial load check (loaded). bootout. Then poll: print#1..#3
-        // loaded (3 sleeps), print#4 unloaded → break. loaded_for = 4.
-        let obs = Rc::new(RefCell::new(Obs::default()));
-        let lc = ScriptedLaunchctl {
-            obs: Rc::clone(&obs),
-            loaded_for: 4,
-        };
-        let installer = MacosLaunchdInstaller::with_launchctl(lc);
-        let cfg = test_cfg();
-        let state = installer.stop_user_agent(&cfg).unwrap();
-        assert_eq!(state, StopState::BootedOut);
-        let o = obs.borrow();
-        assert!(o.booted_out, "bootout must be called when loaded");
-        assert_eq!(o.sleeps, 3, "must poll (sleep) until print fails");
-        // 5 prints total: 1 initial + 4 poll iterations (3 loaded + 1 unloaded).
-        assert_eq!(o.print_calls, 5);
-    }
+    fn bootout_poll_table() {
+        // (label, loaded_for, expect_state, expect_booted_out, expect_sleeps,
+        //  expect_sleeps_is_poll_max, expect_print_calls)
+        struct Case {
+            label: &'static str,
+            loaded_for: usize,
+            expect_state: StopState,
+            expect_booted_out: bool,
+            // Fixed sleep count when known; None when the count is the dynamic
+            // BOOTOUT_POLL_MAX (see expect_sleeps_is_poll_max).
+            expect_sleeps: Option<usize>,
+            // True iff sleeps must equal BOOTOUT_POLL_MAX (always-loaded bound).
+            expect_sleeps_is_poll_max: bool,
+            // Only the polls-until-fail case pins the exact print_calls total.
+            expect_print_calls: Option<usize>,
+        }
 
-    #[test]
-    fn bootout_poll_is_bounded_at_50() {
-        // Always-loaded: the poll must stop after exactly BOOTOUT_POLL_MAX sleeps.
-        let obs = Rc::new(RefCell::new(Obs::default()));
-        let lc = ScriptedLaunchctl {
-            obs: Rc::clone(&obs),
-            loaded_for: usize::MAX,
-        };
-        let installer = MacosLaunchdInstaller::with_launchctl(lc);
-        let cfg = test_cfg();
-        installer.stop_user_agent(&cfg).unwrap();
-        let o = obs.borrow();
-        assert_eq!(
-            o.sleeps, BOOTOUT_POLL_MAX,
-            "always-loaded poll must be bounded at 50×100ms"
-        );
+        let cases = [
+            // print#0 = initial load check (loaded). bootout. Then poll:
+            // print#1..#3 loaded (3 sleeps), print#4 unloaded → break.
+            Case {
+                label: "polls until print fails",
+                loaded_for: 4,
+                expect_state: StopState::BootedOut,
+                expect_booted_out: true,
+                expect_sleeps: Some(3),
+                expect_sleeps_is_poll_max: false,
+                // 5 prints: 1 initial + 4 poll iterations (3 loaded + 1 unloaded).
+                expect_print_calls: Some(5),
+            },
+            // Always-loaded: the poll must stop after exactly BOOTOUT_POLL_MAX
+            // sleeps (50×100ms).
+            Case {
+                label: "bounded at BOOTOUT_POLL_MAX",
+                loaded_for: usize::MAX,
+                expect_state: StopState::BootedOut,
+                expect_booted_out: true,
+                expect_sleeps: None,
+                expect_sleeps_is_poll_max: true,
+                expect_print_calls: None,
+            },
+            // Never loaded → idempotent: no bootout, no poll.
+            Case {
+                label: "not loaded is idempotent",
+                loaded_for: 0,
+                expect_state: StopState::NotLoaded,
+                expect_booted_out: false,
+                expect_sleeps: Some(0),
+                expect_sleeps_is_poll_max: false,
+                expect_print_calls: None,
+            },
+        ];
+
+        for c in &cases {
+            let obs = Rc::new(RefCell::new(Obs::default()));
+            let lc = ScriptedLaunchctl {
+                obs: Rc::clone(&obs),
+                loaded_for: c.loaded_for,
+            };
+            let installer = MacosLaunchdInstaller::with_launchctl(lc);
+            let cfg = test_cfg();
+            let state = installer.stop_user_agent(&cfg).unwrap();
+            assert_eq!(state, c.expect_state, "{}: state", c.label);
+            let o = obs.borrow();
+            assert_eq!(
+                o.booted_out, c.expect_booted_out,
+                "{}: booted_out",
+                c.label
+            );
+            if let Some(sleeps) = c.expect_sleeps {
+                assert_eq!(o.sleeps, sleeps, "{}: sleeps", c.label);
+            }
+            if c.expect_sleeps_is_poll_max {
+                assert_eq!(
+                    o.sleeps, BOOTOUT_POLL_MAX,
+                    "{}: always-loaded poll must be bounded at 50×100ms",
+                    c.label
+                );
+            }
+            if let Some(print_calls) = c.expect_print_calls {
+                assert_eq!(o.print_calls, print_calls, "{}: print_calls", c.label);
+            }
+        }
+
+        // The BOOTOUT_POLL_MAX literal assertion (kept once, from the original
+        // bootout_poll_is_bounded_at_50 test).
         assert_eq!(BOOTOUT_POLL_MAX, 50);
-    }
-
-    #[test]
-    fn not_loaded_is_idempotent() {
-        let obs = Rc::new(RefCell::new(Obs::default()));
-        let lc = ScriptedLaunchctl {
-            obs: Rc::clone(&obs),
-            loaded_for: 0, // never loaded
-        };
-        let installer = MacosLaunchdInstaller::with_launchctl(lc);
-        let cfg = test_cfg();
-        let state = installer.stop_user_agent(&cfg).unwrap();
-        assert_eq!(state, StopState::NotLoaded);
-        let o = obs.borrow();
-        assert!(!o.booted_out, "bootout must NOT run when not loaded");
-        assert_eq!(o.sleeps, 0, "no poll when not loaded");
     }
 }

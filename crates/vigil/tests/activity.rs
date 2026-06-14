@@ -9,9 +9,7 @@ use std::time::{Duration, SystemTime};
 use vigil::activity::scan::{
     Agent, AgentState, agent_state, is_active, latest_activity_age_secs, session_dir_from_home,
 };
-use vigil::activity::vscode::{
-    RecentFile, VscodeState, chat_is_active, host_running, sha256_hex, vscode_transition,
-};
+use vigil::activity::vscode::{VscodeState, chat_is_active, host_running};
 
 fn now_unix() -> i64 {
     SystemTime::now()
@@ -44,66 +42,88 @@ fn session_dir_for_known_agents() {
     }
 }
 
-#[test]
-fn patterns_for_each_agent() {
-    assert!(Agent::Claude.pattern().matches("abc.jsonl"));
-    assert!(Agent::Codex.pattern().matches("rollout-x.jsonl"));
-    assert!(Agent::Copilot.pattern().matches("events.jsonl"));
-    assert!(!Agent::Copilot.pattern().matches("notes.txt"));
-}
-
 // ── is_active / agent_state ─────────────────────────────────────────────────
 
 #[test]
-fn agent_active_when_recent_jsonl() {
-    let home = tempfile::tempdir().unwrap();
-    let dir = home.path().join(".claude/projects/some-cwd");
-    std::fs::create_dir_all(&dir).unwrap();
-    File::create(dir.join("abc.jsonl")).unwrap(); // mtime = now
-    let sdir = session_dir_from_home(Agent::Claude, home.path());
-    assert!(is_active(&sdir, Agent::Claude.pattern(), 300, now_unix()));
-}
-
-#[test]
-fn agent_inactive_when_old_file() {
-    let home = tempfile::tempdir().unwrap();
-    let dir = home.path().join(".claude/projects/some-cwd");
-    std::fs::create_dir_all(&dir).unwrap();
-    let f = dir.join("abc.jsonl");
-    File::create(&f).unwrap();
-    set_mtime(&f, 946684800); // 2000-01-01
-    let sdir = session_dir_from_home(Agent::Claude, home.path());
-    assert!(!is_active(&sdir, Agent::Claude.pattern(), 300, now_unix()));
-}
-
-#[test]
-fn agent_inactive_when_dir_missing() {
-    let home = tempfile::tempdir().unwrap();
-    let sdir = session_dir_from_home(Agent::Claude, home.path());
-    assert!(!is_active(&sdir, Agent::Claude.pattern(), 300, now_unix()));
-}
-
-#[test]
-fn agent_active_for_codex_subdir_layout() {
-    let home = tempfile::tempdir().unwrap();
-    let dir = home.path().join(".codex/sessions/2026/05/06");
-    std::fs::create_dir_all(&dir).unwrap();
-    File::create(dir.join("rollout-2026-05-06T10-10-10-uuid.jsonl")).unwrap();
-    let sdir = session_dir_from_home(Agent::Codex, home.path());
-    assert!(
-        is_active(&sdir, Agent::Codex.pattern(), 300, now_unix()),
-        "codex deep subdir must be detected (recursive)"
-    );
-}
-
-#[test]
-fn pattern_filter_rejects_wrong_extension() {
-    let home = tempfile::tempdir().unwrap();
-    let dir = home.path().join(".copilot/session-state/abc-uuid");
-    std::fs::create_dir_all(&dir).unwrap();
-    File::create(dir.join("notes.txt")).unwrap();
-    let sdir = session_dir_from_home(Agent::Copilot, home.path());
-    assert!(!is_active(&sdir, Agent::Copilot.pattern(), 300, now_unix()));
+fn is_active_scenarios() {
+    // Each row builds a fresh temp HOME, runs its `setup` closure (which creates
+    // the session dir/file layout under that HOME and returns the agent to scan),
+    // then asserts `is_active` against the resolved session dir. `setup` returning
+    // `None` for the agent means "create nothing" (dir-missing case). The two
+    // active rows create the file with mtime=now (no `set_mtime`) and are mildly
+    // time-sensitive, so their setup is preserved byte-for-byte from the originals.
+    struct Case {
+        label: &'static str,
+        agent: Agent,
+        setup: fn(&Path),
+        want_active: bool,
+    }
+    let cases: &[Case] = &[
+        Case {
+            // agent_active_when_recent_jsonl
+            label: "claude recent jsonl is active",
+            agent: Agent::Claude,
+            setup: |home| {
+                let dir = home.join(".claude/projects/some-cwd");
+                std::fs::create_dir_all(&dir).unwrap();
+                File::create(dir.join("abc.jsonl")).unwrap(); // mtime = now
+            },
+            want_active: true,
+        },
+        Case {
+            // agent_inactive_when_old_file
+            label: "claude old jsonl is inactive",
+            agent: Agent::Claude,
+            setup: |home| {
+                let dir = home.join(".claude/projects/some-cwd");
+                std::fs::create_dir_all(&dir).unwrap();
+                let f = dir.join("abc.jsonl");
+                File::create(&f).unwrap();
+                set_mtime(&f, 946684800); // 2000-01-01
+            },
+            want_active: false,
+        },
+        Case {
+            // agent_inactive_when_dir_missing
+            label: "claude missing dir is inactive",
+            agent: Agent::Claude,
+            setup: |_home| {},
+            want_active: false,
+        },
+        Case {
+            // agent_active_for_codex_subdir_layout (recursive deep subdir)
+            label: "codex deep subdir must be detected (recursive)",
+            agent: Agent::Codex,
+            setup: |home| {
+                let dir = home.join(".codex/sessions/2026/05/06");
+                std::fs::create_dir_all(&dir).unwrap();
+                File::create(dir.join("rollout-2026-05-06T10-10-10-uuid.jsonl")).unwrap();
+            },
+            want_active: true,
+        },
+        Case {
+            // pattern_filter_rejects_wrong_extension
+            label: "copilot wrong extension is rejected",
+            agent: Agent::Copilot,
+            setup: |home| {
+                let dir = home.join(".copilot/session-state/abc-uuid");
+                std::fs::create_dir_all(&dir).unwrap();
+                File::create(dir.join("notes.txt")).unwrap();
+            },
+            want_active: false,
+        },
+    ];
+    for c in cases {
+        let home = tempfile::tempdir().unwrap();
+        (c.setup)(home.path());
+        let sdir = session_dir_from_home(c.agent, home.path());
+        assert_eq!(
+            is_active(&sdir, c.agent.pattern(), 300, now_unix()),
+            c.want_active,
+            "{}",
+            c.label
+        );
+    }
 }
 
 #[test]
@@ -266,23 +286,3 @@ fn vscode_state_is_none_without_host() {
     );
 }
 
-#[test]
-fn sha256_spot_check() {
-    assert_eq!(
-        sha256_hex(b"abc"),
-        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-    );
-}
-
-#[test]
-fn vscode_transition_primed_first_run_suppression() {
-    // Pure-core cross-check of primed-first-run suppression.
-    let prior = VscodeState::default(); // primed = false
-    let current = vec![RecentFile {
-        path: "/x".into(),
-        sha256: "h1".into(),
-    }];
-    let (new, active) = vscode_transition(&prior, &current, 1000, 300, 5);
-    assert!(!active);
-    assert!(new.unwrap().primed, "first run must set primed");
-}
