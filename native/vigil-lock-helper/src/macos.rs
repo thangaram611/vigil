@@ -716,17 +716,34 @@ mod tests {
 
     #[test]
     fn cg_flags_to_mod_bits_maps_the_four_chord_modifiers() {
-        let all = CGEventFlags::MaskControl
-            | CGEventFlags::MaskAlternate
-            | CGEventFlags::MaskShift
-            | CGEventFlags::MaskCommand;
-        assert_eq!(
-            cg_flags_to_mod_bits(all),
-            combo::MOD_CONTROL | combo::MOD_OPTION | combo::MOD_SHIFT | combo::MOD_COMMAND
-        );
-        assert_eq!(
-            cg_flags_to_mod_bits(CGEventFlags::MaskControl | CGEventFlags::MaskCommand),
-            combo::MOD_CONTROL | combo::MOD_COMMAND
-        );
+        // Each CGEventFlags mask maps to its compact MOD_* bit — tested in
+        // isolation and empty (adds coverage), plus the two original combinations.
+        let cases: &[(&str, CGEventFlags, u8)] = &[
+            ("empty", CGEventFlags::empty(), 0),
+            ("control", CGEventFlags::MaskControl, combo::MOD_CONTROL),
+            (
+                "option/alternate",
+                CGEventFlags::MaskAlternate,
+                combo::MOD_OPTION,
+            ),
+            ("shift", CGEventFlags::MaskShift, combo::MOD_SHIFT),
+            ("command", CGEventFlags::MaskCommand, combo::MOD_COMMAND),
+            (
+                "all four",
+                CGEventFlags::MaskControl
+                    | CGEventFlags::MaskAlternate
+                    | CGEventFlags::MaskShift
+                    | CGEventFlags::MaskCommand,
+                combo::MOD_CONTROL | combo::MOD_OPTION | combo::MOD_SHIFT | combo::MOD_COMMAND,
+            ),
+            (
+                "control+command",
+                CGEventFlags::MaskControl | CGEventFlags::MaskCommand,
+                combo::MOD_CONTROL | combo::MOD_COMMAND,
+            ),
+        ];
+        for &(label, flags, want) in cases {
+            assert_eq!(cg_flags_to_mod_bits(flags), want, "{label}");
+        }
     }
 }

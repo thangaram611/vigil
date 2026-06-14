@@ -143,24 +143,29 @@ fn run_creates_pidfile_during_child_and_removes_after() {
 /// exit path).
 #[test]
 fn run_propagates_child_exit_code_and_cleans_up() {
-    let sb = Sandbox::new("exitcode");
-    let active = sb.active_dir();
-
-    let mut cmd = bin();
-    sb.apply_env(&mut cmd);
-    cmd.args(["run", "sh", "-c", "exit 7"]);
-    let status = cmd.status().expect("run vigil run sh -c exit 7");
-
-    assert_eq!(
-        status.code(),
-        Some(7),
-        "vigil run must propagate the child's exit code (7)"
-    );
-    // The wrapper pidfile must be gone on the normal exit path (RAII guard ran).
-    assert!(
-        wrapper_pidfiles(&active).is_empty(),
-        "wrapper pidfile must be removed on normal child exit (non-exec cleanup)"
-    );
+    // `vigil run <cmd>` propagates the child's exit code AND removes the wrapper
+    // pidfile on the normal exit path (RAII guard ran) — for both a success (0)
+    // and a non-zero exit (7). (The zero-arg usage-die path is asserted below.)
+    let cases: &[(&str, &[&str], i32)] = &[
+        ("zero", &["run", "true"], 0),
+        ("exitcode", &["run", "sh", "-c", "exit 7"], 7),
+    ];
+    for &(label, args, want) in cases {
+        let sb = Sandbox::new(label);
+        let mut cmd = bin();
+        sb.apply_env(&mut cmd);
+        cmd.args(args);
+        let status = cmd.status().expect("run vigil run <cmd>");
+        assert_eq!(
+            status.code(),
+            Some(want),
+            "{label}: vigil run must propagate the child exit code {want}"
+        );
+        assert!(
+            wrapper_pidfiles(&sb.active_dir()).is_empty(),
+            "{label}: wrapper pidfile must be removed on normal child exit"
+        );
+    }
 }
 
 /// Zero args → usage die, exit 1, no pidfile written.
@@ -181,18 +186,6 @@ fn run_zero_args_usage_dies_exit_1() {
         wrapper_pidfiles(&sb.active_dir()).is_empty(),
         "usage death must not leave a wrapper pidfile"
     );
-}
-
-/// `vigil run sh -c 'exit 0'` propagates 0 (the happy path) and cleans up.
-#[test]
-fn run_success_propagates_zero() {
-    let sb = Sandbox::new("zero");
-    let mut cmd = bin();
-    sb.apply_env(&mut cmd);
-    cmd.args(["run", "true"]);
-    let status = cmd.status().expect("run vigil run true");
-    assert_eq!(status.code(), Some(0), "successful child propagates 0");
-    assert!(wrapper_pidfiles(&sb.active_dir()).is_empty());
 }
 
 /// `vigil log` on a missing log prints the soft message to STDOUT and exits 0.

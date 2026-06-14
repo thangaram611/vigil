@@ -55,22 +55,75 @@ fn picks_up_known_cli_processes() {
 }
 
 #[test]
-fn excludes_claude_app_main() {
+fn tsv_blob_excludes_non_agents() {
+    // Substrings that must NOT appear in the detected TSV: the bundled app
+    // mains/servers and the Electron-helper / node-REPL / crashpad noise. Each
+    // former negative test is one needle row. (The AppVscodeCopilotChat helper
+    // negative is an AgentKind check, not a substring, and stays separate.)
     let out = tsv_blob();
-    assert!(
-        !out.contains("/Applications/Claude.app/Contents/MacOS/Claude"),
-        "should NOT detect Claude.app main"
-    );
+    let needles: &[&str] = &[
+        "/Applications/Claude.app/Contents/MacOS/Claude", // Claude.app main
+        "/Applications/Codex.app/Contents/Resources/codex", // Codex bundled app-server
+        "copilot-acp-daemon",                             // copilot-companion node router
+        "Helper",                                         // Electron helpers
+        "node_repl",
+        "crashpad",
+        "chrome-native-host",
+    ];
+    for needle in needles {
+        assert!(!out.contains(needle), "TSV must NOT contain {needle:?}");
+    }
 }
 
 #[test]
-fn detects_codex_app_as_app_codex() {
-    let row = detect_fixtures()
-        .into_iter()
-        .find(|m| m.pid == 18355)
-        .unwrap();
-    assert_eq!(row.kind, AgentKind::AppCodex);
-    assert_eq!(row.exe, "/Applications/Codex.app/Contents/MacOS/Codex");
+fn detects_known_pids_with_kind_exe_and_args() {
+    // Each fixture pid resolves to an exact kind + exe (the spaced bundled paths
+    // are load-bearing, so exe is assert_eq! not contains); when an arg substring
+    // is given it must survive in args, and the AppCodex row (None) skips the arg
+    // check. The synthetic chat-host / vscode-helper / detect_line tests assert
+    // different shapes and stay separate.
+    let fixtures = detect_fixtures();
+    let cases: &[(u32, AgentKind, &str, Option<&str>)] = &[
+        (
+            18355,
+            AgentKind::AppCodex,
+            "/Applications/Codex.app/Contents/MacOS/Codex",
+            None,
+        ),
+        (
+            3670,
+            AgentKind::CliCopilot,
+            "/opt/homebrew/bin/copilot",
+            Some("--acp"),
+        ),
+        (
+            87838,
+            AgentKind::CliClaude,
+            "/Users/thanga-5521/Library/Application Support/Claude/claude-code/2.1.142/claude.app/Contents/MacOS/claude",
+            Some("--output-format stream-json"),
+        ),
+        (
+            31322,
+            AgentKind::CliCodex,
+            "/Users/thanga-5521/.vscode-insiders/extensions/openai.chatgpt-26.5519.32039-darwin-arm64/bin/macos-aarch64/codex",
+            Some("app-server"),
+        ),
+    ];
+    for (pid, kind, exe, arg_substr) in cases {
+        let row = fixtures
+            .iter()
+            .find(|m| m.pid == *pid)
+            .unwrap_or_else(|| panic!("pid {pid} not detected"));
+        assert_eq!(&row.kind, kind, "pid {pid} kind");
+        assert_eq!(row.exe, *exe, "pid {pid} exe");
+        if let Some(sub) = arg_substr {
+            assert!(
+                row.args.contains(*sub),
+                "pid {pid} args must contain {sub:?}: {}",
+                row.args
+            );
+        }
+    }
 }
 
 #[test]
@@ -92,82 +145,6 @@ fn does_not_detect_vscode_helper_as_copilot_chat_host() {
         !out.iter()
             .any(|m| m.kind == AgentKind::AppVscodeCopilotChat),
         "VS Code helpers must not be host anchors"
-    );
-}
-
-#[test]
-fn excludes_helpers_and_node_repl() {
-    let out = tsv_blob();
-    assert!(!out.contains("Helper"), "no Electron helpers");
-    assert!(!out.contains("node_repl"), "no node_repl");
-    assert!(!out.contains("crashpad"), "no crashpad");
-    assert!(!out.contains("chrome-native-host"), "no chrome-native-host");
-}
-
-#[test]
-fn excludes_codex_app_server() {
-    let out = tsv_blob();
-    assert!(
-        !out.contains("/Applications/Codex.app/Contents/Resources/codex"),
-        "should NOT detect Codex bundled app-server"
-    );
-}
-
-#[test]
-fn excludes_copilot_companion_node() {
-    let out = tsv_blob();
-    assert!(
-        !out.contains("copilot-acp-daemon"),
-        "should NOT detect copilot-companion node router daemon"
-    );
-}
-
-#[test]
-fn picks_up_copilot_companion_acp_worker() {
-    let row = detect_fixtures()
-        .into_iter()
-        .find(|m| m.pid == 3670)
-        .unwrap();
-    assert_eq!(row.kind, AgentKind::CliCopilot);
-    assert_eq!(row.exe, "/opt/homebrew/bin/copilot");
-    assert!(
-        row.args.contains("--acp"),
-        "args must preserve --acp marker"
-    );
-}
-
-#[test]
-fn picks_up_claude_app_lam_bundled_cc() {
-    let row = detect_fixtures()
-        .into_iter()
-        .find(|m| m.pid == 87838)
-        .unwrap();
-    assert_eq!(row.kind, AgentKind::CliClaude);
-    assert_eq!(
-        row.exe,
-        "/Users/thanga-5521/Library/Application Support/Claude/claude-code/2.1.142/claude.app/Contents/MacOS/claude",
-        "exe must preserve the spaced bundled-CC path"
-    );
-    assert!(
-        row.args.contains("--output-format stream-json"),
-        "args must preserve LAM-mode CC flags"
-    );
-}
-
-#[test]
-fn picks_up_vscode_chatgpt_extension_codex_worker() {
-    let row = detect_fixtures()
-        .into_iter()
-        .find(|m| m.pid == 31322)
-        .unwrap();
-    assert_eq!(row.kind, AgentKind::CliCodex);
-    assert_eq!(
-        row.exe,
-        "/Users/thanga-5521/.vscode-insiders/extensions/openai.chatgpt-26.5519.32039-darwin-arm64/bin/macos-aarch64/codex"
-    );
-    assert!(
-        row.args.contains("app-server"),
-        "args must preserve app-server subcommand"
     );
 }
 

@@ -60,42 +60,35 @@ fn esc_count(bytes: &[u8]) -> usize {
     bytes.iter().filter(|&&b| b == 0x1b).count()
 }
 
-/// Under a real tty, `--color=never` MUST strip clap's styled help to zero ESC
-/// bytes — proving the flag governs help/version/error rendering (which clap
-/// produces during parsing) and is not a no-op masked by the non-tty default.
+/// Under a real tty, `--color` MUST govern clap's styled help rendering (which
+/// clap produces during parsing) — not a no-op masked by the non-tty Auto
+/// default. `never` strips to zero ESC bytes; `always` emits ANSI; subcommand
+/// help is governed too. Each row carries `want_ansi` so the assertion DIRECTION
+/// (esc==0 vs esc>0) is preserved per case.
 #[cfg(unix)]
 #[test]
-fn color_never_strips_help_under_tty() {
-    let bytes = run_under_tty(&["--color=never", "--help"]);
-    assert_eq!(
-        esc_count(&bytes),
-        0,
-        "--color=never must emit zero ESC bytes for help under a tty"
-    );
-}
-
-/// Companion forcing-side check: under a real tty, `--color=always` MUST emit
-/// ANSI for the styled help, so the contract is exercised in both directions.
-#[cfg(unix)]
-#[test]
-fn color_always_emits_help_ansi_under_tty() {
-    let bytes = run_under_tty(&["--color=always", "--help"]);
-    assert!(
-        esc_count(&bytes) > 0,
-        "--color=always must emit ANSI for help under a tty"
-    );
-}
-
-/// Subcommand help is styled output the flag must govern too.
-#[cfg(unix)]
-#[test]
-fn color_never_strips_subcommand_help_under_tty() {
-    let bytes = run_under_tty(&["--color=never", "status", "--help"]);
-    assert_eq!(
-        esc_count(&bytes),
-        0,
-        "--color=never must strip subcommand help ANSI under a tty"
-    );
+fn color_flag_governs_styled_output_under_tty() {
+    let cases: &[(&[&str], bool, &str)] = &[
+        (&["--color=never", "--help"], false, "never strips help"),
+        (
+            &["--color=always", "--help"],
+            true,
+            "always emits help ANSI",
+        ),
+        (
+            &["--color=never", "status", "--help"],
+            false,
+            "never strips subcommand help",
+        ),
+    ];
+    for &(args, want_ansi, label) in cases {
+        let esc = esc_count(&run_under_tty(args));
+        if want_ansi {
+            assert!(esc > 0, "{label}: expected ANSI under a tty");
+        } else {
+            assert_eq!(esc, 0, "{label}: expected zero ESC bytes under a tty");
+        }
+    }
 }
 
 #[test]

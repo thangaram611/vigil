@@ -930,39 +930,58 @@ mod tests {
         tempfile::tempdir().expect("tempdir")
     }
 
+    /// Common env-test scaffold: hold the env lock, make a temp HOME, bind `HOME`
+    /// to it and clear `VIGIL_CONFIG_FILE`. Returns `(guard, tempdir, conf_path)`;
+    /// keep the guard + tempdir alive for the test. Callers set/remove their OWN
+    /// extra env vars after this and assert their own results.
+    fn fixture() -> (
+        std::sync::MutexGuard<'static, ()>,
+        tempfile::TempDir,
+        std::path::PathBuf,
+    ) {
+        let g = lock_env();
+        let tmp = make_tmp_home();
+        let conf = tmp.path().join("vigil.conf");
+        // SAFETY: serialized by ENV_LOCK held in `g`.
+        unsafe {
+            std::env::set_var("HOME", tmp.path());
+            std::env::remove_var("VIGIL_CONFIG_FILE");
+        }
+        (g, tmp, conf)
+    }
+
     // ── Env-split footgun guard ───────────────────────────────────────────────
 
     #[test]
-    fn env_split_idle_after_sec() {
-        let _g = lock_env();
-        let tmp = make_tmp_home();
-        let home = tmp.path().to_str().unwrap();
-        let conf = tmp.path().join("vigil.conf");
-        unsafe {
-            std::env::set_var("HOME", home);
-            std::env::set_var("VIGIL_IDLE_AFTER_SEC", "999");
-            std::env::remove_var("VIGIL_CONFIG_FILE");
+    fn env_split_scalar_knobs_bind_via_double_underscore() {
+        // VIGIL_* scalars bind through Env::prefixed("VIGIL_").split("__"). One row
+        // per former env_split_* scalar test; each sets+removes ONLY its own var
+        // under the single held env lock. (The thermal-floor env-split tests assert
+        // the extra to_kv_map emit/omit and stay standalone.)
+        let (_g, _tmp, conf) = fixture();
+        let conf = conf.to_str().unwrap();
+        #[allow(clippy::type_complexity)]
+        let cases: &[(&str, &str, fn(&VigilConfig) -> String)] = &[
+            ("VIGIL_IDLE_AFTER_SEC", "999", |c| {
+                c.idle_after_sec.to_string()
+            }),
+            ("VIGIL_POWER_HELPER_TIMEOUT_SECS", "42", |c| {
+                c.power_helper_timeout_secs.to_string()
+            }),
+        ];
+        for (key, value, extract) in cases {
+            unsafe { std::env::set_var(key, value) };
+            let cfg = load(conf, None).expect("load");
+            unsafe { std::env::remove_var(key) };
+            assert_eq!(&extract(&cfg), value, "{key} must bind via __ split");
         }
-        let cfg = load(conf.to_str().unwrap(), None).expect("load");
-        unsafe {
-            std::env::remove_var("VIGIL_IDLE_AFTER_SEC");
-        }
-        assert_eq!(
-            cfg.idle_after_sec, 999,
-            "VIGIL_IDLE_AFTER_SEC must bind via __ split"
-        );
     }
 
     #[test]
     fn env_split_thermal_cpu_limit_floor() {
-        let _g = lock_env();
-        let tmp = make_tmp_home();
-        let home = tmp.path().to_str().unwrap();
-        let conf = tmp.path().join("vigil.conf");
+        let (_g, _tmp, conf) = fixture();
         unsafe {
-            std::env::set_var("HOME", home);
             std::env::set_var("VIGIL_THERMAL_CPU_LIMIT_FLOOR", "75");
-            std::env::remove_var("VIGIL_CONFIG_FILE");
         }
         let cfg = load(conf.to_str().unwrap(), None).expect("load");
         unsafe {
@@ -984,14 +1003,9 @@ mod tests {
 
     #[test]
     fn thermal_cpu_limit_floor_unset_by_default() {
-        let _g = lock_env();
-        let tmp = make_tmp_home();
-        let home = tmp.path().to_str().unwrap();
-        let conf = tmp.path().join("vigil.conf");
+        let (_g, _tmp, conf) = fixture();
         unsafe {
-            std::env::set_var("HOME", home);
             std::env::remove_var("VIGIL_THERMAL_CPU_LIMIT_FLOOR");
-            std::env::remove_var("VIGIL_CONFIG_FILE");
         }
         let cfg = load(conf.to_str().unwrap(), None).expect("load");
         assert_eq!(
@@ -1001,26 +1015,8 @@ mod tests {
         assert!(
             !cfg.to_kv_map()
                 .contains_key("VIGIL_THERMAL_CPU_LIMIT_FLOOR"),
-            "to_kv_map OMITS the key when None (keeps config_parity_test green)"
+            "to_kv_map OMITS the key when None"
         );
-    }
-
-    #[test]
-    fn env_split_power_helper_timeout() {
-        let _g = lock_env();
-        let tmp = make_tmp_home();
-        let home = tmp.path().to_str().unwrap();
-        let conf = tmp.path().join("vigil.conf");
-        unsafe {
-            std::env::set_var("HOME", home);
-            std::env::set_var("VIGIL_POWER_HELPER_TIMEOUT_SECS", "42");
-            std::env::remove_var("VIGIL_CONFIG_FILE");
-        }
-        let cfg = load(conf.to_str().unwrap(), None).expect("load");
-        unsafe {
-            std::env::remove_var("VIGIL_POWER_HELPER_TIMEOUT_SECS");
-        }
-        assert_eq!(cfg.power_helper_timeout_secs, 42);
     }
 
     // ── Provider-home cascade cases ───────────────────────────────────────────

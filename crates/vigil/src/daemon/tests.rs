@@ -189,6 +189,20 @@ impl Harness {
             caffeinate_pidfile: self.caffeinate_pidfile.clone(),
         }
     }
+    /// Like [`Self::machine`] but with an injected IPC seam (e.g. a failing helper)
+    /// reusing the harness's tempdir-backed caffeinate/sleep/baseline paths.
+    fn machine_with_ipc<'a, I: HelperClient>(
+        &'a self,
+        ipc: &'a I,
+    ) -> PowerMachine<'a, I, FakeCaffeinate, FakeSleep> {
+        PowerMachine {
+            ipc,
+            caffeinate: &self.caffeinate,
+            sleep: &self.sleep,
+            baseline_file: self.baseline_file.clone(),
+            caffeinate_pidfile: self.caffeinate_pidfile.clone(),
+        }
+    }
     fn sd(&self) -> u8 {
         std::fs::read_to_string(&self.sleep_file)
             .map(|s| if s.trim() == "1" { 1 } else { 0 })
@@ -293,56 +307,40 @@ fn act_release_thermal_is_soft_and_keeps_baseline() {
 
 // ── act-branch: release priority — BATTERY → FULL (clear baseline) ────────────
 
-#[test]
-fn act_release_battery_is_full_and_clears_baseline() {
-    let h = Harness::new(0);
-    let m = h.machine();
-    m.engage(NOW).unwrap();
-    // thermal=false, battery=true → FULL release (clear baseline).
-    let engaged = act(
-        &m,
-        false,
-        true,
-        3,
-        false,
-        true,
-        /*battery*/ 60,
-        "on battery 18% (floor 20%)",
-        ActivityFlags::default(),
-        NOW,
-    );
-    assert!(!engaged, "release → engaged=false");
-    assert!(
-        !h.baseline_file.exists(),
-        "BATTERY full release CLEARS baseline.json"
-    );
-}
-
-// ── act-branch: release priority — count==0 → FULL (clear baseline) ───────────
+// ── act-branch: FULL release (clear baseline) — battery cut OR count==0 idle ──
 
 #[test]
-fn act_release_no_agents_is_full_and_clears_baseline() {
-    let h = Harness::new(0);
-    let m = h.machine();
-    m.engage(NOW).unwrap();
-    // thermal=false, battery=false, count==0 → FULL release.
-    let engaged = act(
-        &m,
-        false,
-        true,
-        0,
-        /*count*/ false,
-        false,
-        60,
-        "on AC",
-        ActivityFlags::default(),
-        NOW,
-    );
-    assert!(!engaged, "release → engaged=false");
-    assert!(
-        !h.baseline_file.exists(),
-        "count==0 full release CLEARS baseline.json"
-    );
+fn act_full_release_clears_baseline() {
+    // Both a battery cut (count>0) and a count==0 idle drop are FULL releases that
+    // CLEAR baseline.json. (The thermal SOFT release and the thermal-wins priority
+    // case assert different post-state and stay separate.) Each row engages first,
+    // then fires its own FULL-release trigger.
+    let cases: &[(&str, u32, bool, &str)] = &[
+        ("battery cut", 3, true, "on battery 18% (floor 20%)"),
+        ("no agents", 0, false, "on AC"),
+    ];
+    for (label, count, cut_battery, summary) in cases {
+        let h = Harness::new(0);
+        let m = h.machine();
+        m.engage(NOW).unwrap();
+        let engaged = act(
+            &m,
+            false, // desired
+            true,  // engaged
+            *count,
+            false, // cut_thermal
+            *cut_battery,
+            60,
+            summary,
+            ActivityFlags::default(),
+            NOW,
+        );
+        assert!(!engaged, "{label}: release → engaged=false");
+        assert!(
+            !h.baseline_file.exists(),
+            "{label}: FULL release CLEARS baseline.json"
+        );
+    }
 }
 
 // ── release priority is ordered: thermal WINS over battery+count ──────────────
@@ -409,23 +407,9 @@ impl HelperClient for FailingIpc {
 
 #[test]
 fn act_engage_failure_keeps_engaged_false() {
-    let dir = tempfile::tempdir().unwrap();
-    let baseline = dir.path().join("baseline.json");
-    let caff = dir.path().join("caffeinate.pid");
-    let sleep_file = dir.path().join("sd");
-    std::fs::write(&sleep_file, "0\n").unwrap();
+    let h = Harness::new(0);
     let ipc = FailingIpc;
-    let caffeinate = FakeCaffeinate::new();
-    let sleep = FakeSleep {
-        sleep_file: sleep_file.clone(),
-    };
-    let m = PowerMachine {
-        ipc: &ipc,
-        caffeinate: &caffeinate,
-        sleep: &sleep,
-        baseline_file: baseline.clone(),
-        caffeinate_pidfile: caff.clone(),
-    };
+    let m = h.machine_with_ipc(&ipc);
     let engaged = act(
         &m,
         true,
@@ -440,7 +424,7 @@ fn act_engage_failure_keeps_engaged_false() {
     );
     assert!(!engaged, "helper engage error → engaged stays false");
     assert!(
-        !caff.exists(),
+        !h.caffeinate_pidfile.exists(),
         "caffeinate NOT spawned when helper engage fails (bash early return)"
     );
 }

@@ -298,26 +298,23 @@ mod tests {
     // ── PURE: baseline_value_from_json (FAIL-SAFE) ────────────────────────────
 
     #[test]
-    fn baseline_value_parses_0_and_1() {
-        assert_eq!(
-            baseline_value_from_json("{\"SleepDisabled\":0,\"captured_at\":1700000000}\n"),
-            0
-        );
-        assert_eq!(
-            baseline_value_from_json("{\"SleepDisabled\":1,\"captured_at\":1700000000}\n"),
-            1
-        );
-    }
-
-    #[test]
-    fn baseline_value_fail_safe_on_corrupt() {
-        assert_eq!(baseline_value_from_json(""), 0);
-        assert_eq!(baseline_value_from_json("not json"), 0);
-        assert_eq!(baseline_value_from_json("{\"SleepDisabled\":}"), 0);
-        assert_eq!(baseline_value_from_json("{\"SleepDisabled\":2}"), 0);
-        assert_eq!(baseline_value_from_json("{\"Other\":1}"), 0);
-        // whitespace tolerance
-        assert_eq!(baseline_value_from_json("{\"SleepDisabled\": 1 }"), 1);
+    fn baseline_value_from_json_cases() {
+        // Pure parser, FAIL-SAFE: only an explicit SleepDisabled 0|1 parses; every
+        // corrupt / out-of-range / wrong-key / empty input falls back to 0;
+        // whitespace around the value is tolerated.
+        let cases: &[(&str, u8)] = &[
+            ("{\"SleepDisabled\":0,\"captured_at\":1700000000}\n", 0),
+            ("{\"SleepDisabled\":1,\"captured_at\":1700000000}\n", 1),
+            ("", 0),                        // empty
+            ("not json", 0),                // garbage
+            ("{\"SleepDisabled\":}", 0),    // no value
+            ("{\"SleepDisabled\":2}", 0),   // out of range => fail-safe
+            ("{\"Other\":1}", 0),           // wrong key
+            ("{\"SleepDisabled\": 1 }", 1), // whitespace-padded
+        ];
+        for (input, want) in cases {
+            assert_eq!(baseline_value_from_json(input), *want, "input {input:?}");
+        }
     }
 
     // ── PURE: recover_decision truth table ────────────────────────────────────
@@ -555,44 +552,50 @@ mod tests {
     }
 
     #[test]
-    fn engage_and_release_restore_baseline_with_best_effort_hold() {
-        let h = Harness::new(0);
-        let m = h.machine();
-        m.engage(1700000000).unwrap();
-        assert_eq!(h.sd(), 1, "engage sets SleepDisabled=1");
-        assert_eq!(m.baseline_value(), 0, "baseline captured before engage");
-        assert!(
-            h.caffeinate_pidfile.exists(),
-            "engage writes caffeinate pidfile"
-        );
-        assert!(m.caffeinate_alive(), "caffeinate alive after engage");
-        assert!(h.events().contains(&"helper engage".to_string()));
+    fn engage_then_full_release_restores_baseline() {
+        // Engage captures the pre-existing SleepDisabled as the baseline, sets
+        // SleepDisabled=1 + a live caffeinate hold; full_release restores the
+        // captured baseline (0 or 1) and clears the hold. Parameterized over the
+        // initial/restored SleepDisabled — the post-release sd + baseline_value are
+        // the row's own restored value (the helper-release-restores-1 distinction).
+        // The caffeinate-pidfile asserts (written on engage regardless of baseline,
+        // cleared on release) hold for both rows, so they strengthen the SD=1 case.
+        for initial in [0u8, 1u8] {
+            let h = Harness::new(initial);
+            let m = h.machine();
+            m.engage(1700000000).unwrap();
+            assert_eq!(h.sd(), 1, "engage sets SleepDisabled=1 (initial={initial})");
+            assert_eq!(
+                m.baseline_value(),
+                initial,
+                "baseline captures pre-existing SleepDisabled={initial}"
+            );
+            assert!(
+                h.caffeinate_pidfile.exists(),
+                "engage writes caffeinate pidfile (initial={initial})"
+            );
+            assert!(
+                m.caffeinate_alive(),
+                "caffeinate alive after engage (initial={initial})"
+            );
+            assert!(h.events().contains(&"helper engage".to_string()));
 
-        m.full_release();
-        assert_eq!(h.sd(), 0, "release restores baseline");
-        assert!(!h.baseline_file.exists(), "release clears baseline.json");
-        assert!(
-            !h.caffeinate_pidfile.exists(),
-            "release clears caffeinate pidfile"
-        );
-        assert!(h.events().contains(&"helper release".to_string()));
-    }
-
-    #[test]
-    fn release_uses_helper_release_when_baseline_is_one() {
-        let h = Harness::new(1);
-        let m = h.machine();
-        m.engage(1700000000).unwrap();
-        assert_eq!(h.sd(), 1);
-        assert_eq!(
-            m.baseline_value(),
-            1,
-            "baseline captures pre-existing SleepDisabled=1"
-        );
-        m.full_release();
-        assert_eq!(h.sd(), 1, "release restores SleepDisabled=1 baseline");
-        assert!(!h.baseline_file.exists(), "release clears baseline.json");
-        assert!(h.events().contains(&"helper release".to_string()));
+            m.full_release();
+            assert_eq!(
+                h.sd(),
+                initial,
+                "release restores SleepDisabled={initial} baseline"
+            );
+            assert!(
+                !h.baseline_file.exists(),
+                "release clears baseline.json (initial={initial})"
+            );
+            assert!(
+                !h.caffeinate_pidfile.exists(),
+                "release clears caffeinate pidfile (initial={initial})"
+            );
+            assert!(h.events().contains(&"helper release".to_string()));
+        }
     }
 
     #[test]

@@ -372,15 +372,24 @@ fn stop_when_not_loaded_is_idempotent_noop() {
     assert_eq!(*installer.launchctl.sleep_calls.borrow(), 0);
 }
 
-#[test]
-fn start_already_loaded_is_idempotent() {
-    // Write a plist file so the missing-plist guard passes, then gate print=true.
+/// Scaffold for the `start_user_agent` tests: a temp HOME with a
+/// `Library/LaunchAgents` dir, optionally seeded with the user-agent plist (so
+/// the missing-plist guard passes), plus a HOME `EnvGuard`. Returns
+/// `(tempdir, home_guard)` — keep both alive for the test's duration.
+fn start_env(write_plist: bool) -> (tempfile::TempDir, EnvGuard) {
     let tmp = tempfile::tempdir().unwrap();
     let agents = tmp.path().join("Library/LaunchAgents");
     std::fs::create_dir_all(&agents).unwrap();
-    std::fs::write(agents.join(format!("{USER_AGENT_LABEL}.plist")), "x").unwrap();
-    let _home = EnvGuard::set("HOME", tmp.path().to_str().unwrap());
+    if write_plist {
+        std::fs::write(agents.join(format!("{USER_AGENT_LABEL}.plist")), "x").unwrap();
+    }
+    let home = EnvGuard::set("HOME", tmp.path().to_str().unwrap());
+    (tmp, home)
+}
 
+#[test]
+fn start_already_loaded_is_idempotent() {
+    let (_tmp, _home) = start_env(true);
     let cfg = golden_config();
     let fake = FakeLaunchctl::new(vec![true]); // already loaded
     let installer = MacosLaunchdInstaller::with_launchctl(fake);
@@ -391,12 +400,7 @@ fn start_already_loaded_is_idempotent() {
 
 #[test]
 fn start_bootstraps_and_enables_when_unloaded() {
-    let tmp = tempfile::tempdir().unwrap();
-    let agents = tmp.path().join("Library/LaunchAgents");
-    std::fs::create_dir_all(&agents).unwrap();
-    std::fs::write(agents.join(format!("{USER_AGENT_LABEL}.plist")), "x").unwrap();
-    let _home = EnvGuard::set("HOME", tmp.path().to_str().unwrap());
-
+    let (_tmp, _home) = start_env(true);
     let cfg = golden_config();
     let fake = FakeLaunchctl::new(vec![false]); // not loaded
     let installer = MacosLaunchdInstaller::with_launchctl(fake);
@@ -408,9 +412,8 @@ fn start_bootstraps_and_enables_when_unloaded() {
 
 #[test]
 fn start_errors_when_plist_missing() {
-    let tmp = tempfile::tempdir().unwrap();
-    // No plist written under HOME/Library/LaunchAgents.
-    let _home = EnvGuard::set("HOME", tmp.path().to_str().unwrap());
+    // No plist seeded under HOME/Library/LaunchAgents → missing-plist guard fires.
+    let (_tmp, _home) = start_env(false);
     let cfg = golden_config();
     let fake = FakeLaunchctl::new(vec![]);
     let installer = MacosLaunchdInstaller::with_launchctl(fake);

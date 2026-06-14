@@ -370,17 +370,23 @@ mod tests {
     // ── SET-floor smarter policy (NO bash counterpart; cargo-only) ────────────
 
     #[test]
-    fn set_floor_cuts_below_floor() {
-        // CPU_Scheduler_Limit=50, floor=80 => 50 < 80 => CUT.
-        let r = parse_therm("CPU_Scheduler_Limit = 50");
-        assert!(should_cut(&r, Some(80)));
-    }
-
-    #[test]
-    fn set_floor_tolerates_minor_throttle() {
-        // CPU_Scheduler_Limit=90, floor=80, no warning => 90 >= 80 => NO cut.
-        let r = parse_therm("CPU_Scheduler_Limit = 90");
-        assert!(!should_cut(&r, Some(80)));
+    fn set_floor_numeric_scheduler_limit_boundary() {
+        // SET-floor smarter policy over a numeric CPU_Scheduler_Limit (no warning
+        // line): cut iff value < floor (STRICT '<'). One row per former standalone
+        // test — including the 80==80 boundary that must NOT cut.
+        let cases: &[(u32, u32, bool)] = &[
+            (50, 80, true),  // set_floor_cuts_below_floor: 50 < 80 => CUT
+            (90, 80, false), // set_floor_tolerates_minor_throttle: 90 >= 80 => no cut
+            (80, 80, false), // set_floor_boundary_equal: 80 == 80 => no cut (strict '<')
+        ];
+        for (limit, floor, want) in cases {
+            let r = parse_therm(&format!("CPU_Scheduler_Limit = {limit}"));
+            assert_eq!(
+                should_cut(&r, Some(*floor)),
+                *want,
+                "limit {limit} vs floor {floor} should cut={want}"
+            );
+        }
     }
 
     #[test]
@@ -409,13 +415,6 @@ mod tests {
             should_cut(&r, None),
             "but UNSET mode cuts on any_match (parity)"
         );
-    }
-
-    #[test]
-    fn set_floor_boundary_equal_does_not_cut() {
-        // value == floor => NOT below floor => NO cut (strict '<').
-        let r = parse_therm("CPU_Scheduler_Limit = 80");
-        assert!(!should_cut(&r, Some(80)));
     }
 
     // ── summary (UX, not parity) ──────────────────────────────────────────────

@@ -563,10 +563,10 @@ fn rejection_always_writes_error_response() {
 
 // ── arg parsing ───────────────────────────────────────────────────────────────
 
-#[test]
-fn parse_args_requires_numeric_uid() {
-    let err = parse_args([
-        "--once",
+/// The four required dir/file args every parse_args test shares; each test
+/// prepends its own mode flag and appends its own uid / user / poll-secs.
+fn base_dirs_argv() -> Vec<&'static str> {
+    vec![
         "--request-dir",
         "/r",
         "--response-dir",
@@ -575,35 +575,31 @@ fn parse_args_requires_numeric_uid() {
         "/s",
         "--log-file",
         "/l/x.log",
-        "--allowed-uid",
-        "notanumber",
-        "--allowed-user",
-        "u",
-    ])
-    .unwrap_err();
+    ]
+}
+
+#[test]
+fn parse_args_requires_numeric_uid() {
+    let mut argv = vec!["--once"];
+    argv.extend(base_dirs_argv());
+    argv.extend(["--allowed-uid", "notanumber", "--allowed-user", "u"]);
+    let err = parse_args(argv).unwrap_err();
     assert!(matches!(err, ArgError::InvalidUid(_)));
 }
 
 #[test]
 fn parse_args_happy() {
-    let cfg = parse_args([
-        "--serve",
-        "--request-dir",
-        "/r",
-        "--response-dir",
-        "/p",
-        "--state-dir",
-        "/s",
-        "--log-file",
-        "/l/x.log",
+    let mut argv = vec!["--serve"];
+    argv.extend(base_dirs_argv());
+    argv.extend([
         "--allowed-uid",
         "501",
         "--allowed-user",
         "alice",
         "--poll-secs",
         "3",
-    ])
-    .unwrap();
+    ]);
+    let cfg = parse_args(argv).unwrap();
     assert_eq!(cfg.allowed_uid, 501);
     assert_eq!(cfg.allowed_user, "alice");
     assert_eq!(cfg.poll_secs, 3);

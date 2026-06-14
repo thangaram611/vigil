@@ -410,82 +410,90 @@ mod tests {
     }
 
     #[test]
-    fn first_run_primes_without_active() {
-        let prior = VscodeState::default();
-        let current = vec![RecentFile {
-            path: "/x".into(),
-            sha256: "h1".into(),
-        }];
-        // last_scan=0, now large enough to pass throttle.
-        let (new, active) = vscode_transition(&prior, &current, 1000, 300, 5);
-        assert!(!active, "first run must not count active");
-        let new = new.unwrap();
-        assert!(new.primed);
-        assert_eq!(new.active_until, 0);
-    }
-
-    #[test]
-    fn hash_change_while_primed_counts() {
-        let prior = VscodeState {
+    fn vscode_transition_state_machine() {
+        // All rows call vscode_transition with the same (now=1000, idle=300,
+        // discover=5); they differ in the prior/current scan and assert DIFFERENT
+        // shapes of the (new_state, active) output. Each row therefore carries its
+        // own post-check closure for `new` (None-ness for throttle, hash_for_path
+        // for retain, active_until for the change case) and an OPTIONAL `active`
+        // expectation (the retain case intentionally ignored `active`).
+        struct Case {
+            label: &'static str,
+            prior: VscodeState,
+            current: Vec<RecentFile>,
+            want_active: Option<bool>,
+            check_new: fn(&Option<VscodeState>),
+        }
+        let primed_x_h1 = || VscodeState {
             active_until: 0,
             last_scan: 0,
             primed: true,
             files: vec![("h1".into(), "/x".into())],
         };
-        let current = vec![RecentFile {
-            path: "/x".into(),
-            sha256: "h2".into(),
-        }];
-        let (new, active) = vscode_transition(&prior, &current, 1000, 300, 5);
-        assert!(active);
-        assert_eq!(new.unwrap().active_until, 1300);
-    }
-
-    #[test]
-    fn unchanged_hash_stays_idle() {
-        let prior = VscodeState {
-            active_until: 0,
-            last_scan: 0,
-            primed: true,
-            files: vec![("h1".into(), "/x".into())],
+        let file = |sha: &str| {
+            vec![RecentFile {
+                path: "/x".into(),
+                sha256: sha.into(),
+            }]
         };
-        let current = vec![RecentFile {
-            path: "/x".into(),
-            sha256: "h1".into(),
-        }];
-        let (_, active) = vscode_transition(&prior, &current, 1000, 300, 5);
-        assert!(!active);
-    }
-
-    #[test]
-    fn throttle_returns_cached_without_rewrite() {
-        let prior = VscodeState {
-            active_until: 2000,
-            last_scan: 999,
-            primed: true,
-            files: vec![],
-        };
-        // now - last_scan = 1 < 5 -> throttled.
-        let (new, active) = vscode_transition(&prior, &[], 1000, 300, 5);
-        assert!(new.is_none(), "throttled must not produce a new state");
-        assert!(active, "cached active_until(2000) > now(1000)");
-    }
-
-    #[test]
-    fn retains_aged_out_hash() {
-        // prior tracked /x; current scan is empty (aged out).
-        let prior = VscodeState {
-            active_until: 0,
-            last_scan: 0,
-            primed: true,
-            files: vec![("h1".into(), "/x".into())],
-        };
-        let (new, _) = vscode_transition(&prior, &[], 1000, 300, 5);
-        let new = new.unwrap();
-        assert_eq!(
-            new.hash_for_path("/x"),
-            Some("h1"),
-            "aged-out hash retained"
-        );
+        let cases = vec![
+            Case {
+                label: "first run primes without active",
+                prior: VscodeState::default(),
+                current: file("h1"),
+                want_active: Some(false),
+                check_new: |n| {
+                    let n = n.as_ref().expect("first run produces a new state");
+                    assert!(n.primed, "first run primes");
+                    assert_eq!(n.active_until, 0, "first run does not arm active");
+                },
+            },
+            Case {
+                label: "hash change while primed counts",
+                prior: primed_x_h1(),
+                current: file("h2"),
+                want_active: Some(true),
+                check_new: |n| assert_eq!(n.as_ref().unwrap().active_until, 1300),
+            },
+            Case {
+                label: "unchanged hash stays idle",
+                prior: primed_x_h1(),
+                current: file("h1"),
+                want_active: Some(false),
+                check_new: |_| {}, // original discarded `new`
+            },
+            Case {
+                label: "throttled returns cached without rewrite",
+                prior: VscodeState {
+                    active_until: 2000,
+                    last_scan: 999, // now - last_scan = 1 < 5 -> throttled
+                    primed: true,
+                    files: vec![],
+                },
+                current: vec![],
+                want_active: Some(true), // cached active_until(2000) > now(1000)
+                check_new: |n| assert!(n.is_none(), "throttled must not produce a new state"),
+            },
+            Case {
+                label: "retains aged-out hash",
+                prior: primed_x_h1(),
+                current: vec![],   // current scan empty (aged out)
+                want_active: None, // original ignored `active`
+                check_new: |n| {
+                    assert_eq!(
+                        n.as_ref().unwrap().hash_for_path("/x"),
+                        Some("h1"),
+                        "aged-out hash retained"
+                    );
+                },
+            },
+        ];
+        for c in &cases {
+            let (new, active) = vscode_transition(&c.prior, &c.current, 1000, 300, 5);
+            if let Some(want) = c.want_active {
+                assert_eq!(active, want, "{}: active", c.label);
+            }
+            (c.check_new)(&new);
+        }
     }
 }

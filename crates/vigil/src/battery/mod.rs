@@ -156,21 +156,18 @@ mod tests {
     // ── ports of tests/battery_test.sh (default floor 20) ─────────────────────
 
     #[test]
-    fn ac_does_not_cut() {
-        // test_ac_does_not_cut
-        assert!(!live_should_cut(AC_100, 20));
-    }
-
-    #[test]
-    fn battery_low_cuts() {
-        // test_battery_low_cuts
-        assert!(live_should_cut(BATTERY_5, 20));
-    }
-
-    #[test]
-    fn battery_50_does_not_cut() {
-        // test_battery_50_does_not_cut
-        assert!(!live_should_cut(BATTERY_50, 20));
+    fn live_should_cut_over_fixtures() {
+        // One live_should_cut decision per fixture (floor 20): on-AC and a healthy
+        // 50% never cut; a 5% discharge cuts. (ports test_ac_does_not_cut /
+        // test_battery_low_cuts / test_battery_50_does_not_cut.)
+        let cases: &[(&str, bool, &str)] = &[
+            (AC_100, false, "AC 100% => no cut"),
+            (BATTERY_5, true, "battery 5% < 20 => cut"),
+            (BATTERY_50, false, "battery 50% >= 20 => no cut"),
+        ];
+        for (fixture, want, label) in cases {
+            assert_eq!(live_should_cut(fixture, 20), *want, "{label}");
+        }
     }
 
     #[test]
@@ -182,20 +179,17 @@ mod tests {
     }
 
     #[test]
-    fn ac_summary_says_ac() {
-        // test_ac_summary_says_ac
-        let s = battery_summary(&parse_ps(AC_100), 20);
-        assert!(s.contains("AC"), "AC summary should say AC: {s}");
-    }
-
-    #[test]
-    fn battery_summary_says_battery() {
-        // test_battery_summary_says_battery
-        let s = battery_summary(&parse_ps(BATTERY_50), 20);
-        assert!(
-            s.contains("battery"),
-            "battery summary should say battery: {s}"
-        );
+    fn battery_summary_labels_source() {
+        // battery_summary surfaces the power-source word for each fixture
+        // (ports test_ac_summary_says_ac / test_battery_summary_says_battery).
+        let cases: &[(&str, &str)] = &[(AC_100, "AC"), (BATTERY_50, "battery")];
+        for (fixture, want) in cases {
+            let s = battery_summary(&parse_ps(fixture), 20);
+            assert!(
+                s.contains(want),
+                "summary for {fixture:?} should contain {want:?}: {s}"
+            );
+        }
     }
 
     // ── boundary + edge cases ─────────────────────────────────────────────────

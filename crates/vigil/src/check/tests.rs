@@ -70,207 +70,39 @@ fn tick(pid: &str, updated: &str, tick_secs: &str) -> TickFields {
 }
 
 #[test]
-fn scan_state_unloaded_when_not_loaded() {
-    let (st, age) =
-        classify_scan_state(false, Some("4242"), None, Some(FIXED_NOW), FIXED_NOW, 5, 6);
-    assert_eq!(st, DaemonScanState::Unloaded);
-    assert_eq!(age, None);
-}
-
-#[test]
-fn scan_state_starting_when_pid_not_numeric() {
-    // loaded but daemon_pid is None / non-numeric → starting.
-    let (st, age) = classify_scan_state(true, None, None, None, FIXED_NOW, 5, 6);
-    assert_eq!(st, DaemonScanState::Starting);
-    assert_eq!(age, None);
-}
-
-#[test]
-fn scan_state_pending_when_pid_mismatch_and_pidfile_fresh() {
-    // tick pid != daemon pid, pidfile age ≤ missing_after → pending.
-    let t = tick("9999", "1699999998", "5");
-    let (st, age) = classify_scan_state(
-        true,
-        Some("4242"),
-        Some(&t),
-        Some(FIXED_NOW), // age 0
-        FIXED_NOW,
-        5,
-        6,
-    );
-    assert_eq!(st, DaemonScanState::Pending);
-    assert_eq!(age, None);
-}
-
-#[test]
-fn scan_state_pending_when_no_tick_file() {
-    // No tick file at all (golden status_pending) → pending, age null.
-    let (st, age) = classify_scan_state(true, Some("4242"), None, Some(FIXED_NOW), FIXED_NOW, 5, 6);
-    assert_eq!(st, DaemonScanState::Pending);
-    assert_eq!(age, None);
-}
-
-#[test]
-fn scan_state_missing_when_pidfile_too_old() {
-    // missing_after = max(10, wait(6)+tick(5)+3) = 14. pid_age 15 > 14 → missing.
-    let (st, age) = classify_scan_state(
-        true,
-        Some("4242"),
-        None,
-        Some(FIXED_NOW - 15),
-        FIXED_NOW,
-        5,
-        6,
-    );
-    assert_eq!(st, DaemonScanState::Missing);
-    assert_eq!(age, None);
-}
-
-#[test]
-fn scan_state_missing_boundary_is_exclusive() {
-    // pid_age == missing_after(14) → NOT missing (boundary is `>`), stays pending.
-    let (st, _) = classify_scan_state(
-        true,
-        Some("4242"),
-        None,
-        Some(FIXED_NOW - 14),
-        FIXED_NOW,
-        5,
-        6,
-    );
-    assert_eq!(st, DaemonScanState::Pending);
-    // One second older → missing.
-    let (st2, _) = classify_scan_state(
-        true,
-        Some("4242"),
-        None,
-        Some(FIXED_NOW - 15),
-        FIXED_NOW,
-        5,
-        6,
-    );
-    assert_eq!(st2, DaemonScanState::Missing);
-}
-
-#[test]
-fn scan_state_missing_floor_is_ten() {
-    // wait=0,tick=0 → missing_after = max(10, 3) = 10. age 11 → missing; 10 → pending.
-    let (st_a, _) = classify_scan_state(
-        true,
-        Some("4242"),
-        None,
-        Some(FIXED_NOW - 11),
-        FIXED_NOW,
-        0,
-        0,
-    );
-    assert_eq!(st_a, DaemonScanState::Missing);
-    let (st_b, _) = classify_scan_state(
-        true,
-        Some("4242"),
-        None,
-        Some(FIXED_NOW - 10),
-        FIXED_NOW,
-        0,
-        0,
-    );
-    assert_eq!(st_b, DaemonScanState::Pending);
-}
-
-#[test]
-fn scan_state_fresh_when_pid_matches_and_recent() {
-    // golden status_engaged: pid match, updated_at = now-2, age 2 < stale(15) → fresh.
-    let t = tick("4242", &(FIXED_NOW - 2).to_string(), "5");
-    let (st, age) = classify_scan_state(
-        true,
-        Some("4242"),
-        Some(&t),
-        Some(FIXED_NOW),
-        FIXED_NOW,
-        5,
-        6,
-    );
-    assert_eq!(st, DaemonScanState::Fresh);
-    assert_eq!(age, Some(2));
-}
-
-#[test]
-fn scan_state_stale_when_too_old() {
-    // stale_after = max(15, tick(5)*2+5)=15. age 16 > 15 → stale.
-    let t = tick("4242", &(FIXED_NOW - 16).to_string(), "5");
-    let (st, age) = classify_scan_state(
-        true,
-        Some("4242"),
-        Some(&t),
-        Some(FIXED_NOW),
-        FIXED_NOW,
-        5,
-        6,
-    );
-    assert_eq!(st, DaemonScanState::Stale);
-    assert_eq!(age, Some(16));
-}
-
-#[test]
-fn scan_state_stale_boundary_is_exclusive() {
-    // age == stale_after(15) → fresh; age 16 → stale.
-    let t15 = tick("4242", &(FIXED_NOW - 15).to_string(), "5");
-    let (fresh, _) = classify_scan_state(
-        true,
-        Some("4242"),
-        Some(&t15),
-        Some(FIXED_NOW),
-        FIXED_NOW,
-        5,
-        6,
-    );
-    assert_eq!(fresh, DaemonScanState::Fresh);
-    let t16 = tick("4242", &(FIXED_NOW - 16).to_string(), "5");
-    let (stale, _) = classify_scan_state(
-        true,
-        Some("4242"),
-        Some(&t16),
-        Some(FIXED_NOW),
-        FIXED_NOW,
-        5,
-        6,
-    );
-    assert_eq!(stale, DaemonScanState::Stale);
-}
-
-#[test]
-fn scan_state_stale_after_uses_tick_file_tick_secs() {
-    // tick file tick_secs=20 → stale_after = max(15, 45)=45. age 30 < 45 → fresh,
-    // even though cfg tick_secs(5) would have made stale_after 15.
-    let t = tick("4242", &(FIXED_NOW - 30).to_string(), "20");
-    let (st, age) = classify_scan_state(
-        true,
-        Some("4242"),
-        Some(&t),
-        Some(FIXED_NOW),
-        FIXED_NOW,
-        5, // cfg tick — ignored, tick file wins
-        6,
-    );
-    assert_eq!(st, DaemonScanState::Fresh);
-    assert_eq!(age, Some(30));
-}
-
-#[test]
-fn scan_state_pending_when_updated_at_non_numeric() {
-    // pid matches but updated_at is garbage → pending (not stale/fresh).
-    let t = tick("4242", "not-a-number", "5");
-    let (st, age) = classify_scan_state(
-        true,
-        Some("4242"),
-        Some(&t),
-        Some(FIXED_NOW),
-        FIXED_NOW,
-        5,
-        6,
-    );
-    assert_eq!(st, DaemonScanState::Pending);
-    assert_eq!(age, None);
+fn classify_scan_state_threshold_table() {
+    // One labeled row per former classify_scan_state assertion. Each boundary /
+    // floor / stale-exclusive test that asserted TWO points becomes TWO rows, and
+    // tick_secs is carried per-row (the tick-file tick_secs=20 case must win over
+    // the cfg tick_secs=5). The age column is asserted for every row (None for
+    // Unloaded/Starting/Pending/Missing; the computed age for Fresh/Stale).
+    use DaemonScanState::{Fresh, Missing, Pending, Stale, Starting, Unloaded};
+    let now = FIXED_NOW;
+    // (label, loaded, daemon_pid, tick, pidfile_mtime, cfg_tick, wait, want_state, want_age)
+    #[rustfmt::skip]
+    #[allow(clippy::type_complexity)]
+    let cases: Vec<(&str, bool, Option<&str>, Option<TickFields>, Option<i64>, u32, u32, DaemonScanState, Option<i64>)> = vec![
+        ("unloaded", false, Some("4242"), None, Some(now), 5, 6, Unloaded, None),
+        ("starting: daemon pid not numeric", true, None, None, None, 5, 6, Starting, None),
+        ("pending: tick pid != daemon pid, pidfile fresh", true, Some("4242"), Some(tick("9999", "1699999998", "5")), Some(now), 5, 6, Pending, None),
+        ("pending: no tick file", true, Some("4242"), None, Some(now), 5, 6, Pending, None),
+        ("missing: pidfile age 15 > missing_after(14)", true, Some("4242"), None, Some(now - 15), 5, 6, Missing, None),
+        ("missing boundary: age 14 == missing_after => pending", true, Some("4242"), None, Some(now - 14), 5, 6, Pending, None),
+        ("missing boundary: age 15 > 14 => missing", true, Some("4242"), None, Some(now - 15), 5, 6, Missing, None),
+        ("missing floor: wait0/tick0 age 11 > 10 => missing", true, Some("4242"), None, Some(now - 11), 0, 0, Missing, None),
+        ("missing floor: wait0/tick0 age 10 == 10 => pending", true, Some("4242"), None, Some(now - 10), 0, 0, Pending, None),
+        ("fresh: pid match, age 2 < stale_after(15)", true, Some("4242"), Some(tick("4242", &(now - 2).to_string(), "5")), Some(now), 5, 6, Fresh, Some(2)),
+        ("stale: age 16 > stale_after(15)", true, Some("4242"), Some(tick("4242", &(now - 16).to_string(), "5")), Some(now), 5, 6, Stale, Some(16)),
+        ("stale boundary: age 15 == stale_after => fresh", true, Some("4242"), Some(tick("4242", &(now - 15).to_string(), "5")), Some(now), 5, 6, Fresh, Some(15)),
+        ("stale boundary: age 16 > 15 => stale", true, Some("4242"), Some(tick("4242", &(now - 16).to_string(), "5")), Some(now), 5, 6, Stale, Some(16)),
+        ("tick-file tick_secs=20 wins: age 30 < 45 => fresh", true, Some("4242"), Some(tick("4242", &(now - 30).to_string(), "20")), Some(now), 5, 6, Fresh, Some(30)),
+        ("pending: pid match but updated_at non-numeric", true, Some("4242"), Some(tick("4242", "not-a-number", "5")), Some(now), 5, 6, Pending, None),
+    ];
+    for (label, loaded, dpid, t, mtime, ct, wait, want_st, want_age) in &cases {
+        let (st, age) = classify_scan_state(*loaded, *dpid, t.as_ref(), *mtime, now, *ct, *wait);
+        assert_eq!(st, *want_st, "{label}: state");
+        assert_eq!(age, *want_age, "{label}: age");
+    }
 }
 
 // ── tick-file parse ───────────────────────────────────────────────────────────
@@ -300,14 +132,11 @@ fn read_tick_fields_none_when_absent() {
 
 // ── --json byte-stability vs the Gate-0 golden (§5.1) ─────────────────────────
 
-#[test]
-fn json_clean_matches_golden_byte_for_byte() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let sbx = ScopedSandbox::new();
-    let cfg = sbx.golden_config();
-
-    // Reproduce the golden's deterministic fixture seams.
-    // SAFETY: serialized by ENV_LOCK; cleaned up via clear_fixture_env.
+/// Set the deterministic golden status fixtures shared by the byte-for-byte
+/// `--json` tests: the constant thermal/battery/vscode seams plus the per-test
+/// ASSERTIONS fixture (the sole thing those two tests vary).
+/// SAFETY: callers hold ENV_LOCK and clean up via `ScopedSandbox::clear_fixture_env`.
+unsafe fn set_golden_fixture_env(assertions: &str) {
     unsafe {
         std::env::set_var(
             "VIGIL_THERMAL_FIXTURE",
@@ -317,9 +146,20 @@ fn json_clean_matches_golden_byte_for_byte() {
             "VIGIL_BATTERY_FIXTURE",
             "Now drawing from 'AC Power'\n -InternalBattery-0\t90%; charged; 0:00 remaining present: true",
         );
-        std::env::set_var("VIGIL_ASSERTIONS_FIXTURE", "");
+        std::env::set_var("VIGIL_ASSERTIONS_FIXTURE", assertions);
         std::env::set_var("VIGIL_VSCODE_PS_FIXTURE", ""); // no vscode host → none
     }
+}
+
+#[test]
+fn json_clean_matches_golden_byte_for_byte() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let sbx = ScopedSandbox::new();
+    let cfg = sbx.golden_config();
+
+    // Reproduce the golden's deterministic fixture seams (clean: no assertions).
+    // SAFETY: serialized by ENV_LOCK; cleaned up via clear_fixture_env.
+    unsafe { set_golden_fixture_env("") };
 
     let report = CheckEngine::run_with(
         &cfg,
@@ -358,18 +198,7 @@ fn json_assertions_ok_state_projects_holders() {
     // The status_assertions golden fixture (two holders, neither is caffeinate).
     let fixture = "Assertion status system-wide:\n   PreventUserIdleSystemSleep            1\n   PreventUserIdleDisplaySleep           0\nListed by owning process:\n  pid 312(powerd): [0x0000000a00000457] 00:10:23 PreventUserIdleSystemSleep named: \"com.apple.powermanagement.ttydisksleep\"\n  pid 988(Music): [0x0000000b000004a1] 01:02:03 PreventUserIdleDisplaySleep named: \"com.apple.Music.playback\"\nNo new entries.";
     // SAFETY: serialized by ENV_LOCK.
-    unsafe {
-        std::env::set_var(
-            "VIGIL_THERMAL_FIXTURE",
-            "Note: No CPU power status has been recorded",
-        );
-        std::env::set_var(
-            "VIGIL_BATTERY_FIXTURE",
-            "Now drawing from 'AC Power'\n -InternalBattery-0\t90%; charged; 0:00 remaining present: true",
-        );
-        std::env::set_var("VIGIL_ASSERTIONS_FIXTURE", fixture);
-        std::env::set_var("VIGIL_VSCODE_PS_FIXTURE", "");
-    }
+    unsafe { set_golden_fixture_env(fixture) };
 
     let report = CheckEngine::run_with(
         &cfg,

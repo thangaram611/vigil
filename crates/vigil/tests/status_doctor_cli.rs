@@ -286,11 +286,23 @@ fn status_verbose_adds_provider_roots_and_assertions() {
 }
 
 #[test]
-fn status_usage_error_exits_one() {
-    let sbx = Sandbox::new("usage");
-    let (code, _out, err) = run(&["status", "--bogus"], &sbx);
-    assert_eq!(code, 1, "status usage violation exits 1, not 64");
-    assert!(err.contains("usage: vigil status [--json|--verbose]"));
+fn usage_error_exits_one_with_subcommand_usage() {
+    // A bad flag on status/doctor is a usage violation => exit 1 (NOT 64) with that
+    // subcommand's own usage line on stderr. Each row keeps its own Sandbox.
+    let cases: &[(&str, &str, &str)] = &[
+        ("usage", "status", "usage: vigil status [--json|--verbose]"),
+        (
+            "docusage",
+            "doctor",
+            "usage: vigil doctor [--power] [--verbose]",
+        ),
+    ];
+    for &(label, sub, usage) in cases {
+        let sbx = Sandbox::new(label);
+        let (code, _out, err) = run(&[sub, "--bogus"], &sbx);
+        assert_eq!(code, 1, "{sub} usage violation exits 1, not 64");
+        assert!(err.contains(usage), "{sub} stderr should contain {usage:?}");
+    }
 }
 
 // ── doctor ────────────────────────────────────────────────────────────────────
@@ -366,12 +378,4 @@ fn doctor_power_nonzero_when_helper_unavailable() {
             "power doctor missing: {needle:?}\n{out}"
         );
     }
-}
-
-#[test]
-fn doctor_usage_error_exits_one() {
-    let sbx = Sandbox::new("docusage");
-    let (code, _out, err) = run(&["doctor", "--bogus"], &sbx);
-    assert_eq!(code, 1);
-    assert!(err.contains("usage: vigil doctor [--power] [--verbose]"));
 }

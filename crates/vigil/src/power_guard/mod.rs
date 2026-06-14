@@ -146,27 +146,48 @@ mod tests {
     // ── cooldown_state value table (ports daemon lines 64/151/153) ────────────
 
     #[test]
-    fn cooldown_arms_on_pressure() {
-        // (now=100, pressure=true, prev=0, secs=60) => (160, true)
-        assert_eq!(cooldown_state(100, true, 0, 60), (160, true));
-    }
-
-    #[test]
-    fn cooldown_expires_after_window() {
-        // (now=170, pressure=false, prev=160, secs=60) => (160, false)
-        assert_eq!(cooldown_state(170, false, 160, 60), (160, false));
-    }
-
-    #[test]
-    fn cooldown_still_cooling_inside_window() {
-        // (now=150, pressure=false, prev=160, secs=60) => (160, true)
-        assert_eq!(cooldown_state(150, false, 160, 60), (160, true));
-    }
-
-    #[test]
-    fn cooldown_initial_no_pressure() {
-        // initial prev=0, no pressure => (0, false) — matches COOLDOWN_UNTIL=0.
-        assert_eq!(cooldown_state(100, false, 0, 60), (0, false));
+    fn cooldown_state_value_table() {
+        // Pure (now, pressure, prev_until, secs) -> (until, cooling). One row per
+        // former single-assert test, including the strict now==until boundary. The
+        // stateful sliding-window re-arm (which chains two calls) stays separate.
+        let cases: &[(i64, bool, i64, u32, i64, bool, &str)] = &[
+            (100, true, 0, 60, 160, true, "arms on pressure"),
+            (170, false, 160, 60, 160, false, "expires after window"),
+            (
+                150,
+                false,
+                160,
+                60,
+                160,
+                true,
+                "still cooling inside window",
+            ),
+            (
+                100,
+                false,
+                0,
+                60,
+                0,
+                false,
+                "initial no pressure (COOLDOWN_UNTIL=0)",
+            ),
+            (
+                160,
+                false,
+                160,
+                60,
+                160,
+                false,
+                "now==until => not cooling (strict)",
+            ),
+        ];
+        for (now, pressure, prev, secs, until, cooling, label) in cases {
+            assert_eq!(
+                cooldown_state(*now, *pressure, *prev, *secs),
+                (*until, *cooling),
+                "{label}"
+            );
+        }
     }
 
     #[test]
@@ -176,12 +197,6 @@ mod tests {
         let (until2, cooling2) = cooldown_state(150, true, until1, 60); // 210
         assert_eq!(until2, 210);
         assert!(cooling2);
-    }
-
-    #[test]
-    fn cooldown_boundary_now_equals_until_not_cooling() {
-        // now == until => now < until is false => not cooling (strict).
-        assert_eq!(cooldown_state(160, false, 160, 60), (160, false));
     }
 
     // ── PowerGuard trait composition over a fake ──────────────────────────────

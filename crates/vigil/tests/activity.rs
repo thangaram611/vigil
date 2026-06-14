@@ -34,18 +34,14 @@ fn set_mtime(path: &Path, unix_secs: i64) {
 fn session_dir_for_known_agents() {
     let home = tempfile::tempdir().unwrap();
     let h = home.path();
-    assert_eq!(
-        session_dir_from_home(Agent::Claude, h),
-        h.join(".claude/projects")
-    );
-    assert_eq!(
-        session_dir_from_home(Agent::Codex, h),
-        h.join(".codex/sessions")
-    );
-    assert_eq!(
-        session_dir_from_home(Agent::Copilot, h),
-        h.join(".copilot/session-state")
-    );
+    let cases: &[(Agent, &str)] = &[
+        (Agent::Claude, ".claude/projects"),
+        (Agent::Codex, ".codex/sessions"),
+        (Agent::Copilot, ".copilot/session-state"),
+    ];
+    for &(agent, suffix) in cases {
+        assert_eq!(session_dir_from_home(agent, h), h.join(suffix), "{agent:?}");
+    }
 }
 
 #[test]
