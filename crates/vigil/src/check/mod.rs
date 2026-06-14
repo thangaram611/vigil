@@ -535,17 +535,12 @@ impl CheckEngine {
         let therm_raw = crate::thermal::read_therm_raw();
         let therm_reading = crate::thermal::parse_therm(&therm_raw);
         let thermal = crate::thermal::thermal_summary(&therm_reading, cfg.thermal_cpu_limit_floor);
-        let cut_thermal = crate::thermal::live_should_cut(
-            cfg.force != 0,
-            &therm_raw,
-            cfg.thermal_cpu_limit_floor,
-        );
+        let cut_thermal = crate::thermal::live_should_cut(&therm_raw, cfg.thermal_cpu_limit_floor);
 
         let batt_raw = crate::battery::read_ps_raw();
         let batt_reading = crate::battery::parse_ps(&batt_raw);
         let battery = crate::battery::battery_summary(&batt_reading, cfg.battery_floor_pct);
-        let cut_battery =
-            crate::battery::live_should_cut(cfg.force != 0, &batt_raw, cfg.battery_floor_pct);
+        let cut_battery = crate::battery::live_should_cut(&batt_raw, cfg.battery_floor_pct);
 
         // 18. power_helper_ok — status round-trip (DirsMissing/timeout → false).
         let power_helper_ok = helper.status().is_ok();

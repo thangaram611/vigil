@@ -35,11 +35,11 @@ pub trait PowerGuard {
     }
 }
 
-/// Real env-driven guard. Reads `VIGIL_FORCE` + the fixture-or-pmset text via
-/// the [`crate::thermal`] / [`crate::battery`] collectors. Honors the SAME env
-/// seams as bash (`VIGIL_FORCE`, `VIGIL_THERMAL_FIXTURE`, `VIGIL_BATTERY_FIXTURE`)
-/// and the resolved config knobs (`floor` = `VIGIL_THERMAL_CPU_LIMIT_FLOOR`,
-/// `battery_floor_pct` = `VIGIL_BATTERY_FLOOR_PCT`).
+/// Real env-driven guard. Reads the fixture-or-pmset text via the
+/// [`crate::thermal`] / [`crate::battery`] collectors. Honors the env fixture
+/// seams (`VIGIL_THERMAL_FIXTURE`, `VIGIL_BATTERY_FIXTURE`) and the resolved
+/// config knobs (`floor` = `VIGIL_THERMAL_CPU_LIMIT_FLOOR`, `battery_floor_pct`
+/// = `VIGIL_BATTERY_FLOOR_PCT`).
 pub struct EnvPowerGuard {
     /// `VIGIL_THERMAL_CPU_LIMIT_FLOOR` knob (None = unset = parity default).
     pub floor: Option<u32>,
@@ -47,33 +47,13 @@ pub struct EnvPowerGuard {
     pub battery_floor_pct: u32,
 }
 
-impl EnvPowerGuard {
-    /// Read `VIGIL_FORCE` the same way bash does: `1` => true, anything else
-    /// (including unset) => false.
-    fn force() -> bool {
-        std::env::var("VIGIL_FORCE")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-    }
-}
-
 impl PowerGuard for EnvPowerGuard {
     fn thermal_cut(&self) -> bool {
-        // VIGIL_FORCE FIRST, before any subprocess — bash returns "no cut" on
-        // force before forking `pmset -g therm` (lib/thermal.sh). Short-circuit
-        // the pmset read so a per-tick force never spawns pmset at 5.7.
-        if Self::force() {
-            return false;
-        }
-        thermal::live_should_cut(false, &thermal::read_therm_raw(), self.floor)
+        thermal::live_should_cut(&thermal::read_therm_raw(), self.floor)
     }
 
     fn battery_cut(&self) -> bool {
-        // VIGIL_FORCE FIRST, before any subprocess (lib/battery.sh).
-        if Self::force() {
-            return false;
-        }
-        battery::live_should_cut(false, &battery::read_ps_raw(), self.battery_floor_pct)
+        battery::live_should_cut(&battery::read_ps_raw(), self.battery_floor_pct)
     }
 }
 
@@ -83,10 +63,6 @@ impl PowerGuard for EnvPowerGuard {
 /// them, and exposes the PARSED numeric throttle value + floor knobs + reframed
 /// summaries. This is strictly read-only: no pmset transition, no file write, no
 /// helper engage/release — it preserves the `vigil debug` read-only contract.
-///
-/// Force is intentionally NOT applied here: this is a diagnostic VIEW of the raw
-/// thermal/battery signal, so the operator sees true pressure even under
-/// `VIGIL_FORCE=1`. The cut decision in the oracle subcommands does honor force.
 #[derive(Debug, Serialize)]
 pub struct PowerView {
     // --- thermal ---
@@ -113,8 +89,7 @@ pub struct PowerView {
 }
 
 impl PowerView {
-    /// Read + parse both signals once (read-only). Force is NOT applied (this is
-    /// a raw-signal diagnostic view).
+    /// Read + parse both signals once (read-only): a raw-signal diagnostic view.
     pub fn read(thermal_floor: Option<u32>, battery_floor_pct: u32) -> Self {
         let therm = thermal::parse_therm(&thermal::read_therm_raw());
         let batt = battery::parse_ps(&battery::read_ps_raw());
@@ -256,7 +231,7 @@ mod tests {
         );
     }
 
-    // ── EnvPowerGuard over fixtures + VIGIL_FORCE ─────────────────────────────
+    // ── EnvPowerGuard over fixtures ───────────────────────────────────────────
     //
     // Env-mutating: serialize against other env tests in this binary via a
     // module-local lock. (Other modules use their own locks; cross-binary env
@@ -275,7 +250,6 @@ mod tests {
                 "VIGIL_BATTERY_FIXTURE",
                 "Now drawing from 'Battery Power' 5%; discharging",
             );
-            std::env::remove_var("VIGIL_FORCE");
         }
         let g = EnvPowerGuard {
             floor: None,
@@ -287,31 +261,6 @@ mod tests {
         unsafe {
             std::env::remove_var("VIGIL_THERMAL_FIXTURE");
             std::env::remove_var("VIGIL_BATTERY_FIXTURE");
-        }
-    }
-
-    #[test]
-    fn env_guard_force_overrides() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("VIGIL_THERMAL_FIXTURE", "thermal warning level = critical");
-            std::env::set_var(
-                "VIGIL_BATTERY_FIXTURE",
-                "Now drawing from 'Battery Power' 1%; discharging",
-            );
-            std::env::set_var("VIGIL_FORCE", "1");
-        }
-        let g = EnvPowerGuard {
-            floor: None,
-            battery_floor_pct: 20,
-        };
-        assert!(!g.thermal_cut(), "force overrides thermal");
-        assert!(!g.battery_cut(), "force overrides battery");
-        assert!(g.can_hold(), "force => can hold");
-        unsafe {
-            std::env::remove_var("VIGIL_THERMAL_FIXTURE");
-            std::env::remove_var("VIGIL_BATTERY_FIXTURE");
-            std::env::remove_var("VIGIL_FORCE");
         }
     }
 }

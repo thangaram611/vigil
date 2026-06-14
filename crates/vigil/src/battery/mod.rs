@@ -15,7 +15,7 @@
 //!   [`BatteryReading`] (AC state + percent).
 //! - [`should_cut`] — pure decision (STRICT `<` floor; AC/unknown/empty-pct =>
 //!   no cut).
-//! - [`live_should_cut`] — thin collector applying `VIGIL_FORCE` first.
+//! - [`live_should_cut`] — thin collector over the single `pmset -g ps` snapshot.
 
 /// Power source as reported by `pmset -g ps`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,12 +112,9 @@ pub fn battery_summary(r: &BatteryReading, floor_pct: u32) -> String {
     }
 }
 
-/// Live collector (env seam). Honors `VIGIL_FORCE` first (force => no cut),
-/// exactly like bash, then parses the single `raw` snapshot.
-pub fn live_should_cut(force: bool, raw: &str, floor_pct: u32) -> bool {
-    if force {
-        return false;
-    }
+/// Live collector (env seam). Parses the single `raw` snapshot and runs the
+/// pure decision.
+pub fn live_should_cut(raw: &str, floor_pct: u32) -> bool {
     should_cut(&parse_ps(raw), floor_pct)
 }
 
@@ -161,25 +158,19 @@ mod tests {
     #[test]
     fn ac_does_not_cut() {
         // test_ac_does_not_cut
-        assert!(!live_should_cut(false, AC_100, 20));
+        assert!(!live_should_cut(AC_100, 20));
     }
 
     #[test]
     fn battery_low_cuts() {
         // test_battery_low_cuts
-        assert!(live_should_cut(false, BATTERY_5, 20));
+        assert!(live_should_cut(BATTERY_5, 20));
     }
 
     #[test]
     fn battery_50_does_not_cut() {
         // test_battery_50_does_not_cut
-        assert!(!live_should_cut(false, BATTERY_50, 20));
-    }
-
-    #[test]
-    fn force_overrides_battery_low() {
-        // test_force_overrides_battery_low
-        assert!(!live_should_cut(true, BATTERY_5, 20));
+        assert!(!live_should_cut(BATTERY_50, 20));
     }
 
     #[test]

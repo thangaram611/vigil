@@ -36,7 +36,7 @@ Empirically, `pmset disablesleep 1` works **most of the time** on M-series, but 
 
 `man caffeinate` and Apple's thermal guidance both call out that running a laptop with the lid closed and no external cooling can lead to thermal throttling. Vigil's daemon parses `pmset -g therm` every tick and releases sleep prevention for at least 60 seconds when the kernel reports `CPU_Scheduler_Limit` or `thermal warning level`. This logic is borrowed from [`CharlonTank/agents-sleep-preventer`](https://github.com/CharlonTank/agents-sleep-preventer/blob/main/src/main.rs).
 
-If you ignore thermal warnings via `VIGIL_FORCE=1`, you own the consequences.
+The thermal cutoff is fail-closed and always enforced: if `pmset -g therm` cannot be read, Vigil cuts the hold rather than risk holding the machine awake while blind to heat. There is no override.
 
 ## Practical recommendation
 

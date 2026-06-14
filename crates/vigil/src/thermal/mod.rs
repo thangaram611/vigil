@@ -13,8 +13,8 @@
 //!   (a substring match without the `=` anchor is a false-positive bug).
 //! - [`should_cut`] is the ONLY decision fn (env-free, parsed inputs + the
 //!   optional floor knob). It encodes the parity-default-or-smarter policy.
-//! - [`live_should_cut`] is the thin collector: it applies `VIGIL_FORCE` first,
-//!   then reads the fixture-or-pmset text and runs `parse_therm` + `should_cut`.
+//! - [`live_should_cut`] is the thin collector: it reads the fixture-or-pmset
+//!   text and runs `parse_therm` + `should_cut`.
 //!
 //! ## Floor policy (locked by the 5.4 design note)
 //! - Floor `None` (the default / unset): cut iff the reading has ANY matching
@@ -151,14 +151,10 @@ pub fn thermal_summary(r: &ThermalReading, floor: Option<u32>) -> String {
     }
 }
 
-/// Live collector (env seam). Honors `VIGIL_FORCE` first (force => no cut),
-/// exactly like bash, then parses `raw` (the fixture-or-pmset text) and runs the
-/// pure decision. `raw` is supplied by the caller so the read of `pmset -g
+/// Live collector (env seam). Parses `raw` (the fixture-or-pmset text) and runs
+/// the pure decision. `raw` is supplied by the caller so the read of `pmset -g
 /// therm` vs `VIGIL_THERMAL_FIXTURE` is a single point of IO.
-pub fn live_should_cut(force: bool, raw: &str, floor: Option<u32>) -> bool {
-    if force {
-        return false;
-    }
+pub fn live_should_cut(raw: &str, floor: Option<u32>) -> bool {
     let reading = parse_therm(raw);
     should_cut(&reading, floor)
 }
@@ -236,12 +232,11 @@ pub fn decide_cut(read: &ThermRead, floor: Option<u32>) -> bool {
     }
 }
 
-/// The daemon's fail-CLOSED thermal cut for a HOLD decision. `force` short-
-/// circuits to no-cut WITHOUT reading pmset (preserving the no-fork-under-force
-/// contract); otherwise reads thermal state and applies [`decide_cut`], so a
-/// genuine read failure cuts the hold rather than silently sustaining it.
-pub fn cut_thermal_failclosed(force: bool, floor: Option<u32>) -> bool {
-    !force && decide_cut(&read_therm(), floor)
+/// The daemon's fail-CLOSED thermal cut for a HOLD decision. Reads thermal
+/// state and applies [`decide_cut`], so a genuine read failure cuts the hold
+/// rather than silently sustaining it.
+pub fn cut_thermal_failclosed(floor: Option<u32>) -> bool {
+    decide_cut(&read_therm(), floor)
 }
 
 #[cfg(test)]
@@ -287,16 +282,6 @@ mod tests {
     }
 
     #[test]
-    fn force_overrides() {
-        // test_force_overrides — force checked BEFORE any parse.
-        assert!(!live_should_cut(
-            true,
-            "thermal warning level = critical",
-            None
-        ));
-    }
-
-    #[test]
     fn fail_closed_unavailable_cuts() {
         // A genuine read failure cuts in BOTH floor modes (the never-blind-to-heat
         // invariant): an unreadable thermal state must never let a hold persist.
@@ -318,14 +303,6 @@ mod tests {
         // An empty stdout from a *successful* pmset is Text("") => no cut (NOT
         // treated as Unavailable), so we never false-cut on a quirky pmset.
         assert!(!decide_cut(&ThermRead::Text(String::new()), None));
-    }
-
-    #[test]
-    fn fail_closed_force_never_reads_or_cuts() {
-        // force short-circuits to no-cut WITHOUT reading pmset (no fork), so a
-        // forced hold is never released by a (possibly failing) live read.
-        assert!(!cut_thermal_failclosed(true, None));
-        assert!(!cut_thermal_failclosed(true, Some(80)));
     }
 
     #[test]

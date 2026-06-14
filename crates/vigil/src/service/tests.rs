@@ -84,7 +84,6 @@ fn golden_config() -> VigilConfig {
         vscode_copilot_recent_mins: 0,
 
         idle_after_sec: 0,
-        force: 0,
         thermal_cpu_limit_floor: None,
     }
 }

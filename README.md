@@ -151,7 +151,6 @@ The config file is `$VIGIL_CONFIG_FILE` or `~/.config/vigil/vigil.conf`, parsed 
 - `VIGIL_START_WAIT_SECS` (default `6`) — bounds the first-scan wait after start/reload/setup and the lock pre-arm power-hold wait
 - `VIGIL_LOCK_COMBO` / `VIGIL_LOCK_MAX_SECS` / `VIGIL_LOCK_HELPER` — lock guard defaults
 - `VIGIL_INSTALL_DIR` (default `~/Library/Application Support/vigil`), `VIGIL_BIN_LINK_DIR` (default `~/.local/bin`)
-- `VIGIL_FORCE=1` — override thermal/battery cutoffs for a single invocation
 
 ## Safety
 
@@ -159,7 +158,7 @@ The config file is `$VIGIL_CONFIG_FILE` or `~/.config/vigil/vigil.conf`, parsed 
 - The root helper has a narrow command surface and runs only fixed `/usr/bin/pmset -a disablesleep 0|1` argv (with `env_clear()` and a pinned `PATH`); the argv is never built from request content. Request files are validated by file descriptor for action, type, owner, and permissions before the helper acts.
 - `vigil setup` and `vigil uninstall` (and `reload`'s launchctl bounce) are the only admin paths. They refuse test mode (`VIGIL_TEST_NO_ADMIN`) and refuse environment-overridden privileged install paths before running any `sudo` command.
 - Tradeoff: this removes repeated runtime sudo, but Vigil now owns a persistent privileged component. Treat the helper boundary as a real privilege boundary.
-- Thermal and battery cut-offs are conservative by default. Override only via the `VIGIL_FORCE=1` env var on a single invocation.
+- Thermal and battery cut-offs are conservative by default and always enforced — there is no override. The daemon releases sleep prevention when the kernel reports thermal pressure or the battery falls below the floor, so Vigil never holds the machine awake while it is overheating or running low.
 
 ## Acknowledgements
 

@@ -188,8 +188,8 @@ The daemon's per-tick order is load-bearing: (1) detect agents + write/refresh
 one pidfile per match; (2) GC stale pidfiles on a separate bare `System`
 reserved for the cpu probe; (3) compute per-agent activity flags
 (claude/codex/copilot/vscode); (4) activity-filtered `refcount::count`; (5)
-cutoff checks — `VIGIL_FORCE` first (force short-circuits before any `pmset`
-read), then thermal cut, then battery cut, then the sliding cooldown re-arm; (6)
+cutoff checks — thermal cut (fail-closed: an unreadable `pmset -g therm` cuts
+the hold), then battery cut, then the sliding cooldown re-arm; (6)
 decide `desired_hold = count>0 && !thermal && !battery && !cooling`; (7) act; (8)
 write the frozen `daemon.tick` ABI file (POST-action engaged); (9) the caller
 sleeps interruptibly (100ms granularity, honoring INT/TERM well within

@@ -135,13 +135,13 @@ enum DebugSub {
         ps_cmd: std::path::PathBuf,
     },
     /// Hidden thermal cut oracle. Runs the LIVE env-driven thermal guard
-    /// (honoring VIGIL_FORCE + VIGIL_THERMAL_FIXTURE + VIGIL_THERMAL_CPU_LIMIT_FLOOR)
-    /// and prints exactly `cut` or `nocut`. Cross-engine parity endpoint.
+    /// (honoring VIGIL_THERMAL_FIXTURE + VIGIL_THERMAL_CPU_LIMIT_FLOOR) and
+    /// prints exactly `cut` or `nocut`. Cross-engine parity endpoint.
     #[command(hide = true)]
     Thermal,
     /// Hidden battery cut oracle. Runs the LIVE env-driven battery guard
-    /// (honoring VIGIL_FORCE + VIGIL_BATTERY_FIXTURE + VIGIL_BATTERY_FLOOR_PCT)
-    /// and prints exactly `cut` or `nocut`. Cross-engine parity endpoint.
+    /// (honoring VIGIL_BATTERY_FIXTURE + VIGIL_BATTERY_FLOOR_PCT) and prints
+    /// exactly `cut` or `nocut`. Cross-engine parity endpoint.
     #[command(hide = true)]
     Battery,
 }
@@ -353,32 +353,15 @@ fn cmd_debug(sub: Option<DebugSub>, json: bool) {
             // (VIGIL_THERMAL_CPU_LIMIT_FLOOR) and the config knob are ONE source
             // of truth.
             let cfg = load_config_or_exit();
-            let force = std::env::var("VIGIL_FORCE")
-                .map(|v| v == "1")
-                .unwrap_or(false);
-            // VIGIL_FORCE FIRST, before any subprocess — bash short-circuits on
-            // force before forking `pmset -g therm`. Skip the pmset read on force.
-            let cut = if force {
-                false
-            } else {
-                let raw = thermal::read_therm_raw();
-                thermal::live_should_cut(false, &raw, cfg.thermal_cpu_limit_floor)
-            };
+            let raw = thermal::read_therm_raw();
+            let cut = thermal::live_should_cut(&raw, cfg.thermal_cpu_limit_floor);
             // Plain println, no ANSI: machine output for the parity oracle.
             println!("{}", if cut { "cut" } else { "nocut" });
         }
         Some(DebugSub::Battery) => {
             let cfg = load_config_or_exit();
-            let force = std::env::var("VIGIL_FORCE")
-                .map(|v| v == "1")
-                .unwrap_or(false);
-            // VIGIL_FORCE FIRST, before any subprocess (bash lib/battery.sh).
-            let cut = if force {
-                false
-            } else {
-                let raw = battery::read_ps_raw();
-                battery::live_should_cut(false, &raw, cfg.battery_floor_pct)
-            };
+            let raw = battery::read_ps_raw();
+            let cut = battery::live_should_cut(&raw, cfg.battery_floor_pct);
             println!("{}", if cut { "cut" } else { "nocut" });
         }
         None => {

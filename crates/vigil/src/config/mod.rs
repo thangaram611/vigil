@@ -216,12 +216,9 @@ pub struct RawConfig {
     #[serde(default = "default_vscode_copilot_recent_mins")]
     pub vscode_copilot_recent_mins: u32,
 
-    // ---- idle/force ---------------------------------------------------------
+    // ---- idle ---------------------------------------------------------------
     #[serde(default = "default_idle_after_sec")]
     pub idle_after_sec: u32,
-
-    #[serde(default)]
-    pub force: u8,
 
     // ---- thermal cutoff policy (5.4) ----------------------------------------
     // NEW configurable knob. Option<u32> with NO #[serde(default)] so absence
@@ -267,7 +264,6 @@ impl Default for RawConfig {
             vscode_copilot_discover_secs: default_vscode_copilot_discover_secs(),
             vscode_copilot_recent_mins: default_vscode_copilot_recent_mins(),
             idle_after_sec: default_idle_after_sec(),
-            force: 0,
             thermal_cpu_limit_floor: None,
         }
     }
@@ -336,9 +332,8 @@ pub struct VigilConfig {
     pub vscode_copilot_discover_secs: u32,
     pub vscode_copilot_recent_mins: u32,
 
-    // ---- idle/force ---------------------------------------------------------
+    // ---- idle ---------------------------------------------------------------
     pub idle_after_sec: u32,
-    pub force: u8,
 
     // ---- thermal cutoff policy (5.4) ----------------------------------------
     /// `None` = unset = exact bash any-presence cut behavior (the parity
@@ -353,8 +348,6 @@ pub struct VigilConfig {
 pub struct CliOverrides {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idle_after_sec: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub force: Option<u8>,
 }
 
 // ── get_uid ───────────────────────────────────────────────────────────────────
@@ -568,7 +561,6 @@ fn derive_paths(raw: RawConfig) -> VigilConfig {
         vscode_copilot_discover_secs: raw.vscode_copilot_discover_secs,
         vscode_copilot_recent_mins: raw.vscode_copilot_recent_mins,
         idle_after_sec: raw.idle_after_sec,
-        force: raw.force,
         thermal_cpu_limit_floor: raw.thermal_cpu_limit_floor,
     }
 }
@@ -829,7 +821,6 @@ impl VigilConfig {
             "VIGIL_DAEMON_TICK_FILE".into(),
             self.daemon_tick_file.clone(),
         );
-        m.insert("VIGIL_FORCE".into(), self.force.to_string());
         m.insert(
             "VIGIL_IDLE_AFTER_SEC".into(),
             self.idle_after_sec.to_string(),

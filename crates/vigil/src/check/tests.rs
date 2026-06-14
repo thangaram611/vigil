@@ -576,7 +576,6 @@ fn golden_config_under(root: &Path) -> VigilConfig {
 
         // idle_after_sec = 300 → idle_window_minutes = (300+59)/60 = 5 (golden).
         idle_after_sec: 300,
-        force: 0,
         thermal_cpu_limit_floor: None,
     }
 }

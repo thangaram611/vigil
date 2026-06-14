@@ -40,15 +40,6 @@ fn now_unix() -> i64 {
     chrono::Local::now().timestamp()
 }
 
-/// Read `pmset -g ps` (or its fixture) UNLESS forced (same rationale).
-fn read_ps_or_skip(force: bool) -> String {
-    if force {
-        String::new()
-    } else {
-        battery::read_ps_raw()
-    }
-}
-
 /// The four per-tick activity flags, computed once per tick.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ActivityFlags {
@@ -271,15 +262,6 @@ impl Daemon {
         }
     }
 
-    /// `VIGIL_FORCE` (bash `1` => true; anything else/unset => false). Checked
-    /// FIRST inside the thermal/battery guards so a per-tick force never spawns
-    /// pmset.
-    fn force() -> bool {
-        std::env::var("VIGIL_FORCE")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-    }
-
     /// One tick of the loop (§2.1.3). Returns nothing; mutates `self.engaged` and
     /// `self.cooldown_until`.
     fn tick(&mut self) {
@@ -299,16 +281,13 @@ impl Daemon {
             flags.copilot,
             flags.vscode,
         );
-        // 5. cutoff checks (+ cooldown re-arm). VIGIL_FORCE first: skip the pmset
-        // read entirely on force (bash short-circuits before forking pmset).
+        // 5. cutoff checks (+ cooldown re-arm).
         let now = now_unix();
-        let force = Self::force();
         // Fail CLOSED: a genuine pmset read failure cuts the hold so a keep-awake
-        // is never sustained while blind to heat. `force` still short-circuits
-        // the read (no fork), preserving the force contract.
-        let cut_thermal = thermal::cut_thermal_failclosed(force, self.cfg.thermal_cpu_limit_floor);
-        let battery_raw = read_ps_or_skip(force);
-        let cut_battery = battery::live_should_cut(force, &battery_raw, self.cfg.battery_floor_pct);
+        // is never sustained while blind to heat.
+        let cut_thermal = thermal::cut_thermal_failclosed(self.cfg.thermal_cpu_limit_floor);
+        let battery_raw = battery::read_ps_raw();
+        let cut_battery = battery::live_should_cut(&battery_raw, self.cfg.battery_floor_pct);
         let (cooldown_until, cooling) = crate::power_guard::cooldown_state(
             now,
             cut_thermal,
@@ -370,11 +349,9 @@ impl Daemon {
             flags.vscode,
         );
         // 3. startup_can_hold = !thermal && !battery (both at startup).
-        let force = Self::force();
-        let thermal_should =
-            thermal::cut_thermal_failclosed(force, self.cfg.thermal_cpu_limit_floor);
+        let thermal_should = thermal::cut_thermal_failclosed(self.cfg.thermal_cpu_limit_floor);
         let battery_should =
-            battery::live_should_cut(force, &read_ps_or_skip(force), self.cfg.battery_floor_pct);
+            battery::live_should_cut(&battery::read_ps_raw(), self.cfg.battery_floor_pct);
         let guard = StartupGuard {
             thermal: thermal_should,
             battery: battery_should,
