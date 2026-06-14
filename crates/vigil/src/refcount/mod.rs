@@ -293,6 +293,18 @@ pub fn gc(
     now: i64,
 ) {
     use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate};
+    // Read the active dir FIRST and bail before paying any scan cost when there
+    // is nothing to GC (the common idle case). gc() runs every daemon tick, and
+    // each non-empty pass walks the whole process table TWICE with a mandatory
+    // ~200ms sleep wedged between — so skipping it when empty removes the single
+    // heaviest per-tick cost on an idle machine. (Kept ProcessesToUpdate::All:
+    // narrowing the refresh to specific pids on this long-lived `System` would
+    // let stale pids from prior ticks accumulate and feed a reused-pid a wrong
+    // start_time/cpu into gc_decision.)
+    let entries = read_entries(active_dir);
+    if entries.is_empty() {
+        return;
+    }
     // Refresh scoped to cpu + (implicit) start_time for the probe. Two refreshes
     // spaced by MINIMUM_CPU_UPDATE_INTERVAL are REQUIRED for non-zero cpu_usage().
     let kind = ProcessRefreshKind::nothing().with_cpu();
@@ -300,7 +312,7 @@ pub fn gc(
     std::thread::sleep(sysinfo::MINIMUM_CPU_UPDATE_INTERVAL);
     sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
 
-    for e in read_entries(active_dir) {
+    for e in entries {
         let alive = pid_alive(e.pid);
         let proc_ = sys.process(Pid::from(e.pid as usize));
         let live_start = proc_.map(|p| p.start_time() as i64);
@@ -468,13 +480,14 @@ mod tests {
     fn gc_keeps_busy_agent_with_aged_pidfile() {
         use sysinfo::{ProcessRefreshKind, ProcessesToUpdate};
 
-        // A busy-loop child: burns CPU until killed.
-        let mut child = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("while :; do :; done")
-            .spawn()
-            .expect("spawn busy child");
-        let pid = child.id();
+        // A busy-loop child: burns ~100% of a core. `BoundedCpuHog` makes it
+        // leak-proof — it self-terminates after 60s even if orphaned, leads its
+        // own process group, and is SIGKILL'd + reaped by its `Drop` on panic OR
+        // normal exit (so a failed assertion below cannot leave it spinning).
+        // 60s dwarfs the test's worst case (10 retries × ~200ms), so the
+        // self-bound never ends the workload under test.
+        let hog = crate::testutil::BoundedCpuHog::spawn(60);
+        let pid = hog.pid();
 
         // Read the child's live start_ts via the same sysinfo path gc uses, so
         // the pid-reuse branch (b) cannot fire on a start_ts mismatch.
@@ -514,8 +527,8 @@ mod tests {
             }
         }
 
-        let _ = child.kill();
-        let _ = child.wait();
+        // `hog` is dropped here (or on an assertion panic below) — its `Drop`
+        // SIGKILLs the process group and reaps it; no manual kill needed.
         assert!(
             kept,
             "gc must KEEP an aged pidfile for a busy (high-cpu) live agent across \

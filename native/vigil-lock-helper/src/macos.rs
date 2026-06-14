@@ -30,7 +30,20 @@ extern "C" {
 
 const REENABLE_MAX_RETRIES: usize = 3;
 const REENABLE_RETRY_SLEEP_MS: u64 = 20;
-const LOOP_TICK_MS: u64 = 25;
+/// How long `CFRunLoop::run_in_mode` blocks per iteration of the freeze/capture
+/// loops when no event arrives. The CGEvent tap is a real run-loop *source*, so
+/// a genuine keypress (the unlock chord) and an explicit tap-disable
+/// notification both wake the loop *immediately* regardless of this timeout —
+/// unlock latency is NOT bounded by it. The tick only bounds deadline-driven
+/// housekeeping: the 1 Hz countdown redraw, the watchdog deadline check, and the
+/// *polled* `tap_is_enabled` health re-check (the backstop for a silent tap
+/// disable). 250ms keeps that worst-case housekeeping/input-swallow-gap window
+/// tight while cutting idle wakeups ~10× vs. the original 25ms hot-poll (which
+/// spun ~40 wakeups/sec for the entire, possibly multi-hour, lock).
+const LOOP_TICK_MS: u64 = 250;
+// Guard against a future edit silently reintroducing a hot-poll (too low) or
+// blowing the deadline / tap-health responsiveness (too high).
+const _: () = assert!(LOOP_TICK_MS >= 100 && LOOP_TICK_MS <= 1000);
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct PermissionReport {

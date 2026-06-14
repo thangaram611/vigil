@@ -21,3 +21,8 @@ pub mod thermal;
 // Shared output substrate (anstream prints, comfy-table, --json). Lives in the
 // library so `debug::render` (a library module) and the binary both use it.
 pub mod output;
+
+// Test-only helpers shared by the crate's in-crate unit tests (e.g. the
+// leak-proof `BoundedCpuHog`). Compiled only under `cfg(test)`.
+#[cfg(test)]
+mod testutil;
