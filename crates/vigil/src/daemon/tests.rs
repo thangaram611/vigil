@@ -506,3 +506,142 @@ fn act_engage_failure_keeps_engaged_false() {
         "caffeinate NOT spawned when helper engage fails (bash early return)"
     );
 }
+
+// ── partial-engage robustness: trust the observable pmset state ───────────────
+
+/// A helper that APPLIES the privileged `pmset disablesleep 1` (writes the fake
+/// SleepDisabled file) but then reports a CLIENT failure — the exact "partial
+/// engage" shape where the root helper ran pmset but the daemon's response read
+/// timed out (e.g. an unreadable response dir).
+struct PartialEngageIpc {
+    sleep_file: PathBuf,
+}
+impl HelperClient for PartialEngageIpc {
+    fn request(&self, action: crate::helper::validate::Action) -> Result<Response, IpcError> {
+        if let crate::helper::validate::Action::Engage = action {
+            std::fs::write(&self.sleep_file, "1\n").unwrap();
+        }
+        Err(IpcError::Timeout)
+    }
+}
+
+#[test]
+fn act_engage_partial_adopts_observable_hold() {
+    // (true,false): machine.engage() errors at the CLIENT, but the privileged
+    // pmset change DID land (SleepDisabled=1). act() must trust the observable
+    // state and ADOPT the hold — engaged=true + spawn the caffeinate the failed
+    // engage skipped — so it is tracked and the later release path can undo it,
+    // instead of leaking an untracked pmset=1.
+    let h = Harness::new(0);
+    let ipc = PartialEngageIpc {
+        sleep_file: h.sleep_file.clone(),
+    };
+    let m = h.machine_with_ipc(&ipc);
+    let engaged = act(
+        &m,
+        true,
+        false,
+        2,
+        false,
+        false,
+        60,
+        "on AC",
+        ActivityFlags::default(),
+        NOW,
+    );
+    assert!(
+        engaged,
+        "partial engage + observable SleepDisabled=1 → adopted"
+    );
+    assert_eq!(h.sd(), 1, "privileged pmset change is observable");
+    assert!(
+        h.caffeinate_pidfile.exists(),
+        "adopt spawns the caffeinate the failed engage skipped"
+    );
+    assert!(
+        h.baseline_file.exists(),
+        "baseline was captured before the failed engage"
+    );
+}
+
+#[test]
+fn act_idle_reconciles_orphaned_partial_engage() {
+    // (false,false): idle and NOT tracking a hold, yet SleepDisabled=1 with a
+    // baseline of 0 — the orphan signature of a partial engage the client never
+    // confirmed. act() must release to restore SleepDisabled=0 and clear the
+    // stale baseline (fires once).
+    let h = Harness::new(1); // leaked: SleepDisabled stuck at 1
+    std::fs::write(
+        &h.baseline_file,
+        "{\"SleepDisabled\":0,\"captured_at\":1700000000}\n",
+    )
+    .unwrap();
+    let m = h.machine();
+    let engaged = act(
+        &m,
+        false,
+        false,
+        0,
+        false,
+        false,
+        60,
+        "on AC",
+        ActivityFlags::default(),
+        NOW,
+    );
+    assert!(!engaged, "stays not-engaged after reconcile");
+    assert_eq!(
+        h.sd(),
+        0,
+        "orphaned hold released → SleepDisabled restored to baseline 0"
+    );
+    assert!(
+        !h.baseline_file.exists(),
+        "reconcile clears the stale baseline"
+    );
+    assert!(
+        h.events().contains(&"helper release".to_string()),
+        "reconcile issued a helper release"
+    );
+}
+
+#[test]
+fn act_idle_leaves_kept_soft_release_baseline_untouched() {
+    // (false,false) NEGATIVE: after a thermal SOFT release the baseline.json is
+    // intentionally KEPT and SleepDisabled was restored to its (1) baseline.
+    // SleepDisabled=1 is the CORRECT state here, not a leak — the reconcile is
+    // gated on baseline_value==0, so it must NOT fire.
+    let h = Harness::new(1);
+    std::fs::write(
+        &h.baseline_file,
+        "{\"SleepDisabled\":1,\"captured_at\":1700000000}\n",
+    )
+    .unwrap();
+    let m = h.machine();
+    let engaged = act(
+        &m,
+        false,
+        false,
+        0,
+        false,
+        false,
+        60,
+        "on AC",
+        ActivityFlags::default(),
+        NOW,
+    );
+    assert!(!engaged);
+    assert_eq!(
+        h.sd(),
+        1,
+        "baseline=1 is the correct restored state, untouched"
+    );
+    assert!(
+        h.baseline_file.exists(),
+        "kept soft-release baseline preserved"
+    );
+    assert!(
+        h.events().is_empty(),
+        "no helper traffic when baseline=1 (not a leak)"
+    );
+}

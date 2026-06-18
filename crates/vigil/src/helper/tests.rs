@@ -661,6 +661,88 @@ fn cold_start_idle_release_is_noop() {
     );
 }
 
+// ── §4.10 dir-mode convergence: response/log stay daemon-traversable ──────────
+
+#[test]
+fn validate_dirs_self_heals_response_to_0755_and_keeps_state_0700() {
+    use std::os::unix::fs::PermissionsExt;
+    let _g = lock_env();
+    let l = Layout::new();
+    l.set_env();
+
+    // Reproduce the live failure an OLDER helper produced: response (and log) dir
+    // tightened to 0700 (daemon can no longer traverse → every round-trip times
+    // out), and the state dir loosened to 0755. validate_dirs runs on EVERY poll
+    // (via process_once_with_seams), so it must CONVERGE each dir to setup's
+    // §4.10 mode — repairing the response/log dirs back to a daemon-traversable
+    // 0755 and keeping state root-only 0700.
+    let log_dir = l.cfg.log_file.parent().unwrap().to_path_buf();
+    std::fs::set_permissions(&l.cfg.response_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&l.cfg.state_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    l.run();
+
+    let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode(&l.cfg.response_dir),
+        0o755,
+        "response dir self-heals to daemon-traversable 0755"
+    );
+    assert_eq!(mode(&log_dir), 0o755, "log dir converges to 0755");
+    assert_eq!(
+        mode(&l.cfg.state_dir),
+        0o700,
+        "state dir converges to root-only 0700"
+    );
+    assert_eq!(
+        mode(&l.cfg.state_dir.join(PROCESSING_DIR)),
+        0o700,
+        "processing subdir stays 0700"
+    );
+}
+
+// ── stale response GC: root reclaims abandoned/consumed resp.* files ──────────
+
+#[test]
+fn stale_response_sweep_removes_old_keeps_fresh_and_spares_non_resp() {
+    let _g = lock_env();
+    let l = Layout::new();
+    l.set_env();
+    let dirs = validate_dirs(&l.cfg).expect("dirs validate");
+
+    // The response dir is root-owned, so the non-root daemon can NEVER unlink its
+    // own consumed responses — the helper is the only reclaimer. Plant a finished
+    // resp, an in-flight temp, and a non-resp control file.
+    std::fs::write(l.cfg.response_dir.join("resp.fresh"), "status=ok\n").unwrap();
+    std::fs::write(l.cfg.response_dir.join(".resp.tmp.123"), "x").unwrap();
+    std::fs::write(l.cfg.response_dir.join("keepme"), "x").unwrap();
+
+    // age>=0 sweeps everything resp-shaped; the control file is spared.
+    cleanup_stale_responses(&dirs, &l.cfg, 0);
+    assert!(
+        !l.cfg.response_dir.join("resp.fresh").exists(),
+        "resp.* reclaimed at age>=0"
+    );
+    assert!(
+        !l.cfg.response_dir.join(".resp.tmp.123").exists(),
+        ".resp.* temp reclaimed at age>=0"
+    );
+    assert!(
+        l.cfg.response_dir.join("keepme").exists(),
+        "a non-resp file is NEVER swept"
+    );
+
+    // With the production floor, a just-written resp SURVIVES — never reclaimed
+    // out from under a client still polling for it.
+    std::fs::write(l.cfg.response_dir.join("resp.live"), "status=ok\n").unwrap();
+    cleanup_stale_responses(&dirs, &l.cfg, STALE_RESPONSE_SECS);
+    assert!(
+        l.cfg.response_dir.join("resp.live").exists(),
+        "fresh resp survives the {STALE_RESPONSE_SECS}s sweep"
+    );
+}
+
 // ── status response echoes action=status (and message=ok) ─────────────────────
 
 #[test]

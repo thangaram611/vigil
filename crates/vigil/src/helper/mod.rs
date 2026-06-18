@@ -255,16 +255,24 @@ pub struct ValidatedDirs {
     pub processing_fd: OwnedFd,
 }
 
-/// Ensure a directory exists with mode 0700 (best-effort create); does NOT
-/// follow symlinks for the validation that follows.
-fn ensure_dir_0700(path: &Path) -> std::io::Result<()> {
+/// Ensure a directory exists and CONVERGES to `mode` (best-effort create + set).
+/// Does NOT follow symlinks for the fd-validation that follows.
+///
+/// The per-dir mode MUST match what `vigil setup` installs (the §4.10 matrix), so
+/// a self-heal on an existing dir can never tighten it BELOW setup's intent. In
+/// particular the response dir is root-owned `0755` (root writes, the non-root
+/// daemon must traverse+read it): tightening it to `0700` makes every helper
+/// round-trip time out because the daemon can no longer read `resp.<id>`. Because
+/// this runs each poll, it also self-REPAIRS a response dir an older buggy helper
+/// left at `0700` back to `0755` on the next pass.
+fn ensure_dir_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     if !path.exists() {
         std::fs::create_dir_all(path)?;
     }
     use std::os::unix::fs::PermissionsExt;
     if let Ok(meta) = std::fs::metadata(path) {
         let mut perms = meta.permissions();
-        perms.set_mode(0o700);
+        perms.set_mode(mode);
         let _ = std::fs::set_permissions(path, perms);
     }
     Ok(())
@@ -274,15 +282,18 @@ fn ensure_dir_0700(path: &Path) -> std::io::Result<()> {
 /// subdir if absent, then fd-validates each as root-owned + non-symlink +
 /// not-group/other-writable.
 pub fn validate_dirs(cfg: &HelperConfig) -> Result<ValidatedDirs, String> {
-    // Create dirs if absent (matches bash `mkdir -p`). The fd-based validation
-    // below is what actually enforces ownership/symlink/mode.
-    let _ = ensure_dir_0700(&cfg.response_dir);
-    let _ = ensure_dir_0700(&cfg.state_dir);
+    // Create dirs if absent (matches bash `mkdir -p`) and CONVERGE each to the
+    // mode `vigil setup` installs (§4.10 matrix). The fd-based validation below
+    // is what actually enforces ownership/symlink/not-group-other-writable. The
+    // response + log dirs are root-owned 0755 (the non-root daemon must traverse
+    // them); the state + processing dirs are root-only 0700.
+    let _ = ensure_dir_mode(&cfg.response_dir, 0o755);
+    let _ = ensure_dir_mode(&cfg.state_dir, 0o700);
     if let Some(log_parent) = cfg.log_file.parent() {
-        let _ = ensure_dir_0700(log_parent);
+        let _ = ensure_dir_mode(log_parent, 0o755);
     }
     let processing = cfg.state_dir.join(PROCESSING_DIR);
-    let _ = ensure_dir_0700(&processing);
+    let _ = ensure_dir_mode(&processing, 0o700);
 
     // Validate each root dir via fd.
     let response_fd = open_validated_root_dir(&cfg.response_dir)
@@ -706,6 +717,50 @@ fn list_request_bases(cfg: &HelperConfig) -> Vec<String> {
     out
 }
 
+/// Hard floor on how long a `resp.*` (or in-flight `.resp.*`) file lives in the
+/// response dir before the helper reclaims it. The response dir is root-owned, so
+/// the non-root daemon CANNOT unlink its own consumed responses (unlink needs
+/// write on the dir, which only root holds) — the privileged helper is the ONLY
+/// party that can reclaim them. Without this, every round-trip (consumed AND
+/// abandoned-on-client-timeout) leaks a response file, growing the dir without
+/// bound. The floor is comfortably larger than any plausible client operation
+/// timeout (`power_helper_timeout_secs`, default 10s) so a response a client is
+/// still polling for is NEVER swept out from under it.
+const STALE_RESPONSE_SECS: u64 = 300;
+
+/// Sweep `resp.*` / `.resp.*` files older than `max_age_secs` from the validated
+/// response dir. Best-effort; never fails the caller. Enumerates by path (the dir
+/// is root-owned + fd-validated, and a non-root party cannot plant symlinks in a
+/// root-owned dir — same trust basis as [`cleanup_orphaned_processing`]) but
+/// unlinks via `unlinkat` relative to the validated response fd so a swapped path
+/// cannot redirect the removal. A file whose mtime is in the future (clock skew)
+/// is conservatively KEPT.
+fn cleanup_stale_responses(dirs: &ValidatedDirs, cfg: &HelperConfig, max_age_secs: u64) {
+    let now = std::time::SystemTime::now();
+    let Ok(rd) = std::fs::read_dir(&cfg.response_dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        // Only the helper's own response artifacts: finished `resp.<id>` and the
+        // in-flight `.resp.<id>.<pid>` temps. Never touch anything else.
+        if !name.starts_with("resp.") && !name.starts_with(".resp.") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|mtime| now.duration_since(mtime).ok())
+            .is_some_and(|age| age.as_secs() >= max_age_secs);
+        if stale {
+            let _ = unlinkat(&dirs.response_fd, name.as_str(), UnlinkatFlags::NoRemoveDir);
+        }
+    }
+}
+
 /// Clean up orphaned files from the processing dir left by a crashed prior
 /// instance (KeepAlive restart). Each is root-owned (the dir is root-owned +
 /// 0700, validated at startup), so removing them is safe; we use unlinkat
@@ -757,6 +812,7 @@ pub fn process_once_with_seams<P: PmsetDisableSleep, S: SleepReader>(
 ) -> Result<usize, String> {
     let dirs = validate_dirs(cfg)?;
     cleanup_orphaned_processing(&dirs, cfg);
+    cleanup_stale_responses(&dirs, cfg, STALE_RESPONSE_SECS);
     Ok(process_pending(cfg, &dirs, pmset, sleep))
 }
 

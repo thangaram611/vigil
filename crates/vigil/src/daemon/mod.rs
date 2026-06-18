@@ -94,8 +94,27 @@ where
             match machine.engage(now) {
                 Ok(()) => true,
                 Err(e) => {
-                    tracing::error!("engage failed: {e}");
-                    false
+                    // The IPC round-trip failed, but the privileged helper may
+                    // have ALREADY applied `pmset disablesleep 1` before the
+                    // client could read the response (e.g. a response-dir perms
+                    // problem, or a round-trip that ran past the client timeout).
+                    // Trust the OBSERVABLE state over the IPC verdict: if
+                    // SleepDisabled is actually 1, the hold IS in effect — adopt
+                    // it (spawn the caffeinate the failed engage skipped, mark
+                    // engaged) rather than leak an untracked pmset=1 that the idle
+                    // release path would otherwise never undo.
+                    if machine.sleep_disabled() {
+                        tracing::warn!(
+                            "engage IPC failed ({e}) but SleepDisabled=1 — adopting privileged hold"
+                        );
+                        if let Err(se) = machine.spawn_caffeinate() {
+                            tracing::warn!("adopt: caffeinate spawn failed: {se}");
+                        }
+                        true
+                    } else {
+                        tracing::error!("engage failed: {e}");
+                        false
+                    }
                 }
             }
         }
@@ -124,7 +143,31 @@ where
             // engaged := false ALWAYS, even if a release no-ops.
             false
         }
-        (false, false) => engaged,
+        (false, false) => {
+            // Partial-engage reconcile (defense in depth). We are idle and not
+            // tracking a hold, yet `SleepDisabled` is observably 1 while our
+            // recorded baseline was 0 — the signature of a prior engage that the
+            // privileged layer applied but the client never confirmed (so
+            // `engaged` was never set, and the normal `(false,true)` release path
+            // never runs). Release to restore the original state. Idempotent and
+            // safe: the helper no-ops a release when it is not actually engaged
+            // and never clobbers an externally-set value, and full_release clears
+            // the stale baseline so this fires at most once per orphan.
+            //
+            // Gated on `baseline_value()==0` so a legitimately-kept soft-release
+            // baseline of 1 — where SleepDisabled=1 is the CORRECT restored state,
+            // not a leak — is left untouched.
+            if machine.baseline_present()
+                && machine.sleep_disabled()
+                && machine.baseline_value() == 0
+            {
+                tracing::warn!(
+                    "reconciling orphaned sleep hold (SleepDisabled=1, baseline=0, idle) — releasing"
+                );
+                machine.full_release();
+            }
+            engaged
+        }
     }
 }
 

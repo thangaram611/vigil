@@ -62,6 +62,12 @@ pub enum IpcError {
     Io(std::io::Error),
     /// Helper did not respond within the timeout budget.
     Timeout,
+    /// The response dir is not traversable/readable by this (non-root) client —
+    /// an `EACCES` while probing for `resp.<id>`. This is a setup/permissions
+    /// fault (e.g. a response dir left at `0700` instead of root-owned `0755`),
+    /// NOT "the response is not ready yet" — so it is surfaced immediately with an
+    /// actionable message rather than burned as a generic timeout.
+    ResponseDirUnreadable(String),
     /// The response file failed fd-based root-ownership validation (possible
     /// forgery, or a non-root writer in the response dir).
     InvalidResponse(String),
@@ -80,6 +86,9 @@ impl std::fmt::Display for IpcError {
             }
             IpcError::Io(e) => write!(f, "ipc io error: {e}"),
             IpcError::Timeout => write!(f, "root helper timed out"),
+            IpcError::ResponseDirUnreadable(why) => {
+                write!(f, "root helper response dir unreadable: {why}")
+            }
             IpcError::InvalidResponse(why) => write!(f, "invalid helper response: {why}"),
             IpcError::HelperError(r) => write!(f, "root helper error: {}", r.message),
         }
@@ -242,13 +251,30 @@ impl HelperClient for MacHelperClient {
             // Existence check via symlink_metadata is fine here (it does NOT
             // follow, and we re-validate via fd before trusting content); the
             // trust decision is the fd-based read below, never this probe.
-            if std::fs::symlink_metadata(&resp).is_ok() {
-                let body = read_validated_response(&resp)?;
-                let parsed = parse_response(&body);
-                if parsed.is_ok() {
-                    return Ok(parsed);
+            match std::fs::symlink_metadata(&resp) {
+                Ok(_) => {
+                    let body = read_validated_response(&resp)?;
+                    let parsed = parse_response(&body);
+                    if parsed.is_ok() {
+                        return Ok(parsed);
+                    }
+                    return Err(IpcError::HelperError(parsed));
                 }
-                return Err(IpcError::HelperError(parsed));
+                // EACCES => the response dir is not traversable/readable by us. A
+                // missing-but-pending response yields NotFound, never EACCES, so
+                // this is a real perms/setup fault — fail fast with guidance
+                // instead of polling out the whole timeout and blaming the helper.
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    let _ = std::fs::remove_file(&req);
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(IpcError::ResponseDirUnreadable(format!(
+                        "cannot read {} (EACCES) — run 'vigil setup' or 'vigil doctor'",
+                        self.response_dir.display()
+                    )));
+                }
+                // NotFound (response not written yet) or any other transient
+                // error => keep polling until the deadline.
+                Err(_) => {}
             }
             if Instant::now() >= deadline {
                 let _ = std::fs::remove_file(&req);
@@ -389,6 +415,10 @@ mod tests {
         );
         assert_eq!(IpcError::Timeout.to_string(), "root helper timed out");
         assert_eq!(
+            IpcError::ResponseDirUnreadable("cannot read /x (EACCES)".into()).to_string(),
+            "root helper response dir unreadable: cannot read /x (EACCES)"
+        );
+        assert_eq!(
             IpcError::InvalidResponse("not a regular file".into()).to_string(),
             "invalid helper response: not a regular file"
         );
@@ -408,6 +438,50 @@ mod tests {
             "denied",
         ));
         assert_eq!(io_err.to_string(), "ipc io error: denied");
+    }
+
+    #[test]
+    fn request_eacces_response_dir_fast_fails_instead_of_timing_out() {
+        use std::os::unix::fs::PermissionsExt;
+        // A root test runner can traverse a 0000 dir, so the EACCES this test
+        // depends on would not occur — skip it there (matches the non-root
+        // assumption of the other ipc fd tests).
+        // SAFETY: geteuid is always safe.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let req = dir.path().join("req");
+        let resp = dir.path().join("resp");
+        std::fs::create_dir(&req).unwrap();
+        std::fs::create_dir(&resp).unwrap();
+        // Make the response dir non-traversable: the probe for resp.<id> hits
+        // EACCES (a perms/setup fault), NOT "not written yet".
+        std::fs::set_permissions(&resp, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let client = MacHelperClient {
+            request_dir: req,
+            response_dir: resp.clone(),
+            timeout_secs: 5,
+        };
+        let start = Instant::now();
+        let err = client.request(Action::Engage).unwrap_err();
+        let elapsed = start.elapsed();
+
+        // Restore perms so the tempdir cleanup can recurse.
+        std::fs::set_permissions(&resp, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        match err {
+            IpcError::ResponseDirUnreadable(why) => {
+                assert!(why.contains("EACCES"), "diagnostic names EACCES: {why}")
+            }
+            other => panic!("expected ResponseDirUnreadable, got {other:?}"),
+        }
+        // The whole point: it FAILS FAST rather than burning the 5s budget.
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "EACCES must not poll out the timeout (took {elapsed:?})"
+        );
     }
 
     #[test]

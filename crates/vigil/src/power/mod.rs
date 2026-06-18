@@ -130,6 +130,22 @@ impl<I: HelperClient, C: CaffeinateAssertion, S: SleepReader> PowerMachine<'_, I
         }
     }
 
+    /// True iff the daemon `baseline.json` exists (we hold — or recently held — a
+    /// captured baseline). Used by the partial-engage reconcile to tell an
+    /// orphaned owned hold apart from a never-engaged idle state.
+    pub fn baseline_present(&self) -> bool {
+        self.baseline_file.exists()
+    }
+
+    /// The OBSERVABLE privileged state: `true` iff `SleepDisabled` is currently 1.
+    /// Read directly from the seam — needs NO helper round-trip — so it stays
+    /// trustworthy even when the IPC path is degraded. This is the anchor for
+    /// partial-engage recovery: trust what pmset actually reports over what the
+    /// (possibly-timed-out) IPC client could confirm.
+    pub fn sleep_disabled(&self) -> bool {
+        self.sleep.read() == 1
+    }
+
     /// Clear the daemon baseline.json.
     pub fn clear_baseline(&self) {
         let _ = std::fs::remove_file(&self.baseline_file);
