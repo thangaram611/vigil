@@ -304,7 +304,12 @@ fn cmd_sync_install(cfg: &VigilConfig, ui: tui::Tui) -> Result<String, String> {
         resolve_repo_root().ok_or_else(|| "could not resolve repo root for sync".to_string())?;
     let manifest = repo_root.join("Cargo.toml");
 
-    // Build BOTH shipped binaries in one release build of the workspace.
+    // Build BOTH shipped binaries of the vigil crate (`vigil` + the privileged
+    // `vigil-root-helper`) in one release build of the workspace. Staging the
+    // helper here too is what makes a RE-`setup` deploy the CURRENT helper:
+    // `cmd_install_root_helper` reuses `{install}/bin/vigil-root-helper` when it
+    // exists, so without this it would re-install a stale staged copy and any
+    // helper fix would silently fail to ship.
     let status = std::process::Command::new("cargo")
         .arg("build")
         .arg("--quiet")
@@ -313,6 +318,8 @@ fn cmd_sync_install(cfg: &VigilConfig, ui: tui::Tui) -> Result<String, String> {
         .arg(&manifest)
         .arg("--bin")
         .arg("vigil")
+        .arg("--bin")
+        .arg("vigil-root-helper")
         .status()
         .map_err(|e| format!("could not run cargo build: {e}"))?;
     if !status.success() {
@@ -330,6 +337,19 @@ fn cmd_sync_install(cfg: &VigilConfig, ui: tui::Tui) -> Result<String, String> {
     ui.detail(
         &format!("daemon: installed to {vigil_dst}"),
         &format!("  daemon: installed to {vigil_dst}"),
+    );
+
+    // Stage the freshly-built privileged helper alongside `vigil` so a re-`setup`
+    // always ships the current binary (cmd_install_root_helper sudo-installs this
+    // staged copy into the root tree). Atomic temp+rename, so it cleanly replaces
+    // an older staged helper.
+    let helper_src = format!("{target_dir}/release/vigil-root-helper");
+    let helper_dst = format!("{install_bin}/vigil-root-helper");
+    install_binary(&helper_src, &helper_dst, 0o755)
+        .map_err(|e| format!("failed to install vigil-root-helper: {e}"))?;
+    ui.detail(
+        &format!("root helper: staged to {helper_dst}"),
+        &format!("  root helper: staged to {helper_dst}"),
     );
 
     // Darwin-only: build + install the lock helper.
