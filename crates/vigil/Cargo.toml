@@ -56,6 +56,11 @@ tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter"] }
 walkdir = "2.5.0"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+logind-zbus = "5.3.2"
+service-manager = "0.11.0"
+zbus = "5.16.0"
+
 [dev-dependencies]
 regex = "1.12.4"
 tempfile = "3.27.0"

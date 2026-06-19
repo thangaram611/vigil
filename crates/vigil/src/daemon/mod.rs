@@ -3,11 +3,10 @@
 //!
 //! Owns ONE long-lived [`ProcScanner`] (the single `sysinfo::System` for
 //! detect/start-time) plus a SECOND bare `sysinfo::System` for the gc cpu probe
-//! (Q9: two Systems, simplest correct). The three [`PowerMachine`] seams
-//! ([`MacHelperClient`], [`MacCaffeinate`], [`MacSleepReader`]) are owned as
-//! struct fields; a thin [`PowerMachine`] borrow is constructed at each point of
-//! use (it is a zero-cost reference struct), so the seams' lifetime spans the
-//! whole daemon without a self-referential struct.
+//! (Q9: two Systems, simplest correct). Power hold/release goes through the
+//! platform [`PowerController`](crate::power::platform::PowerController) facade;
+//! macOS delegates to the existing `pmset` + `caffeinate` state machine, while
+//! future Linux/Windows impls fill the same contract.
 //!
 //! Per-tick order (§2.1.3): detect+touch → gc → per-agent activity → activity-
 //! filtered count → cutoff checks + cooldown re-arm → decide → act → write tick
@@ -16,7 +15,7 @@
 pub mod lock;
 pub mod tick;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -24,10 +23,13 @@ use std::time::Duration;
 use crate::activity::scan::{self, Agent};
 use crate::activity::vscode;
 use crate::config::{self, VigilConfig};
-use crate::ipc::{HelperClient, IpcError, MacHelperClient};
-use crate::power::PowerMachine;
-use crate::power::caffeinate::{CaffeinateAssertion, MacCaffeinate};
-use crate::power::pmset::{MacSleepReader, SleepReader};
+#[cfg(target_os = "linux")]
+use crate::power::linux::LinuxLogindPower;
+#[cfg(target_os = "macos")]
+use crate::power::platform::MacPowerController;
+use crate::power::platform::PowerController;
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+use crate::power::platform::UnsupportedPowerController;
 use crate::procscan::ProcScanner;
 use crate::refcount;
 use crate::{battery, thermal};
@@ -63,8 +65,8 @@ pub fn desired_hold(count: u32, cut_thermal: bool, cut_battery: bool, cooling: b
 /// Release-reason priority is LOAD-BEARING (`bin/vigil-daemon:161-186`):
 /// **thermal → SOFT (keep baseline) > battery → FULL > count==0 → FULL.**
 #[allow(clippy::too_many_arguments)]
-pub fn act<I, C, S>(
-    machine: &PowerMachine<'_, I, C, S>,
+pub fn act(
+    power: &mut dyn PowerController,
     desired: bool,
     engaged: bool,
     count: u32,
@@ -74,12 +76,7 @@ pub fn act<I, C, S>(
     battery_summary: &str,
     flags: ActivityFlags,
     now: i64,
-) -> bool
-where
-    I: HelperClient,
-    C: CaffeinateAssertion,
-    S: SleepReader,
-{
+) -> bool {
     match (desired, engaged) {
         (true, false) => {
             let cs = if flags.claude { "active" } else { "idle" };
@@ -91,24 +88,23 @@ where
             );
             // engaged := true ONLY if the helper engage succeeds (bash:
             // `if vigil_pmset_engage; then DAEMON_ENGAGED=1; fi`).
-            match machine.engage(now) {
+            match power.engage(now) {
                 Ok(()) => true,
                 Err(e) => {
                     // The IPC round-trip failed, but the privileged helper may
                     // have ALREADY applied `pmset disablesleep 1` before the
                     // client could read the response (e.g. a response-dir perms
                     // problem, or a round-trip that ran past the client timeout).
-                    // Trust the OBSERVABLE state over the IPC verdict: if
-                    // SleepDisabled is actually 1, the hold IS in effect — adopt
-                    // it (spawn the caffeinate the failed engage skipped, mark
-                    // engaged) rather than leak an untracked pmset=1 that the idle
-                    // release path would otherwise never undo.
-                    if machine.sleep_disabled() {
+                    // Trust the OBSERVABLE platform state over the IPC verdict:
+                    // if the hold landed, adopt it rather than leak an untracked
+                    // platform hold that the idle release path would otherwise
+                    // never undo.
+                    if power.observable_engaged() {
                         tracing::warn!(
-                            "engage IPC failed ({e}) but SleepDisabled=1 — adopting privileged hold"
+                            "engage failed ({e}) but the platform hold is observable — adopting"
                         );
-                        if let Err(se) = machine.spawn_caffeinate() {
-                            tracing::warn!("adopt: caffeinate spawn failed: {se}");
+                        if let Err(se) = power.adopt_after_failed_engage() {
+                            tracing::warn!("adopt failed: {se}");
                         }
                         true
                     } else {
@@ -120,7 +116,7 @@ where
         }
         (true, true) => {
             // Reassert drift; engaged stays true unless reconcile errors.
-            match machine.reconcile_engaged() {
+            match power.reconcile_engaged() {
                 Ok(()) => true,
                 Err(e) => {
                     tracing::warn!("reconcile failed: {e}");
@@ -132,13 +128,13 @@ where
             // Release sub-branch — priority order is load-bearing.
             if cut_thermal {
                 tracing::warn!("release — thermal cutoff (cooldown {cooldown_secs}s)");
-                machine.soft_release();
+                power.soft_release();
             } else if cut_battery {
                 tracing::warn!("release — battery floor ({battery_summary})");
-                machine.full_release();
+                power.full_release();
             } else if count == 0 {
                 tracing::info!("release — no active agents");
-                machine.full_release();
+                power.full_release();
             }
             // engaged := false ALWAYS, even if a release no-ops.
             false
@@ -157,14 +153,9 @@ where
             // Gated on `baseline_value()==0` so a legitimately-kept soft-release
             // baseline of 1 — where SleepDisabled=1 is the CORRECT restored state,
             // not a leak — is left untouched.
-            if machine.baseline_present()
-                && machine.sleep_disabled()
-                && machine.baseline_value() == 0
-            {
-                tracing::warn!(
-                    "reconciling orphaned sleep hold (SleepDisabled=1, baseline=0, idle) — releasing"
-                );
-                machine.full_release();
+            if power.orphaned_hold_requires_release() {
+                tracing::warn!("reconciling orphaned platform sleep hold while idle — releasing");
+                power.full_release();
             }
             engaged
         }
@@ -183,12 +174,7 @@ pub struct Daemon {
     /// pass, cached by `detect_and_touch` so the vscode host probe reuses it
     /// instead of spinning up a SECOND full process scan per tick.
     last_ps_text: String,
-    // ── owned PowerMachine seams (borrowed by a thin PowerMachine per use) ──
-    ipc: MacHelperClient,
-    caffeinate: MacCaffeinate,
-    sleep: MacSleepReader,
-    baseline_file: PathBuf,
-    caffeinate_pidfile: PathBuf,
+    power: Box<dyn PowerController>,
     // ── transition state ──
     engaged: bool,
     cooldown_until: i64,
@@ -199,19 +185,6 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    /// Build a thin [`PowerMachine`] borrowing the owned seams. Cheap: a
-    /// reference struct + two `PathBuf` clones. Constructed at each point of use
-    /// so the seams' lifetime spans the whole daemon (no self-referential field).
-    fn machine(&self) -> PowerMachine<'_, MacHelperClient, MacCaffeinate, MacSleepReader> {
-        PowerMachine {
-            ipc: &self.ipc,
-            caffeinate: &self.caffeinate,
-            sleep: &self.sleep,
-            baseline_file: self.baseline_file.clone(),
-            caffeinate_pidfile: self.caffeinate_pidfile.clone(),
-        }
-    }
-
     /// Detect agents + write/refresh a pidfile per match (§2.1.3 step 1). Writes
     /// `start_ts` = the pid's sysinfo `start_time()` so the gc pid-reuse branch
     /// compares like-with-like.
@@ -343,9 +316,8 @@ impl Daemon {
         // 7. act. The battery summary reuses the already-read raw (no second read).
         let battery_summary =
             battery::battery_summary(&battery::parse_ps(&battery_raw), self.cfg.battery_floor_pct);
-        let machine = self.machine();
         self.engaged = act(
-            &machine,
+            self.power.as_mut(),
             desired,
             self.engaged,
             count,
@@ -395,14 +367,10 @@ impl Daemon {
         let thermal_should = thermal::cut_thermal_failclosed(self.cfg.thermal_cpu_limit_floor);
         let battery_should =
             battery::live_should_cut(&battery::read_ps_raw(), self.cfg.battery_floor_pct);
-        let guard = StartupGuard {
-            thermal: thermal_should,
-            battery: battery_should,
-        };
+        let can_hold = !thermal_should && !battery_should;
         // 4. if baseline exists → recover_startup.
         if Path::new(&self.cfg.baseline_file).exists() {
-            let machine = self.machine();
-            self.engaged = machine.recover_startup(startup_count, &guard, now);
+            self.engaged = self.power.recover_startup(startup_count, can_hold, now);
         }
     }
 
@@ -441,29 +409,13 @@ impl Daemon {
     fn cleanup_and_exit(&mut self) -> ! {
         tracing::info!("shutting down — releasing sleep prevention and cleaning up");
         if self.engaged {
-            let machine = self.machine();
-            machine.full_release();
+            self.power.full_release();
         }
         let _ = std::fs::remove_file(Path::new(&self.cfg.daemon_pidfile));
         let _ = std::fs::remove_file(Path::new(&self.cfg.daemon_tick_file));
         self.lock.disarm();
         self.lock.remove();
         std::process::exit(0);
-    }
-}
-
-/// A fixed startup [`PowerGuard`] over the two booleans evaluated at startup —
-/// so `recover_startup` does not re-read pmset.
-struct StartupGuard {
-    thermal: bool,
-    battery: bool,
-}
-impl crate::power_guard::PowerGuard for StartupGuard {
-    fn thermal_cut(&self) -> bool {
-        self.thermal
-    }
-    fn battery_cut(&self) -> bool {
-        self.battery
     }
 }
 
@@ -519,18 +471,13 @@ pub fn run() -> ! {
         std::process::exit(1);
     }
 
-    let ipc = MacHelperClient {
-        request_dir: PathBuf::from(&cfg.power_request_dir),
-        response_dir: PathBuf::from(&cfg.power_response_dir),
-        timeout_secs: cfg.power_helper_timeout_secs,
+    let power = match build_power_controller(&cfg) {
+        Ok(power) => power,
+        Err(e) => {
+            tracing::error!("{e}");
+            std::process::exit(1);
+        }
     };
-    // Helper round-trip: a missing-dirs error means setup/doctor is needed. Any
-    // other outcome (ok / timeout / helper error) is tolerated — the bash daemon
-    // only hard-fails on the dirs-missing check (`vigil_power_helper_check`).
-    if let Err(IpcError::DirsMissing) = ipc.status() {
-        tracing::error!("root helper is not available — run 'vigil setup' or 'vigil doctor'");
-        std::process::exit(1);
-    }
 
     // ── install INT/TERM handlers (AtomicBool flag; NOT HUP) ──
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -542,14 +489,10 @@ pub fn run() -> ! {
     }
 
     let mut daemon = Daemon {
-        baseline_file: PathBuf::from(&cfg.baseline_file),
-        caffeinate_pidfile: PathBuf::from(&cfg.caffeinate_pidfile),
         scanner: ProcScanner::new(),
         sys_for_gc: sysinfo::System::new(),
         last_ps_text: String::new(),
-        ipc,
-        caffeinate: MacCaffeinate,
-        sleep: MacSleepReader,
+        power,
         engaged: false,
         cooldown_until: 0,
         lock,
@@ -561,6 +504,32 @@ pub fn run() -> ! {
     daemon.recover();
 
     daemon.run_loop();
+}
+
+#[cfg(target_os = "macos")]
+fn build_power_controller(cfg: &VigilConfig) -> Result<Box<dyn PowerController>, String> {
+    let controller = MacPowerController::new(cfg);
+    // Helper round-trip: a missing-dirs error means setup/doctor is needed. Any
+    // other outcome (ok / timeout / helper error) is tolerated — the bash daemon
+    // only hard-fails on the dirs-missing check (`vigil_power_helper_check`).
+    if let Err(crate::ipc::IpcError::DirsMissing) = controller.helper_status() {
+        return Err(
+            "root helper is not available — run 'vigil setup' or 'vigil doctor'".to_string(),
+        );
+    }
+    Ok(Box::new(controller))
+}
+
+#[cfg(target_os = "linux")]
+fn build_power_controller(_cfg: &VigilConfig) -> Result<Box<dyn PowerController>, String> {
+    Ok(Box::new(LinuxLogindPower::system_default()))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn build_power_controller(_cfg: &VigilConfig) -> Result<Box<dyn PowerController>, String> {
+    Ok(Box::new(UnsupportedPowerController::new(
+        std::env::consts::OS,
+    )))
 }
 
 #[cfg(test)]

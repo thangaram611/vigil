@@ -3,6 +3,7 @@
 Keep AI coding agents running while your Mac is allowed to lock and turn its displays off.
 
 > **Status: pre-release.** macOS is feature-complete through the Rust rewrite (phases 1–5.7 plus the UX overhaul are shipped); remaining work is Linux / Windows — see [`ROADMAP.md`](./ROADMAP.md). No version tag, no Homebrew tap, no GitHub release yet. Local-only testing.
+> **Next track:** Linux first, then Windows. Antigravity/Gemini CLI detection is documented but deferred until those tools can be fresh-installed and verified locally.
 
 ## Why
 
@@ -25,6 +26,7 @@ Vigil is a single self-contained Rust binary. The resident daemon, every CLI sub
 What vigil **does not** do (yet) — see [`ROADMAP.md`](./ROADMAP.md):
 
 - Detect standalone GitHub Copilot.app beyond the CLI/VS Code surfaces above.
+- Detect Antigravity CLI / legacy Gemini CLI.
 - Linux / Windows support.
 
 ## Architecture

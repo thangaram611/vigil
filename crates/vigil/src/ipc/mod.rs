@@ -157,8 +157,8 @@ fn read_validated_response(resp_path: &Path) -> Result<String, IpcError> {
     .map_err(|e| IpcError::InvalidResponse(format!("open: {e}")))?;
 
     let st = fstat(&fd).map_err(|e| IpcError::InvalidResponse(format!("fstat: {e}")))?;
-    let mode = st.st_mode as u32;
-    if mode & libc::S_IFMT as u32 != libc::S_IFREG as u32 {
+    let mode = st.st_mode;
+    if mode & libc::S_IFMT != libc::S_IFREG {
         return Err(IpcError::InvalidResponse("not a regular file".into()));
     }
     if st.st_uid != 0 {
@@ -384,13 +384,18 @@ mod tests {
 
     #[test]
     fn validated_response_accepts_self_owned_regular_file() {
-        // A file we own (uid == our uid). On a non-root test runner uid != 0, so
-        // the uid==0 check will REJECT it — which is the correct security
-        // behavior. We assert the *type/link/mode* path by checking the reason
-        // is specifically the owner mismatch (proving we got past type checks).
+        // A file we own (uid == our uid). On normal non-root test runners uid
+        // != 0, so the uid==0 check rejects it; in root-run Linux containers the
+        // same file is root-owned and must be accepted.
         let dir = tempfile::tempdir().unwrap();
         let resp = dir.path().join("resp.x");
         std::fs::write(&resp, "status=ok\n").unwrap();
+        // SAFETY: geteuid is always safe.
+        if unsafe { libc::geteuid() } == 0 {
+            assert_eq!(read_validated_response(&resp).unwrap(), "status=ok\n");
+            return;
+        }
+
         let err = read_validated_response(&resp).unwrap_err();
         match err {
             IpcError::InvalidResponse(why) => {

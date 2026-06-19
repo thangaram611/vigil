@@ -74,6 +74,7 @@ pub fn run(args: Vec<OsString>) -> ! {
 // ── path helpers (read-only; bash $VIGIL_PLIST / $VIGIL_HELPER_PLIST) ─────────
 
 /// `$HOME/Library/LaunchAgents/com.thangaram.vigil.plist` (bash `$VIGIL_PLIST`).
+#[cfg(not(target_os = "linux"))]
 fn user_plist_path() -> String {
     let home = std::env::var("HOME").unwrap_or_default();
     format!(
@@ -84,6 +85,7 @@ fn user_plist_path() -> String {
 
 /// `/Library/LaunchDaemons/com.thangaram.vigil.helper.plist` — hardcoded, never
 /// overridable (bash `$VIGIL_HELPER_PLIST`).
+#[cfg(not(target_os = "linux"))]
 fn helper_plist_path() -> String {
     format!(
         "/Library/LaunchDaemons/{}.plist",
@@ -93,6 +95,7 @@ fn helper_plist_path() -> String {
 
 /// True iff `command -v <name>` would succeed (a regular executable on PATH, or an
 /// absolute executable path). Read-only.
+#[cfg(not(target_os = "linux"))]
 fn command_exists(name: &str) -> bool {
     use std::os::unix::fs::PermissionsExt;
     let is_exec = |p: &Path| {
@@ -120,6 +123,7 @@ fn is_executable(path: &str) -> bool {
 }
 
 /// `launchctl print gui/{uid}/{label}` succeeds (bash launchd loaded probe).
+#[cfg(not(target_os = "linux"))]
 fn launchd_loaded() -> bool {
     let uid = vigil::config::get_uid();
     let target = format!("gui/{uid}/{}", vigil::service::USER_AGENT_LABEL);
@@ -146,6 +150,120 @@ fn dir_mode(path: &str) -> Option<u32> {
 /// Render the full grouped checklist + three-state resolution. Returns the exit
 /// code (0 ready/ready-with-warnings, 1 needs-repair/not-installed).
 fn render_doctor(cfg: &VigilConfig, snap: &StatusSnapshot, verbose: bool) -> i32 {
+    render_doctor_platform(cfg, snap, verbose)
+}
+
+#[cfg(target_os = "linux")]
+fn render_doctor_platform(cfg: &VigilConfig, snap: &StatusSnapshot, verbose: bool) -> i32 {
+    let mut errs = 0u32;
+    let mut warns = 0u32;
+    let mut install_markers = 0u32;
+
+    anstream::println!("vigil doctor");
+    anstream::println!();
+
+    anstream::println!("  platform");
+    let arch = arch_string();
+    anstream::println!("    cpu arch:      {arch}");
+
+    anstream::println!();
+    anstream::println!("  power backend");
+    anstream::println!("    mode:          {}", snap.power_hold_mode);
+    anstream::println!("    sleep hold:    logind idle + sleep inhibitors");
+    if snap.power_helper_ok {
+        anstream::println!("    logind:        ok");
+    } else {
+        anstream::println!("    logind:        fail (system bus or login1 unavailable)");
+        errs += 1;
+    }
+    if snap.battery == "unknown" {
+        anstream::println!("    UPower:        unknown");
+        warns += 1;
+    } else {
+        anstream::println!("    UPower:        ok ({})", snap.battery);
+    }
+    if snap.thermal == "unavailable" {
+        anstream::println!("    thermal:       unavailable");
+        errs += 1;
+    } else {
+        anstream::println!("    thermal:       {}", snap.thermal);
+    }
+
+    anstream::println!();
+    anstream::println!("  user service");
+    let unit = vigil::service::systemd_user_unit_path();
+    if unit.is_file() {
+        install_markers += 1;
+        anstream::println!("    systemd unit:  ok");
+    } else {
+        anstream::println!("    systemd unit:  missing (run vigil setup)");
+        errs += 1;
+    }
+    let daemon_bin = format!("{}/bin/vigil", cfg.install_dir);
+    if is_executable(&daemon_bin) {
+        install_markers += 1;
+        anstream::println!("    daemon:        ok");
+    } else {
+        anstream::println!("    daemon:        missing (run vigil setup)");
+        errs += 1;
+    }
+    if snap.launchd_loaded {
+        anstream::println!("    systemd:       loaded");
+    } else {
+        anstream::println!(
+            "    systemd:       not loaded (run vigil start if intentionally stopped)"
+        );
+    }
+    if let Some(mode) = dir_mode(&cfg.state_dir) {
+        install_markers += 1;
+        anstream::println!("    state dir:     ok (mode {mode:o})");
+    } else {
+        anstream::println!("    state dir:     missing");
+        errs += 1;
+    }
+    if Path::new(&cfg.log_dir).is_dir() {
+        anstream::println!("    log dir:       ok");
+    } else {
+        anstream::println!("    log dir:       missing");
+        errs += 1;
+    }
+    if Path::new(vigil::service::LINUX_LOGROTATE_FILE).is_file() {
+        anstream::println!("    log rotation:  ok");
+    } else {
+        anstream::println!("    log rotation:  missing (run vigil setup)");
+        errs += 1;
+    }
+
+    anstream::println!();
+    anstream::println!("  providers");
+    anstream::println!("    agents:        {}", agents_line(snap));
+
+    if verbose {
+        anstream::println!();
+        anstream::println!("  paths");
+        anstream::println!("    systemd unit:  {}", unit.display());
+        anstream::println!(
+            "    logrotate:     {}",
+            vigil::service::LINUX_LOGROTATE_FILE
+        );
+        anstream::println!("    install dir:   {}", cfg.install_dir);
+        anstream::println!("    state dir:     {}", cfg.state_dir);
+        anstream::println!("    log dir:       {}", cfg.log_dir);
+        anstream::println!();
+        anstream::println!("  provider roots:");
+        render_provider_roots(snap);
+    } else {
+        anstream::println!();
+        anstream::println!(
+            "  detail: use 'vigil doctor --verbose' for install paths and provider roots"
+        );
+    }
+
+    finish_doctor(errs, warns, install_markers)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn render_doctor_platform(cfg: &VigilConfig, snap: &StatusSnapshot, verbose: bool) -> i32 {
     let mut errs = 0u32;
     let mut warns = 0u32;
     let mut install_markers = 0u32;
@@ -285,7 +403,10 @@ fn render_doctor(cfg: &VigilConfig, snap: &StatusSnapshot, verbose: bool) -> i32
         );
     }
 
-    // three-state resolution.
+    finish_doctor(errs, warns, install_markers)
+}
+
+fn finish_doctor(errs: u32, warns: u32, install_markers: u32) -> i32 {
     anstream::println!();
     let state = if errs == 0 {
         if warns > 0 {
@@ -328,48 +449,12 @@ fn render_power(snap: &StatusSnapshot, verbose: bool) -> i32 {
     anstream::println!();
     let arch = arch_string();
     anstream::println!("  cpu arch:           {arch}");
-    if arch == "arm64" {
+    if cfg!(target_os = "macos") && arch == "arm64" {
         anstream::println!(
             "                      Apple Silicon: closed-lid operation is best-effort unless clamshell requirements are met."
         );
     }
-    match resolve_command("pmset") {
-        Some(p) => anstream::println!("  pmset:              {p}"),
-        None => {
-            anstream::println!("  pmset:              MISSING");
-            errs += 1;
-        }
-    }
-    match resolve_command("caffeinate") {
-        Some(p) => anstream::println!("  caffeinate:         {p}"),
-        None => {
-            anstream::println!("  caffeinate:         MISSING");
-            errs += 1;
-        }
-    }
-    anstream::println!("  power hold mode:    best-effort");
-    anstream::println!("  display sleep:      allowed (pmset disablesleep + caffeinate -i, no -d)");
-    anstream::println!("  pmset disablesleep: {}", snap.pmset_disablesleep);
-    let baseline = match snap.baseline {
-        Some(v) => v.to_string(),
-        None => "-".to_string(),
-    };
-    anstream::println!("  baseline:           {baseline}");
-    let caff = match snap.caffeinate_pid {
-        Some(p) => p.to_string(),
-        None => "-".to_string(),
-    };
-    anstream::println!("  caffeinate pid:     {caff}");
-    anstream::println!(
-        "  caffeinate alive:   {}",
-        if snap.caffeinate_alive { "yes" } else { "no" }
-    );
-    if snap.power_helper_ok {
-        anstream::println!("  root helper:        ok");
-    } else {
-        anstream::println!("  root helper:        FAIL");
-        errs += 1;
-    }
+    render_platform_power_backend(snap, &mut errs);
     anstream::println!("  thermal:            {}", snap.thermal);
     anstream::println!("  battery:            {}", snap.battery);
     anstream::println!("  power assertions:   {}", power_assertions_summary(snap));
@@ -400,6 +485,78 @@ fn render_power(snap: &StatusSnapshot, verbose: bool) -> i32 {
 
 // ── shared render helpers ─────────────────────────────────────────────────────
 
+fn render_platform_power_backend(snap: &StatusSnapshot, errs: &mut u32) {
+    #[cfg(target_os = "macos")]
+    {
+        match resolve_command("pmset") {
+            Some(p) => anstream::println!("  pmset:              {p}"),
+            None => {
+                anstream::println!("  pmset:              MISSING");
+                *errs += 1;
+            }
+        }
+        match resolve_command("caffeinate") {
+            Some(p) => anstream::println!("  caffeinate:         {p}"),
+            None => {
+                anstream::println!("  caffeinate:         MISSING");
+                *errs += 1;
+            }
+        }
+        anstream::println!("  power hold mode:    {}", snap.power_hold_mode);
+        anstream::println!(
+            "  display sleep:      allowed (pmset disablesleep + caffeinate -i, no -d)"
+        );
+        anstream::println!("  pmset disablesleep: {}", snap.pmset_disablesleep);
+        let baseline = match snap.baseline {
+            Some(v) => v.to_string(),
+            None => "-".to_string(),
+        };
+        anstream::println!("  baseline:           {baseline}");
+        let caff = match snap.caffeinate_pid {
+            Some(p) => p.to_string(),
+            None => "-".to_string(),
+        };
+        anstream::println!("  caffeinate pid:     {caff}");
+        anstream::println!(
+            "  caffeinate alive:   {}",
+            if snap.caffeinate_alive { "yes" } else { "no" }
+        );
+        if snap.power_helper_ok {
+            anstream::println!("  root helper:        ok");
+        } else {
+            anstream::println!("  root helper:        FAIL");
+            *errs += 1;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        anstream::println!("  power hold mode:    {}", snap.power_hold_mode);
+        anstream::println!("  sleep inhibition:   logind idle + sleep inhibitors");
+        if snap.power_helper_ok {
+            anstream::println!("  logind:             ok");
+        } else {
+            anstream::println!("  logind:             FAIL");
+            *errs += 1;
+        }
+        anstream::println!(
+            "  logind hold:        {}",
+            if snap.hold_engaged {
+                "engaged"
+            } else {
+                "released"
+            }
+        );
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        anstream::println!("  power hold mode:    {}", snap.power_hold_mode);
+        anstream::println!("  power backend:      unsupported");
+        *errs += 1;
+    }
+}
+
 fn arch_string() -> String {
     std::process::Command::new("uname")
         .arg("-m")
@@ -411,6 +568,7 @@ fn arch_string() -> String {
 }
 
 /// `command -v <name>` resolved path (bash power-doctor prints the path).
+#[cfg(target_os = "macos")]
 fn resolve_command(name: &str) -> Option<String> {
     use std::os::unix::fs::PermissionsExt;
     let is_exec = |p: &Path| {

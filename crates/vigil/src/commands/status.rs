@@ -129,24 +129,41 @@ fn assertions_summary_line(snap: &StatusSnapshot) -> String {
 /// The labeled power-hold summary line (bash `cmd_power_hold_summary_line`):
 /// `hold=…  mode=best-effort  disablesleep=N  baseline=X  caffeinate=yes/no [pid=N]`.
 fn power_hold_line(snap: &StatusSnapshot) -> String {
-    // The summary `hold` gate matches bash `vigil_pmset_hold_engaged`:
-    // caffeinate alive, OR (baseline file present AND disablesleep==1).
-    let engaged =
-        snap.caffeinate_alive || (snap.baseline.is_some() && snap.pmset_disablesleep == 1);
-    let hold = if engaged { "engaged" } else { "released" };
-    let baseline = match snap.baseline {
-        Some(v) => v.to_string(),
-        None => "-".to_string(),
-    };
-    let caff_alive = yes_no(snap.caffeinate_alive);
-    let mut line = format!(
-        "hold={}  mode={}  disablesleep={}  baseline={}  caffeinate={}",
-        hold, snap.power_hold_mode, snap.pmset_disablesleep, baseline, caff_alive,
-    );
-    if let Some(pid) = snap.caffeinate_pid {
-        line.push_str(&format!(" pid={pid}"));
+    #[cfg(target_os = "linux")]
+    {
+        let hold = if snap.hold_engaged {
+            "engaged"
+        } else {
+            "released"
+        };
+        let backend = if snap.power_helper_ok { "ok" } else { "fail" };
+        format!(
+            "hold={}  mode={}  logind={}",
+            hold, snap.power_hold_mode, backend
+        )
     }
-    line
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        // The summary `hold` gate matches bash `vigil_pmset_hold_engaged`:
+        // caffeinate alive, OR (baseline file present AND disablesleep==1).
+        let engaged =
+            snap.caffeinate_alive || (snap.baseline.is_some() && snap.pmset_disablesleep == 1);
+        let hold = if engaged { "engaged" } else { "released" };
+        let baseline = match snap.baseline {
+            Some(v) => v.to_string(),
+            None => "-".to_string(),
+        };
+        let caff_alive = yes_no(snap.caffeinate_alive);
+        let mut line = format!(
+            "hold={}  mode={}  disablesleep={}  baseline={}  caffeinate={}",
+            hold, snap.power_hold_mode, snap.pmset_disablesleep, baseline, caff_alive,
+        );
+        if let Some(pid) = snap.caffeinate_pid {
+            line.push_str(&format!(" pid={pid}"));
+        }
+        line
+    }
 }
 
 /// The `expected_hold` sub-state (§5.3) — computed only when work exists but no
@@ -155,7 +172,7 @@ fn power_hold_line(snap: &StatusSnapshot) -> String {
 fn expected_hold(snap: &StatusSnapshot) -> Option<&'static str> {
     // The expected-hold gate matches bash: disablesleep==1 OR caffeinate alive
     // (NOT baseline-gated, distinct from the summary-line hold above).
-    let hold_engaged = snap.pmset_disablesleep == 1 || snap.caffeinate_alive;
+    let hold_engaged = snap.hold_engaged;
     let work = snap.refcount_active > 0 || snap.pending_active_matches > 0;
     if !work || hold_engaged {
         return None;
@@ -185,6 +202,7 @@ fn expected_hold(snap: &StatusSnapshot) -> Option<&'static str> {
 
 /// `launchctl print system/{helper_label}` → loaded / not loaded (bash
 /// `cmd_helper_launchd_status`). Read-only probe; not a privilege-boundary path.
+#[cfg(not(target_os = "linux"))]
 fn helper_launchd_status() -> &'static str {
     let target = format!("system/{}", vigil::service::HELPER_LABEL);
     let ok = std::process::Command::new("launchctl")
@@ -197,24 +215,21 @@ fn helper_launchd_status() -> &'static str {
     if ok { "loaded" } else { "not loaded" }
 }
 
-/// Render the full plain/verbose status text (byte-faithful to bash `cmd_status`).
+/// Render the full plain/verbose status text.
 /// Uses anstream println so `--color` stripping is honored; the operational
-/// strings + spacing are identical to the captured golden.
+/// strings + spacing stay identical to the captured golden on macOS, while Linux
+/// receives platform-accurate service labels.
 fn render_text(snap: &StatusSnapshot, verbose: bool) {
     let daemon_pid = match snap.daemon_pid {
         Some(p) => p.to_string(),
         None => "-".to_string(),
     };
     let scan = scan_text(snap.daemon_scan_state, snap.daemon_scan_age_secs);
-    let helper = helper_launchd_status();
 
     anstream::println!("vigil status");
     anstream::println!();
     anstream::println!("  service");
-    anstream::println!("    launchd:      {}", yes_no(snap.launchd_loaded));
-    anstream::println!("    daemon pid:    {daemon_pid}");
-    anstream::println!("    scan:          {scan}");
-    anstream::println!("    root helper:   {helper}");
+    render_service_lines(snap, &daemon_pid, &scan);
     anstream::println!();
     anstream::println!("  activity");
     anstream::println!(
@@ -267,6 +282,22 @@ fn render_text(snap: &StatusSnapshot, verbose: bool) {
             "  detail: use 'vigil status --verbose' for provider paths and assertion rows"
         );
     }
+}
+
+#[cfg(target_os = "linux")]
+fn render_service_lines(snap: &StatusSnapshot, daemon_pid: &str, scan: &str) {
+    anstream::println!("    systemd user: {}", yes_no(snap.launchd_loaded));
+    anstream::println!("    daemon pid:    {daemon_pid}");
+    anstream::println!("    scan:          {scan}");
+}
+
+#[cfg(not(target_os = "linux"))]
+fn render_service_lines(snap: &StatusSnapshot, daemon_pid: &str, scan: &str) {
+    let helper = helper_launchd_status();
+    anstream::println!("    launchd:      {}", yes_no(snap.launchd_loaded));
+    anstream::println!("    daemon pid:    {daemon_pid}");
+    anstream::println!("    scan:          {scan}");
+    anstream::println!("    root helper:   {helper}");
 }
 
 /// Render the verbose assertion rows (bash: `(none)` / `(parse-failed; …)`

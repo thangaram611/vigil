@@ -17,7 +17,7 @@
 //!   no cut).
 //! - [`live_should_cut`] — thin collector over the single `pmset -g ps` snapshot.
 
-/// Power source as reported by `pmset -g ps`.
+/// Power source as reported by the platform collector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AcState {
     /// "AC Power" present in the snapshot.
@@ -28,7 +28,7 @@ pub enum AcState {
     Unknown,
 }
 
-/// Parsed view of one `pmset -g ps` snapshot.
+/// Parsed view of one platform power-source snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatteryReading {
     pub ac: AcState,
@@ -37,7 +37,7 @@ pub struct BatteryReading {
     pub pct: Option<u32>,
 }
 
-/// Parse one `pmset -g ps` snapshot.
+/// Parse one platform power-source snapshot.
 ///
 /// - `ac`: contains "AC Power" => `Ac`; else contains "Battery Power" =>
 ///   `Battery`; else `Unknown`. (Matches the bash `case` order: AC checked
@@ -47,6 +47,9 @@ pub struct BatteryReading {
 ///   bottom and exits on the first hit. Scanning the whole text left-to-right
 ///   yields the same first occurrence.
 pub fn parse_ps(raw: &str) -> BatteryReading {
+    if raw.lines().any(|line| line == "VIGIL_LINUX_UPOWER=1") {
+        return parse_linux_upower(raw);
+    }
     let ac = if raw.contains("AC Power") {
         AcState::Ac
     } else if raw.contains("Battery Power") {
@@ -82,6 +85,46 @@ fn first_pct(raw: &str) -> Option<u32> {
         }
     }
     None
+}
+
+fn parse_boolish(raw: &str) -> Option<bool> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "1" | "true" | "yes" | "online" => Some(true),
+        "0" | "false" | "no" | "offline" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_linux_upower(raw: &str) -> BatteryReading {
+    let mut on_battery = None;
+    let mut pct = None;
+
+    for line in raw.lines() {
+        let Some((key, value)) = line.trim().split_once('=') else {
+            continue;
+        };
+        match key {
+            "ON_BATTERY" => on_battery = parse_boolish(value),
+            "PERCENTAGE" => pct = parse_linux_percentage(value),
+            _ => {}
+        }
+    }
+
+    let ac = match on_battery {
+        Some(true) => AcState::Battery,
+        Some(false) => AcState::Ac,
+        None => AcState::Unknown,
+    };
+    BatteryReading { ac, pct }
+}
+
+fn parse_linux_percentage(raw: &str) -> Option<u32> {
+    let pct = raw.trim().parse::<f64>().ok()?;
+    if !pct.is_finite() {
+        return None;
+    }
+    Some(pct.clamp(0.0, 100.0).floor() as u32)
 }
 
 /// Pure cut decision.
@@ -133,12 +176,57 @@ pub fn read_ps_raw() -> String {
     {
         return fixture;
     }
+    read_platform_ps_raw()
+}
+
+#[cfg(target_os = "macos")]
+fn read_platform_ps_raw() -> String {
     std::process::Command::new("pmset")
         .args(["-g", "ps"])
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+fn read_platform_ps_raw() -> String {
+    read_linux_upower_raw().unwrap_or_default()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn read_platform_ps_raw() -> String {
+    String::new()
+}
+
+#[cfg(target_os = "linux")]
+fn read_linux_upower_raw() -> Result<String, String> {
+    let connection = zbus::blocking::Connection::system()
+        .map_err(|err| format!("connect system bus for UPower: {err}"))?;
+    let upower = zbus::blocking::Proxy::new(
+        &connection,
+        "org.freedesktop.UPower",
+        "/org/freedesktop/UPower",
+        "org.freedesktop.UPower",
+    )
+    .map_err(|err| format!("create UPower proxy: {err}"))?;
+    let on_battery: bool = upower
+        .get_property("OnBattery")
+        .map_err(|err| format!("read UPower OnBattery: {err}"))?;
+    let display = zbus::blocking::Proxy::new(
+        &connection,
+        "org.freedesktop.UPower",
+        "/org/freedesktop/UPower/devices/DisplayDevice",
+        "org.freedesktop.UPower.Device",
+    )
+    .map_err(|err| format!("create UPower display-device proxy: {err}"))?;
+    let percentage: f64 = display
+        .get_property("Percentage")
+        .map_err(|err| format!("read UPower display-device Percentage: {err}"))?;
+
+    Ok(format!(
+        "VIGIL_LINUX_UPOWER=1\nON_BATTERY={on_battery}\nPERCENTAGE={percentage}\n"
+    ))
 }
 
 #[cfg(test)]
@@ -284,5 +372,39 @@ mod tests {
             pct: None,
         };
         assert_eq!(battery_summary(&ac_no_pct, 20), "AC ?%");
+    }
+
+    #[test]
+    fn linux_upower_ac_100_does_not_cut() {
+        let raw = "VIGIL_LINUX_UPOWER=1\nON_BATTERY=false\nPERCENTAGE=100\n";
+        let r = parse_ps(raw);
+        assert_eq!(r.ac, AcState::Ac);
+        assert_eq!(r.pct, Some(100));
+        assert!(!should_cut(&r, 20));
+    }
+
+    #[test]
+    fn linux_upower_low_battery_cuts() {
+        let raw = "VIGIL_LINUX_UPOWER=1\nON_BATTERY=true\nPERCENTAGE=5.0\n";
+        let r = parse_ps(raw);
+        assert_eq!(r.ac, AcState::Battery);
+        assert_eq!(r.pct, Some(5));
+        assert!(should_cut(&r, 20));
+    }
+
+    #[test]
+    fn linux_upower_boundary_equal_floor_does_not_cut() {
+        let raw = "VIGIL_LINUX_UPOWER=1\nON_BATTERY=true\nPERCENTAGE=20.0\n";
+        let r = parse_ps(raw);
+        assert_eq!(r.ac, AcState::Battery);
+        assert_eq!(r.pct, Some(20));
+        assert!(!should_cut(&r, 20));
+    }
+
+    #[test]
+    fn linux_upower_decimal_percentage_floors_conservatively() {
+        let r = parse_ps("VIGIL_LINUX_UPOWER=1\nON_BATTERY=true\nPERCENTAGE=19.9\n");
+        assert_eq!(r.pct, Some(19));
+        assert!(should_cut(&r, 20));
     }
 }

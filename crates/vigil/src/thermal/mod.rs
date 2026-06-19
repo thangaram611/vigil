@@ -46,8 +46,12 @@ pub struct ThermalReading {
     pub empty: bool,
 }
 
-/// The two keyword prefixes bash's regex alternation matches.
-const KEYWORDS: [&str; 2] = ["CPU_Scheduler_Limit", "thermal warning level"];
+/// The keyword prefixes the parser treats as thermal-pressure indicators.
+const KEYWORDS: [&str; 3] = [
+    "CPU_Scheduler_Limit",
+    "thermal warning level",
+    "Linux_Thermal_Hot",
+];
 
 /// Test one line against bash's anchor:
 /// `^[[:space:]]*(KEYWORD)[[:space:]]*=`. Returns the matched keyword and the
@@ -82,7 +86,7 @@ pub fn parse_therm(raw: &str) -> ThermalReading {
         if let Some((kw, value)) = match_line(line) {
             any_match = true;
             match kw {
-                "thermal warning level" => warning_present = true,
+                "thermal warning level" | "Linux_Thermal_Hot" => warning_present = true,
                 // First numeric Scheduler_Limit wins (don't clobber a parsed
                 // value with a later non-numeric line).
                 "CPU_Scheduler_Limit" if cpu_scheduler_limit.is_none() => {
@@ -175,12 +179,30 @@ pub fn read_therm_raw() -> String {
     {
         return fixture;
     }
+    read_platform_therm_raw()
+}
+
+#[cfg(target_os = "macos")]
+fn read_platform_therm_raw() -> String {
     std::process::Command::new("pmset")
         .args(["-g", "therm"])
         .output()
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default()
+}
+
+#[cfg(target_os = "linux")]
+fn read_platform_therm_raw() -> String {
+    match read_linux_therm_from(std::path::Path::new("/sys/class/thermal")) {
+        ThermRead::Text(raw) => raw,
+        ThermRead::Unavailable => String::new(),
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn read_platform_therm_raw() -> String {
+    String::new()
 }
 
 /// The outcome of a thermal read, distinguishing "pmset ran and produced this
@@ -212,6 +234,11 @@ pub fn read_therm() -> ThermRead {
     {
         return ThermRead::Text(fixture);
     }
+    read_platform_therm()
+}
+
+#[cfg(target_os = "macos")]
+fn read_platform_therm() -> ThermRead {
     match std::process::Command::new("pmset")
         .args(["-g", "therm"])
         .output()
@@ -221,6 +248,95 @@ pub fn read_therm() -> ThermRead {
         }
         _ => ThermRead::Unavailable,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn read_platform_therm() -> ThermRead {
+    read_linux_therm_from(std::path::Path::new("/sys/class/thermal"))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn read_platform_therm() -> ThermRead {
+    ThermRead::Unavailable
+}
+
+#[cfg(any(target_os = "linux", test))]
+const LINUX_DEFAULT_HOT_MILLIC: i64 = 85_000;
+
+#[cfg(any(target_os = "linux", test))]
+const LINUX_MIN_REASONABLE_TRIP_MILLIC: i64 = 45_000;
+
+#[cfg(any(target_os = "linux", test))]
+fn read_linux_therm_from(root: &std::path::Path) -> ThermRead {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(_) => return ThermRead::Unavailable,
+    };
+    let mut paths = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    paths.sort();
+
+    let mut readable = 0usize;
+    let mut hot = Vec::new();
+    for path in paths {
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("thermal_zone") {
+            continue;
+        }
+        let Ok(temp_raw) = std::fs::read_to_string(path.join("temp")) else {
+            continue;
+        };
+        let Ok(temp_millic) = temp_raw.trim().parse::<i64>() else {
+            continue;
+        };
+        readable += 1;
+        let label = std::fs::read_to_string(path.join("type"))
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| name.to_string());
+        let threshold_millic =
+            read_linux_threshold_millic(&path).unwrap_or(LINUX_DEFAULT_HOT_MILLIC);
+        if temp_millic >= threshold_millic {
+            hot.push(format!(
+                "Linux_Thermal_Hot = {label} temp_millic={temp_millic} threshold_millic={threshold_millic}"
+            ));
+        }
+    }
+
+    if readable == 0 {
+        ThermRead::Unavailable
+    } else {
+        ThermRead::Text(hot.join("\n"))
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn read_linux_threshold_millic(zone: &std::path::Path) -> Option<i64> {
+    let entries = std::fs::read_dir(zone).ok()?;
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            if !(name.starts_with("trip_point_") && name.ends_with("_temp")) {
+                return None;
+            }
+            std::fs::read_to_string(entry.path())
+                .ok()?
+                .trim()
+                .parse::<i64>()
+                .ok()
+        })
+        .filter(|value| *value >= LINUX_MIN_REASONABLE_TRIP_MILLIC)
+        .min()
 }
 
 /// PURE fail-closed cut decision over a [`ThermRead`]: an unreadable thermal
@@ -489,5 +605,68 @@ mod tests {
                 "thin collector == parse_therm |> should_cut for {raw:?}"
             );
         }
+    }
+
+    #[test]
+    fn linux_hot_marker_cuts_in_both_floor_modes() {
+        let raw = "Linux_Thermal_Hot = x86_pkg_temp temp_millic=86000 threshold_millic=85000";
+        let reading = parse_therm(raw);
+
+        assert!(reading.warning_present);
+        assert!(reading.any_match);
+        assert!(should_cut(&reading, None));
+        assert!(should_cut(&reading, Some(80)));
+    }
+
+    #[test]
+    fn linux_thermal_reader_cuts_on_hot_zone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let zone = dir.path().join("thermal_zone0");
+        std::fs::create_dir_all(&zone).expect("zone dir");
+        std::fs::write(zone.join("type"), "x86_pkg_temp\n").expect("type");
+        std::fs::write(zone.join("temp"), "86000\n").expect("temp");
+
+        let read = read_linux_therm_from(dir.path());
+
+        assert!(decide_cut(&read, None), "{read:?}");
+        match read {
+            ThermRead::Text(raw) => assert!(raw.contains("Linux_Thermal_Hot")),
+            ThermRead::Unavailable => panic!("expected readable thermal state"),
+        }
+    }
+
+    #[test]
+    fn linux_thermal_reader_does_not_cut_on_cool_zone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let zone = dir.path().join("thermal_zone0");
+        std::fs::create_dir_all(&zone).expect("zone dir");
+        std::fs::write(zone.join("type"), "x86_pkg_temp\n").expect("type");
+        std::fs::write(zone.join("temp"), "45000\n").expect("temp");
+
+        let read = read_linux_therm_from(dir.path());
+
+        assert_eq!(read, ThermRead::Text(String::new()));
+        assert!(!decide_cut(&read, None));
+    }
+
+    #[test]
+    fn linux_thermal_reader_uses_reasonable_trip_point_threshold() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let zone = dir.path().join("thermal_zone0");
+        std::fs::create_dir_all(&zone).expect("zone dir");
+        std::fs::write(zone.join("type"), "x86_pkg_temp\n").expect("type");
+        std::fs::write(zone.join("temp"), "65000\n").expect("temp");
+        std::fs::write(zone.join("trip_point_0_temp"), "60000\n").expect("trip");
+
+        let read = read_linux_therm_from(dir.path());
+
+        assert!(decide_cut(&read, None), "{read:?}");
+    }
+
+    #[test]
+    fn linux_thermal_reader_unreadable_state_is_unavailable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        assert_eq!(read_linux_therm_from(dir.path()), ThermRead::Unavailable);
     }
 }

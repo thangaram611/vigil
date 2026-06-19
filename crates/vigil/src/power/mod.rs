@@ -21,6 +21,8 @@
 
 pub mod assertions;
 pub mod caffeinate;
+pub mod linux;
+pub mod platform;
 pub mod pmset;
 
 use std::path::{Path, PathBuf};

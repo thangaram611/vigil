@@ -13,6 +13,7 @@ use super::{ActivityFlags, act, desired_hold};
 use crate::ipc::{HelperClient, IpcError, Response};
 use crate::power::PowerMachine;
 use crate::power::caffeinate::CaffeinateAssertion;
+use crate::power::platform::{PowerController, PowerSummary};
 use crate::power::pmset::SleepReader;
 
 // ── desired-hold predicate truth table (bin/vigil-daemon:156-159) ─────────────
@@ -215,14 +216,220 @@ impl Harness {
 
 const NOW: i64 = 1_700_000_000;
 
+// ── trait-level fake controller contract ─────────────────────────────────────
+
+struct TraitFakePower {
+    events: Vec<&'static str>,
+    engage_result: Result<(), String>,
+    reconcile_result: Result<(), String>,
+    observable: bool,
+    orphaned: bool,
+}
+
+impl Default for TraitFakePower {
+    fn default() -> Self {
+        Self {
+            events: Vec::new(),
+            engage_result: Ok(()),
+            reconcile_result: Ok(()),
+            observable: false,
+            orphaned: false,
+        }
+    }
+}
+
+impl PowerController for TraitFakePower {
+    fn recover_startup(&mut self, _active_count: u32, can_hold: bool, _now_unix: i64) -> bool {
+        self.events.push("recover_startup");
+        can_hold
+    }
+
+    fn engage(&mut self, _now_unix: i64) -> Result<(), String> {
+        self.events.push("engage");
+        self.engage_result.clone()
+    }
+
+    fn reconcile_engaged(&mut self) -> Result<(), String> {
+        self.events.push("reconcile_engaged");
+        self.reconcile_result.clone()
+    }
+
+    fn full_release(&mut self) {
+        self.events.push("full_release");
+        self.observable = false;
+    }
+
+    fn soft_release(&mut self) {
+        self.events.push("soft_release");
+        self.observable = false;
+    }
+
+    fn observable_engaged(&self) -> bool {
+        self.observable
+    }
+
+    fn adopt_after_failed_engage(&mut self) -> Result<(), String> {
+        self.events.push("adopt_after_failed_engage");
+        self.observable = true;
+        Ok(())
+    }
+
+    fn orphaned_hold_requires_release(&self) -> bool {
+        self.orphaned
+    }
+
+    fn summary(&self) -> PowerSummary {
+        PowerSummary {
+            mode: "fake".to_string(),
+            platform_hold: self.observable,
+            baseline: None,
+            helper_ok: Some(true),
+            assertion_pid: None,
+            assertion_alive: false,
+        }
+    }
+}
+
+#[test]
+fn act_power_controller_contract_engage_reconcile_and_release() {
+    let mut power = TraitFakePower::default();
+    let engaged = act(
+        &mut power,
+        true,
+        false,
+        1,
+        false,
+        false,
+        60,
+        "on AC",
+        ActivityFlags::default(),
+        NOW,
+    );
+    assert!(engaged);
+    assert_eq!(power.events, ["engage"]);
+
+    power.events.clear();
+    let engaged = act(
+        &mut power,
+        true,
+        true,
+        1,
+        false,
+        false,
+        60,
+        "on AC",
+        ActivityFlags::default(),
+        NOW,
+    );
+    assert!(engaged);
+    assert_eq!(power.events, ["reconcile_engaged"]);
+
+    power.events.clear();
+    let engaged = act(
+        &mut power,
+        false,
+        true,
+        1,
+        true,
+        false,
+        60,
+        "on AC",
+        ActivityFlags::default(),
+        NOW,
+    );
+    assert!(!engaged);
+    assert_eq!(power.events, ["soft_release"]);
+
+    power.events.clear();
+    let engaged = act(
+        &mut power,
+        false,
+        true,
+        1,
+        false,
+        true,
+        60,
+        "on battery 5%",
+        ActivityFlags::default(),
+        NOW,
+    );
+    assert!(!engaged);
+    assert_eq!(power.events, ["full_release"]);
+}
+
+#[test]
+fn act_power_controller_contract_failed_engage_adopts_observable_hold() {
+    let mut power = TraitFakePower {
+        engage_result: Err("transport timeout".to_string()),
+        observable: true,
+        ..Default::default()
+    };
+    let engaged = act(
+        &mut power,
+        true,
+        false,
+        1,
+        false,
+        false,
+        60,
+        "on AC",
+        ActivityFlags::default(),
+        NOW,
+    );
+    assert!(engaged);
+    assert_eq!(power.events, ["engage", "adopt_after_failed_engage"]);
+}
+
+#[test]
+fn act_power_controller_contract_reconcile_error_and_orphan_release() {
+    let mut power = TraitFakePower {
+        reconcile_result: Err("reconcile failed".to_string()),
+        ..Default::default()
+    };
+    let engaged = act(
+        &mut power,
+        true,
+        true,
+        1,
+        false,
+        false,
+        60,
+        "on AC",
+        ActivityFlags::default(),
+        NOW,
+    );
+    assert!(!engaged);
+    assert_eq!(power.events, ["reconcile_engaged"]);
+
+    let mut power = TraitFakePower {
+        orphaned: true,
+        observable: true,
+        ..Default::default()
+    };
+    let engaged = act(
+        &mut power,
+        false,
+        false,
+        0,
+        false,
+        false,
+        60,
+        "on AC",
+        ActivityFlags::default(),
+        NOW,
+    );
+    assert!(!engaged);
+    assert_eq!(power.events, ["full_release"]);
+}
+
 // ── act-branch: (true, false) → engage ────────────────────────────────────────
 
 #[test]
 fn act_engage_when_desired_and_not_engaged() {
     let h = Harness::new(0);
-    let m = h.machine();
+    let mut m = h.machine();
     let engaged = act(
-        &m,
+        &mut m,
         true,  // desired
         false, // engaged
         2,     // count
@@ -247,13 +454,13 @@ fn act_engage_when_desired_and_not_engaged() {
 #[test]
 fn act_reconcile_when_desired_and_engaged() {
     let h = Harness::new(0);
-    let m = h.machine();
+    let mut m = h.machine();
     // First engage to set up baseline + caffeinate.
     m.engage(NOW).unwrap();
     // Drift SleepDisabled to 0; reconcile must reassert.
     std::fs::write(&h.sleep_file, "0\n").unwrap();
     let engaged = act(
-        &m,
+        &mut m,
         true,
         true,
         2,
@@ -277,12 +484,12 @@ fn act_reconcile_when_desired_and_engaged() {
 #[test]
 fn act_release_thermal_is_soft_and_keeps_baseline() {
     let h = Harness::new(0);
-    let m = h.machine();
+    let mut m = h.machine();
     m.engage(NOW).unwrap();
     assert!(h.baseline_file.exists(), "engaged: baseline present");
     // desired=false, engaged=true, thermal cut set → SOFT release (keep baseline).
     let engaged = act(
-        &m,
+        &mut m,
         false,
         true,
         3,
@@ -321,10 +528,10 @@ fn act_full_release_clears_baseline() {
     ];
     for (label, count, cut_battery, summary) in cases {
         let h = Harness::new(0);
-        let m = h.machine();
+        let mut m = h.machine();
         m.engage(NOW).unwrap();
         let engaged = act(
-            &m,
+            &mut m,
             false, // desired
             true,  // engaged
             *count,
@@ -348,11 +555,11 @@ fn act_full_release_clears_baseline() {
 #[test]
 fn act_release_thermal_wins_over_battery_when_both_cut() {
     let h = Harness::new(0);
-    let m = h.machine();
+    let mut m = h.machine();
     m.engage(NOW).unwrap();
     // BOTH thermal and battery cut → thermal branch wins → SOFT → keep baseline.
     let engaged = act(
-        &m,
+        &mut m,
         false,
         true,
         0,
@@ -375,9 +582,9 @@ fn act_release_thermal_wins_over_battery_when_both_cut() {
 #[test]
 fn act_noop_when_not_desired_and_not_engaged() {
     let h = Harness::new(0);
-    let m = h.machine();
+    let mut m = h.machine();
     let engaged = act(
-        &m,
+        &mut m,
         false,
         false,
         0,
@@ -418,9 +625,9 @@ fn act_reconcile_failure_flips_engaged_false() {
     // Drift SleepDisabled=0 → reconcile_decision(0, alive)=(reassert=true, respawn=false).
     std::fs::write(&h.sleep_file, "0\n").unwrap();
     let ipc = FailingIpc;
-    let m = h.machine_with_ipc(&ipc);
+    let mut m = h.machine_with_ipc(&ipc);
     let engaged = act(
-        &m,
+        &mut m,
         true,  // desired
         true,  // engaged
         2,     // count
@@ -449,7 +656,7 @@ fn act_release_with_no_reason_still_flips_engaged_false() {
     // `engaged := false` ALWAYS (the trailing unconditional false), and baseline +
     // caffeinate are left untouched (neither soft_release nor full_release ran).
     let h = Harness::new(0);
-    let m = h.machine();
+    let mut m = h.machine();
     m.engage(NOW).unwrap();
     assert!(h.baseline_file.exists(), "engaged: baseline present");
     assert!(
@@ -457,7 +664,7 @@ fn act_release_with_no_reason_still_flips_engaged_false() {
         "engaged: caffeinate pidfile present"
     );
     let engaged = act(
-        &m,
+        &mut m,
         false, // desired
         true,  // engaged
         3,     // count > 0 → the count==0 idle release branch is skipped
@@ -487,9 +694,9 @@ fn act_release_with_no_reason_still_flips_engaged_false() {
 fn act_engage_failure_keeps_engaged_false() {
     let h = Harness::new(0);
     let ipc = FailingIpc;
-    let m = h.machine_with_ipc(&ipc);
+    let mut m = h.machine_with_ipc(&ipc);
     let engaged = act(
-        &m,
+        &mut m,
         true,
         false,
         1,
@@ -536,9 +743,9 @@ fn act_engage_partial_adopts_observable_hold() {
     let ipc = PartialEngageIpc {
         sleep_file: h.sleep_file.clone(),
     };
-    let m = h.machine_with_ipc(&ipc);
+    let mut m = h.machine_with_ipc(&ipc);
     let engaged = act(
-        &m,
+        &mut m,
         true,
         false,
         2,
@@ -576,9 +783,9 @@ fn act_idle_reconciles_orphaned_partial_engage() {
         "{\"SleepDisabled\":0,\"captured_at\":1700000000}\n",
     )
     .unwrap();
-    let m = h.machine();
+    let mut m = h.machine();
     let engaged = act(
-        &m,
+        &mut m,
         false,
         false,
         0,
@@ -617,9 +824,9 @@ fn act_idle_leaves_kept_soft_release_baseline_untouched() {
         "{\"SleepDisabled\":1,\"captured_at\":1700000000}\n",
     )
     .unwrap();
-    let m = h.machine();
+    let mut m = h.machine();
     let engaged = act(
-        &m,
+        &mut m,
         false,
         false,
         0,

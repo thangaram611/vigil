@@ -515,20 +515,15 @@ impl CheckEngine {
         let provider_codex = provider_root(&cfg.codex_home, &codex_dir, Agent::Codex, now);
         let provider_copilot = provider_root(&cfg.copilot_home, &copilot_dir, Agent::Copilot, now);
 
-        // 12. pmset_disablesleep (read-only, via the injected reader seam).
-        let pmset_disablesleep = sleep.read();
+        // 12. platform hold state. The JSON schema keeps the historical
+        // pmset_disablesleep key, but non-macOS platforms do not have pmset.
+        let pmset_disablesleep = platform_pmset_disablesleep(sleep);
 
         // 13. baseline (value if file exists).
-        let baseline = if Path::new(&cfg.baseline_file).exists() {
-            std::fs::read_to_string(&cfg.baseline_file)
-                .ok()
-                .map(|s| crate::power::baseline_value_from_json(&s))
-        } else {
-            None
-        };
+        let baseline = platform_baseline(cfg);
 
         // 14/15. caffeinate pid + alive.
-        let caffeinate_pid = read_caffeinate_pid(&cfg.caffeinate_pidfile);
+        let caffeinate_pid = platform_caffeinate_pid(cfg);
         let caffeinate_alive = caffeinate_pid.is_some_and(caffeinate_alive_identity);
 
         // 16/17. thermal/battery summaries (live raw via the fixture seams).
@@ -542,11 +537,11 @@ impl CheckEngine {
         let battery = crate::battery::battery_summary(&batt_reading, cfg.battery_floor_pct);
         let cut_battery = crate::battery::live_should_cut(&batt_raw, cfg.battery_floor_pct);
 
-        // 18. power_helper_ok — status round-trip (DirsMissing/timeout → false).
-        let power_helper_ok = helper.status().is_ok();
+        // 18. platform power backend liveness.
+        let power_helper_ok = platform_power_backend_ok(helper);
 
         // 19/20. power_assertions tri-state.
-        let assertions_raw = assertions::read_assertions_raw();
+        let assertions_raw = platform_assertions_raw();
         let summary = assertions::parse_assertions(&assertions_raw, caffeinate_pid);
         let power_assertions_state = summary.state().to_string();
         let power_assertions = match summary {
@@ -570,7 +565,7 @@ impl CheckEngine {
             provider_claude,
             provider_codex,
             provider_copilot,
-            power_hold_mode: "best-effort".to_string(),
+            power_hold_mode: platform_power_hold_mode().to_string(),
             pmset_disablesleep,
             baseline,
             caffeinate_pid,
@@ -582,12 +577,159 @@ impl CheckEngine {
             power_assertions,
             cut_thermal,
             cut_battery,
-            hold_engaged: caffeinate_alive,
+            hold_engaged: platform_hold_engaged(caffeinate_alive, baseline, pmset_disablesleep),
         }
     }
 }
 
 // ── read-only helpers ─────────────────────────────────────────────────────────
+
+fn platform_power_hold_mode() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        "best-effort"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "logind-idle:sleep"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        "unsupported"
+    }
+}
+
+fn platform_pmset_disablesleep<S: crate::power::pmset::SleepReader>(sleep: &S) -> u8 {
+    #[cfg(target_os = "macos")]
+    {
+        sleep.read()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = sleep;
+        0
+    }
+}
+
+fn platform_baseline(cfg: &VigilConfig) -> Option<u8> {
+    #[cfg(target_os = "macos")]
+    {
+        if Path::new(&cfg.baseline_file).exists() {
+            std::fs::read_to_string(&cfg.baseline_file)
+                .ok()
+                .map(|s| crate::power::baseline_value_from_json(&s))
+        } else {
+            None
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = cfg;
+        None
+    }
+}
+
+fn platform_caffeinate_pid(cfg: &VigilConfig) -> Option<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        read_caffeinate_pid(&cfg.caffeinate_pidfile)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = cfg;
+        None
+    }
+}
+
+fn platform_power_backend_ok<H: HelperClient>(helper: &H) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        helper.status().is_ok()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = helper;
+        linux_logind_available()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = helper;
+        false
+    }
+}
+
+fn platform_assertions_raw() -> String {
+    if let Some(fixture) = std::env::var_os("VIGIL_ASSERTIONS_FIXTURE") {
+        return fixture.to_string_lossy().into_owned();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        assertions::read_assertions_raw()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        String::new()
+    }
+}
+
+fn platform_hold_engaged(
+    caffeinate_alive: bool,
+    baseline: Option<u8>,
+    pmset_disablesleep: u8,
+) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        caffeinate_alive || (baseline.is_some() && pmset_disablesleep == 1)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = (caffeinate_alive, baseline, pmset_disablesleep);
+        linux_vigil_hold_engaged()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (caffeinate_alive, baseline, pmset_disablesleep);
+        false
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_logind_available() -> bool {
+    let Ok(connection) = zbus::blocking::Connection::system() else {
+        return false;
+    };
+    logind_zbus::manager::ManagerProxyBlocking::new(&connection).is_ok()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_vigil_hold_engaged() -> bool {
+    let Ok(connection) = zbus::blocking::Connection::system() else {
+        return false;
+    };
+    let Ok(manager) = logind_zbus::manager::ManagerProxyBlocking::new(&connection) else {
+        return false;
+    };
+    let Ok(inhibitors) = manager.list_inhibitors() else {
+        return false;
+    };
+
+    let mut idle = false;
+    let mut sleep = false;
+    for inhibitor in inhibitors {
+        if inhibitor.who() != "vigil" || inhibitor.mode() != logind_zbus::manager::Mode::Block {
+            continue;
+        }
+        for kind in inhibitor.what().types() {
+            match kind {
+                logind_zbus::manager::InhibitType::Idle => idle = true,
+                logind_zbus::manager::InhibitType::Sleep => sleep = true,
+                _ => {}
+            }
+        }
+    }
+    idle && sleep
+}
 
 /// File mtime in unix secs (None if absent/unreadable). Mirrors bash
 /// `stat -f %m`.
@@ -616,6 +758,7 @@ fn provider_root(home: &str, session_dir: &Path, agent: Agent, now: i64) -> Prov
 }
 
 /// Read the caffeinate pid from its pidfile (None if absent/non-numeric).
+#[cfg(target_os = "macos")]
 fn read_caffeinate_pid(pidfile: &str) -> Option<u32> {
     let s = std::fs::read_to_string(pidfile).ok()?;
     let t = s.trim();

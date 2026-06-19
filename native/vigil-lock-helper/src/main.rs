@@ -1,18 +1,25 @@
 use std::env;
 
+#[cfg(target_os = "macos")]
 mod combo;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
 mod overlay;
 
+#[cfg(target_os = "macos")]
 const EXIT_OK: i32 = 0;
 #[cfg(not(target_os = "macos"))]
 const EXIT_UNSUPPORTED: i32 = 10;
+#[cfg(target_os = "macos")]
 const EXIT_PERMISSION_FAIL: i32 = 20;
 const EXIT_INVALID_ARGS: i32 = 30;
+#[cfg(target_os = "macos")]
 const EXIT_TAP_FAIL: i32 = 40;
+#[cfg(target_os = "macos")]
 const EXIT_WATCHDOG_FAIL: i32 = 50;
 
+#[cfg(target_os = "macos")]
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
     CheckPermissions {
@@ -39,12 +46,14 @@ fn print_usage() {
     eprintln!("vigil-lock-helper --capture-combo");
 }
 
+#[cfg(target_os = "macos")]
 fn parse_u64(value: &str) -> Result<u64, String> {
     value
         .parse::<u64>()
         .map_err(|_| format!("invalid integer value: {value}"))
 }
 
+#[cfg(target_os = "macos")]
 fn parse_args(args: Vec<String>) -> Result<Command, String> {
     let mut i = 0;
     let mut mode: Option<Command> = None;
@@ -136,18 +145,11 @@ fn unsupported() -> ! {
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
-    match parse_args(env::args().skip(1).collect()) {
-        Ok(command) => match command {
-            Command::CheckPermissions { .. } | Command::Freeze { .. } | Command::CaptureCombo => {
-                unsupported()
-            }
-        },
-        Err(err) => {
-            eprintln!("error: {err}");
-            print_usage();
-            std::process::exit(EXIT_INVALID_ARGS);
-        }
+    if env::args().len() <= 1 {
+        print_usage();
+        std::process::exit(EXIT_INVALID_ARGS);
     }
+    unsupported()
 }
 
 #[cfg(target_os = "macos")]

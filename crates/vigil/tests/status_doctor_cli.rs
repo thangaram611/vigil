@@ -214,7 +214,12 @@ fn status_json_schema_is_complete_and_deterministic() {
     assert_eq!(m["refcount_total"], "0");
     assert_eq!(m["pending_active_matches"], "0");
     assert_eq!(m["idle_window_minutes"], "5");
-    assert_eq!(m["power_hold_mode"], "\"best-effort\"");
+    let expected_power_mode = if cfg!(target_os = "linux") {
+        "\"logind-idle:sleep\""
+    } else {
+        "\"best-effort\""
+    };
+    assert_eq!(m["power_hold_mode"], expected_power_mode);
     assert_eq!(m["thermal"], "\"ok\"");
     assert_eq!(m["battery"], "\"AC 90%\"");
     assert_eq!(m["power_helper_ok"], "false");
@@ -247,11 +252,20 @@ fn status_text_blocks_and_hint() {
     let (code, out, _err) = run(&["status"], &sbx);
     assert_eq!(code, 0);
     assert!(out.starts_with("vigil status\n"));
+    let platform_needles: &[&str] = if cfg!(target_os = "linux") {
+        &["    systemd user: no"]
+    } else {
+        &["    launchd:      no", "    root helper:   not loaded"]
+    };
+    for needle in platform_needles {
+        assert!(
+            out.contains(needle),
+            "status text missing: {needle:?}\n{out}"
+        );
+    }
     for needle in [
         "  service",
-        "    launchd:      no",
         "    scan:          not running",
-        "    root helper:   not loaded",
         "  activity",
         "    refcount:      0 active / 0 total (idle window 5m)",
         "  power",
@@ -314,12 +328,17 @@ fn doctor_not_installed_exits_one() {
     std::fs::remove_dir_all(sbx.state_dir()).unwrap();
     let (code, out, _err) = run(&["doctor"], &sbx);
     assert_eq!(code, 1, "not-installed doctor exits 1");
+    let platform_needles: &[&str] = if cfg!(target_os = "linux") {
+        &["  power backend", "  user service", "systemd unit:"]
+    } else {
+        &["  dependencies", "  privileged helper", "  user agent"]
+    };
+    for needle in platform_needles {
+        assert!(out.contains(needle), "doctor missing: {needle:?}\n{out}");
+    }
     for needle in [
         "vigil doctor",
         "  platform",
-        "  dependencies",
-        "  privileged helper",
-        "  user agent",
         "  providers",
         "state:  not installed",
         "result: setup required",
@@ -352,7 +371,12 @@ fn doctor_verbose_shows_paths_and_provider_roots() {
     let (code, out, _err) = run(&["doctor", "--verbose"], &sbx);
     assert_eq!(code, 1);
     assert!(out.contains("  paths"));
-    assert!(out.contains("LaunchAgent:"));
+    if cfg!(target_os = "linux") {
+        assert!(out.contains("systemd unit:"));
+        assert!(out.contains("logrotate:"));
+    } else {
+        assert!(out.contains("LaunchAgent:"));
+    }
     assert!(out.contains("  provider roots:"));
     assert!(
         out.contains("state=idle"),
@@ -365,13 +389,37 @@ fn doctor_power_nonzero_when_helper_unavailable() {
     let sbx = Sandbox::new("docpower");
     let (code, out, _err) = run(&["doctor", "--power"], &sbx);
     assert_eq!(code, 1, "power doctor fails when IPC unavailable");
+    for needle in ["vigil power doctor", "next:   vigil setup"] {
+        assert!(
+            out.contains(needle),
+            "power doctor missing: {needle:?}\n{out}"
+        );
+    }
+    let platform_needles: &[&str] = if cfg!(target_os = "linux") {
+        &[
+            "  power hold mode:    logind-idle:sleep",
+            "  sleep inhibition:   logind idle + sleep inhibitors",
+            "  logind:             FAIL",
+            "result: 1 power path check(s) failed",
+        ]
+    } else {
+        &[
+            "  power hold mode:    best-effort",
+            "  display sleep:      allowed",
+            "  root helper:        FAIL",
+            "result: 1 power path check(s) failed",
+        ]
+    };
+    for needle in platform_needles {
+        assert!(
+            out.contains(needle),
+            "power doctor missing: {needle:?}\n{out}"
+        );
+    }
     for needle in [
-        "vigil power doctor",
-        "  power hold mode:    best-effort",
-        "  display sleep:      allowed",
-        "  root helper:        FAIL",
-        "result: 1 power path check(s) failed",
-        "next:   vigil setup",
+        "  thermal:            ok",
+        "  battery:            AC 90%",
+        "  power assertions:   none",
     ] {
         assert!(
             out.contains(needle),

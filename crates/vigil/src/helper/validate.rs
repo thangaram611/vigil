@@ -205,8 +205,8 @@ pub fn request_is_single_action(bytes: &[u8]) -> Result<Action, RejectedRequest>
 ///
 /// All four collapse to [`Reason::InvalidRequestFile`] (bash parity).
 pub fn file_stat_ok(st: &FileStat, allowed_uid: u32) -> Result<(), Reason> {
-    let mode = st.st_mode as u32;
-    if mode & libc::S_IFMT as u32 != libc::S_IFREG as u32 {
+    let mode = st.st_mode;
+    if mode & libc::S_IFMT != libc::S_IFREG {
         return Err(Reason::InvalidRequestFile);
     }
     if st.st_uid != allowed_uid {
@@ -228,8 +228,8 @@ pub fn file_stat_ok(st: &FileStat, allowed_uid: u32) -> Result<(), Reason> {
 /// re-check (`expected_uid = allowed_uid`) and the startup root-dir checks
 /// (`expected_uid = 0`).
 pub fn dir_stat_ok(st: &FileStat, expected_uid: u32) -> bool {
-    let mode = st.st_mode as u32;
-    if mode & libc::S_IFMT as u32 != libc::S_IFDIR as u32 {
+    let mode = st.st_mode;
+    if mode & libc::S_IFMT != libc::S_IFDIR {
         return false;
     }
     if st.st_uid != expected_uid {
@@ -423,9 +423,9 @@ mod tests {
 
     #[test]
     fn file_stat_ok_rejects_group_or_other_writable() {
-        for bad in [0o620u32, 0o602, 0o666, 0o060, 0o006] {
+        for bad in [0o620, 0o602, 0o666, 0o060, 0o006] {
             let mut st = blank_stat();
-            st.st_mode = (libc::S_IFREG as u32 | bad) as _;
+            st.st_mode = libc::S_IFREG | bad;
             st.st_uid = 501;
             st.st_nlink = 1;
             assert_eq!(
@@ -461,7 +461,7 @@ mod tests {
         // The request-DIR per-poll re-check uses dir_stat_ok(st, allowed_uid):
         // a correctly-owned directory is STILL refused if mode & 0o022 != 0
         // (group- or other-writable). One row per bad mode + the secure pass.
-        let cases: &[(u32, bool, &str)] = &[
+        let cases: &[(libc::mode_t, bool, &str)] = &[
             (0o755, true, "0o755: other-READ only, mode&0o022==0 => ok"),
             (0o700, true, "0o700: owner-only => ok"),
             (0o002, false, "0o002: other-WRITABLE => refused"),
@@ -471,7 +471,7 @@ mod tests {
         ];
         for (perm, want, label) in cases {
             let mut st = blank_stat();
-            st.st_mode = (libc::S_IFDIR as u32 | perm) as _;
+            st.st_mode = libc::S_IFDIR | perm;
             st.st_uid = 501;
             assert_eq!(dir_stat_ok(&st, 501), *want, "{label}");
         }
