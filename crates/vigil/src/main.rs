@@ -1,9 +1,9 @@
-//! vigil — single-binary CLI skeleton (Phase 5.1) + config/logging substrate (Phase 5.2).
+//! vigil — the user-facing CLI plus hidden resident daemon entrypoint.
 //!
-//! clap-derive dispatch with exit-code discipline. `--version`, help, `completions`,
-//! and `config` are handled natively; every real command delegates to the existing
-//! bash `bin/vigil` via `shim::exec_bash` (execv) so exit codes and signals propagate
-//! verbatim.
+//! clap-derive owns top-level dispatch and exit-code discipline. Most public
+//! subcommands parse their bash-compatible trailing args in `commands/*`; the
+//! hidden `daemon` subcommand is the launchd entrypoint used by the installed
+//! snapshot binary.
 
 // config, log, output, and the detection modules are declared in lib.rs;
 // reference them via the crate root.

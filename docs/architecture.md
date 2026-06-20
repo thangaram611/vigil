@@ -1,5 +1,7 @@
 # Architecture
 
+![Vigil architecture diagram](assets/vigil-architecture.svg)
+
 ## Current (Rust, single self-contained binary)
 
 There is no bash daemon and no `lib/*.sh` anymore — those were deleted in the

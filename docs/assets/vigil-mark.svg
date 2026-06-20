@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Vigil mark</title>
+  <desc id="desc">A shield with a power glyph and a small command prompt accent.</desc>
+  <defs>
+    <linearGradient id="shield" x1="64" y1="36" x2="198" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#e7eef8"/>
+      <stop offset="0.45" stop-color="#75849a"/>
+      <stop offset="1" stop-color="#1a2330"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="68" y1="32" x2="200" y2="228" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#cfefff"/>
+      <stop offset="0.52" stop-color="#5fc6f2"/>
+      <stop offset="1" stop-color="#f8a94f"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="58%" r="48%">
+      <stop offset="0" stop-color="#f6a84d" stop-opacity="0.34"/>
+      <stop offset="0.55" stop-color="#39c7f1" stop-opacity="0.15"/>
+      <stop offset="1" stop-color="#05080d" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft-shadow" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="16" stdDeviation="14" flood-color="#04070c" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <rect width="256" height="256" rx="56" fill="#070b11"/>
+  <circle cx="128" cy="138" r="112" fill="url(#glow)"/>
+
+  <path filter="url(#soft-shadow)" d="M128 28 205 58v64c0 48-30 86-77 108-47-22-77-60-77-108V58l77-30Z" fill="url(#shield)" stroke="url(#edge)" stroke-width="6" stroke-linejoin="round"/>
+  <path d="M128 43 190 67v54c0 39-23 71-62 91-39-20-62-52-62-91V67l62-24Z" fill="#0c121b" opacity="0.82"/>
+
+  <path d="M128 82v51" fill="none" stroke="#ffd38a" stroke-width="14" stroke-linecap="round"/>
+  <path d="M105 104a36 36 0 1 0 46 0" fill="none" stroke="#ffd38a" stroke-width="14" stroke-linecap="round"/>
+  <path d="M78 158h27" fill="none" stroke="#4bd8ff" stroke-width="8" stroke-linecap="round"/>
+  <path d="m86 142 20 16-20 16" fill="none" stroke="#4bd8ff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

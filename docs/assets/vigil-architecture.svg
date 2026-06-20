@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="980" viewBox="0 0 1600 980" role="img" aria-labelledby="title desc">
+  <title id="title">Vigil architecture</title>
+  <desc id="desc">A diagram of the Vigil daemon, root helper, lock helper, status engine, and platform power backends.</desc>
+  <defs>
+    <linearGradient id="page" x1="0" y1="0" x2="1600" y2="980" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#071019"/>
+      <stop offset="0.55" stop-color="#0d141d"/>
+      <stop offset="1" stop-color="#15120d"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#111c27"/>
+      <stop offset="1" stop-color="#0b1118"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4bd8ff"/>
+      <stop offset="1" stop-color="#f7a84c"/>
+    </linearGradient>
+    <filter id="shadow" x="-12%" y="-12%" width="124%" height="124%">
+      <feDropShadow dx="0" dy="18" stdDeviation="20" flood-color="#010308" flood-opacity="0.48"/>
+    </filter>
+    <marker id="arrow" markerWidth="14" markerHeight="14" refX="10" refY="7" orient="auto">
+      <path d="M2 2 12 7 2 12Z" fill="#6bbfe1"/>
+    </marker>
+    <style>
+      .sans { font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+      .title { fill: #edf5fb; font-size: 46px; font-weight: 760; letter-spacing: 0; }
+      .sub { fill: #9facbc; font-size: 22px; }
+      .label { fill: #eff6fb; font-size: 24px; font-weight: 700; letter-spacing: 0; }
+      .small { fill: #a7b4c4; font-size: 18px; }
+      .tiny { fill: #7f8b9c; font-size: 15px; }
+      .chip { fill: #051018; stroke: #263646; }
+      .box { fill: url(#panel); stroke: #2a394a; }
+      .core { fill: #0f1d25; stroke: url(#accent); stroke-width: 2; }
+      .line { fill: none; stroke: #6bbfe1; stroke-width: 3; marker-end: url(#arrow); }
+      .line-soft { fill: none; stroke: #3d586d; stroke-width: 2; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1600" height="980" fill="url(#page)"/>
+  <circle cx="1280" cy="180" r="300" fill="#2ec8ff" opacity="0.06"/>
+  <circle cx="260" cy="760" r="270" fill="#f6a84d" opacity="0.06"/>
+
+  <text x="92" y="92" class="sans title">Vigil architecture</text>
+  <text x="94" y="130" class="sans sub">One Rust CLI, a resident daemon, a narrow root helper, and platform-specific sleep holds.</text>
+
+  <g filter="url(#shadow)">
+    <rect x="88" y="182" width="360" height="214" rx="14" class="box"/>
+    <text x="118" y="232" class="sans label">Agent surfaces</text>
+    <text x="118" y="272" class="mono small">claude / codex / copilot</text>
+    <text x="118" y="304" class="mono small">Codex.app host</text>
+    <text x="118" y="336" class="mono small">VS Code Copilot Chat</text>
+    <text x="118" y="368" class="mono tiny">session mtime + semantic hashes</text>
+
+    <rect x="620" y="170" width="440" height="260" rx="18" class="core"/>
+    <text x="654" y="224" class="sans label">vigil daemon</text>
+    <text x="654" y="265" class="mono small">tick loop every VIGIL_TICK_SECS</text>
+    <text x="654" y="302" class="mono small">detect -&gt; refcount -&gt; cutoffs</text>
+    <text x="654" y="339" class="mono small">reconcile power state</text>
+    <text x="654" y="376" class="mono tiny">LaunchAgent: com.thangaram.vigil</text>
+
+    <rect x="1176" y="182" width="334" height="214" rx="14" class="box"/>
+    <text x="1206" y="232" class="sans label">Root helper</text>
+    <text x="1206" y="272" class="mono small">vigil-root-helper --serve</text>
+    <text x="1206" y="304" class="mono small">engage / release / status</text>
+    <text x="1206" y="336" class="mono small">fixed pmset argv</text>
+    <text x="1206" y="368" class="mono tiny">fd-validated filesystem IPC</text>
+
+    <rect x="146" y="544" width="338" height="200" rx="14" class="box"/>
+    <text x="176" y="594" class="sans label">vigil run</text>
+    <text x="176" y="636" class="mono small">wrapper-&lt;pid&gt;.pid</text>
+    <text x="176" y="670" class="mono small">foreground child process</text>
+    <text x="176" y="704" class="mono tiny">holds for explicit commands</text>
+
+    <rect x="622" y="542" width="436" height="224" rx="14" class="box"/>
+    <text x="654" y="594" class="sans label">Safety policy</text>
+    <text x="654" y="636" class="mono small">thermal cutout</text>
+    <text x="654" y="670" class="mono small">battery floor</text>
+    <text x="654" y="704" class="mono small">baseline restoration</text>
+    <text x="654" y="734" class="mono tiny">display sleep + Lock Screen</text>
+    <text x="654" y="758" class="mono tiny">remain allowed</text>
+
+    <rect x="1176" y="544" width="334" height="200" rx="14" class="box"/>
+    <text x="1206" y="594" class="sans label">status / doctor</text>
+    <text x="1206" y="636" class="mono small">read-only CheckEngine</text>
+    <text x="1206" y="670" class="mono small">status --json</text>
+    <text x="1206" y="704" class="mono tiny">no refresh, no GC, no writes</text>
+
+    <rect x="356" y="842" width="888" height="82" rx="14" class="chip"/>
+    <text x="388" y="891" class="mono small" fill="#dce5ee">macOS: pmset disablesleep + caffeinate -i</text>
+    <text x="388" y="914" class="mono tiny">Linux logind support is in progress; Windows is planned.</text>
+
+    <path d="M448 288H612" class="line"/>
+    <path d="M1060 288h104" class="line"/>
+    <path d="M640 430 452 544" class="line-soft"/>
+    <path d="M840 430v100" class="line-soft"/>
+    <path d="M1060 644h104" class="line-soft"/>
+    <path d="M840 766v64" class="line-soft"/>
+  </g>
+</svg>

@@ -1,173 +1,290 @@
-# vigil
+# Vigil
 
-Keep AI coding agents running while your Mac is allowed to lock and turn its displays off.
+<p align="center">
+  <img src="docs/assets/vigil-mark.svg" width="96" height="96" alt="Vigil shield mark">
+</p>
 
-> **Status: pre-release.** macOS is feature-complete through the Rust rewrite (phases 1–5.7 plus the UX overhaul are shipped); remaining work is Linux / Windows — see [`ROADMAP.md`](./ROADMAP.md). No version tag, no Homebrew tap, no GitHub release yet. Local-only testing.
-> **Next track:** Linux first, then Windows. Antigravity/Gemini CLI detection is documented but deferred until those tools can be fresh-installed and verified locally.
+<p align="center">
+  <strong>Keep AI coding agents running while your Mac can lock, sleep its display, and stay inside battery and thermal guardrails.</strong>
+</p>
 
-## Why
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="#daily-use">Daily use</a> ·
+  <a href="#agent-coverage">Agent coverage</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#safety-model">Safety model</a> ·
+  <a href="./ROADMAP.md">Roadmap</a>
+</p>
 
-[Amphetamine](https://apps.apple.com/us/app/amphetamine/id937984704) and similar tools are general-purpose and don't know when an AI agent is actively running. Vigil is purpose-built: it watches for the agents you actually use, holds sleep open while they're working, and releases as soon as they're done.
+![Vigil hero image showing a locked laptop, command blocks, and a power shield](docs/assets/vigil-hero.png)
 
-Vigil is a single self-contained Rust binary. The resident daemon, every CLI subcommand, and the install logic all live in one `vigil` executable; a separate root binary (`vigil-root-helper`) owns the privileged power transitions, and a separate native binary (`vigil-lock-helper`) owns the input-freeze guard. There is no shell daemon and no `lib/*.sh` — all bash was removed in the 5.7 cutover.
+> **Status: pre-release.** macOS is feature-complete through the Rust rewrite, local lock guard, launchd service, root helper, and UX overhaul. Linux support is underway in Phase 5.8; Windows follows in Phase 5.9. There is no version tag, Homebrew tap, or GitHub release yet.
 
-## What it does today
+## What Vigil Is
 
-- Watches for the **CLI** processes `claude` (Claude Code), `codex`, `copilot`, matched by basename. The `copilot --acp` worker that [`copilot-companion`](https://github.com/thangaram611/copilot-companion) spawns per Copilot session is the same `copilot` binary and is detected via the same path; the long-lived `node` router daemon is intentionally not detected (its command line carries a `node_repl` token that vigil excludes).
-- Watches for the **Codex.app** Electron host (`.../Codex.app/Contents/MacOS/Codex`), carved out before the `/Applications/` exclusion so a Codex.app under `/Applications/` still matches. It counts toward refcount only while Codex.app is producing rollout writes (idle-but-open is treated as idle). Coverage extends transitively to the OpenAI ChatGPT VS Code extension, which spawns the same kind of `codex` worker outside `/Applications/`. **Claude.app**'s Local Agent Mode is covered by the same `claude` basename match as the CLI (LAM spawns the bundled Claude Code binary, which writes to `~/.claude/projects/`). **VS Code + GitHub Copilot Chat** is covered via the VS Code/Insiders host process plus semantic content-hash changes in `workspaceStorage/*/chatEditingSessions/*/state.json`; mtime-only idle rewrites are ignored.
-- **Activity-aware:** an agent only counts toward sleep prevention when its session storage has been touched within the last 5 minutes (`VIGIL_IDLE_AFTER_SEC=300`). An idle REPL waiting for input or a Codex.app window with no in-flight prompt is treated as idle. The probe is per-agent-type and uses `find -mmin` whole-minute semantics against `~/.claude/projects/`, `~/.codex/sessions/`, `~/.copilot/session-state/`, honoring provider home overrides (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`) and Vigil-specific overrides (`VIGIL_CLAUDE_HOME`, `VIGIL_CODEX_HOME`, `VIGIL_COPILOT_HOME`).
-- Provides a `vigil run <cmd>` wrapper for explicit invocations (re-aliases your `claudex` cleanly). Wrappers are an explicit user opt-in and hold sleep for the wrapped command's full lifetime, regardless of session activity.
-- Holds `pmset disablesleep=1` plus `caffeinate -i` while at least one agent is active. This is the best-effort closed-lid/system-sleep path, but it still lets macOS lock naturally and lets displays sleep.
-- Restores your **prior** `SleepDisabled` state on release — does not clobber other tools.
-- Reconciles the live engaged state every tick: if `SleepDisabled` is flipped back or the `caffeinate` child exits while agents are still active, vigil reasserts.
-- Cuts off automatically on thermal warnings, and on low battery while unplugged.
-- Runs as a per-user `launchd` LaunchAgent; auto-starts at login.
+Vigil is a small systems utility for a specific workflow: you start an AI coding agent, let the display sleep or lock the Mac, and expect the agent to keep working until it is actually idle.
 
-What vigil **does not** do (yet) — see [`ROADMAP.md`](./ROADMAP.md):
+Generic keep-awake tools hold the machine awake whenever you ask. Vigil watches the agent surfaces you use, counts only active work, releases when the work goes idle, and refuses to keep the machine awake through thermal pressure or a low battery.
 
-- Detect standalone GitHub Copilot.app beyond the CLI/VS Code surfaces above.
-- Detect Antigravity CLI / legacy Gemini CLI.
-- Linux / Windows support.
+The current implementation is a Rust workspace:
 
-## Architecture
+- one user-facing `vigil` binary with CLI, setup, install, daemon, status, doctor, config, wrapper, and completion commands;
+- one privileged `vigil-root-helper` binary that owns the narrow `pmset` boundary on macOS;
+- one native `vigil-lock-helper` binary for the optional local input-freeze guard.
 
-Two launchd jobs run two modes of the same Rust workspace, and they talk only through a per-uid file-based IPC queue:
+There is no shell daemon and no `bin/` or `lib/` shell tree.
 
-- **LaunchAgent `com.thangaram.vigil`** (per-user) runs the resident daemon as `<install_dir>/bin/vigil daemon` — the install snapshot of the `vigil` binary plus a hidden `daemon` subcommand. It ticks every 5s (`VIGIL_TICK_SECS`), detects agents, GCs stale refcount pidfiles, evaluates activity + thermal + battery cutoffs, and decides whether to hold.
-- **LaunchDaemon `com.thangaram.vigil.helper`** (root) runs `vigil-root-helper --serve` as a long-lived poll loop. It is the only thing that mutates `SleepDisabled`, via a fixed `/usr/bin/pmset -a disablesleep 0|1` argv. It accepts exactly three actions — `engage`, `release`, `status` — through a filesystem request/response queue, validating every request by file descriptor (owner, mode, regular-file, single-link) to close TOCTOU and symlink-redirect.
+## At A Glance
 
-The install snapshot under `~/Library/Application Support/vigil` (not a binary in `~/Documents`) is mandatory for TCC: macOS ties the granted automation/full-disk authorization to a specific binary path and signature, so the LaunchAgent must exec the copied binary rather than the repo build.
+| Area | Current behavior |
+| --- | --- |
+| Sleep hold | `pmset disablesleep=1` plus `caffeinate -i` while active work exists. |
+| Display policy | No display-awake assertion by default; displays can sleep and macOS can lock. |
+| Agent signal | Process detection plus session-activity gates, not just "process exists". |
+| Release policy | Releases on idle, thermal pressure, or battery floor while unplugged. |
+| Baseline | Restores the prior `SleepDisabled` state instead of clobbering another tool. |
+| Runtime privilege | Normal runtime does not execute `sudo`; power transitions go through the installed root helper. |
+| Install model | `vigil setup` copies an install snapshot into `~/Library/Application Support/vigil/bin/` for launchd/TCC stability and links the dev build onto `PATH`. |
 
-## Local lock guard
+## Agent Coverage
 
-`vigil lock` runs a native helper (`vigil-lock-helper`) under the daemon's sleep hold, installs a CoreGraphics HID event tap, and blocks mouse/keyboard/scroll input until the configured unlock chord is pressed. Display sleep and the native macOS Lock Screen are still allowed. If macOS locks while the guard is armed, login input passes through; after login, the Vigil combo is still required before desktop input is released. This is a local freeze guard, not the macOS login/lock screen. See [`docs/macos-lock-and-locked-use.md`](./docs/macos-lock-and-locked-use.md) for the event-tap boundary and why Codex-style locked use is a separate feature.
+| Surface | Detection model | Activity gate |
+| --- | --- | --- |
+| Claude Code CLI | `claude` basename | Recent writes under `~/.claude/projects/` |
+| Claude.app Local Agent Mode | Bundled `claude` worker | Same Claude session activity |
+| Codex CLI | `codex` basename | Recent writes under `~/.codex/sessions/` |
+| Codex.app | Electron host carved out before `/Applications/` exclusion | Same Codex session activity |
+| OpenAI ChatGPT VS Code extension | Transitive bundled `codex` worker | Same Codex session activity |
+| GitHub Copilot CLI | `copilot` basename, including `copilot --acp` workers | Recent writes under `~/.copilot/session-state/` |
+| VS Code + GitHub Copilot Chat | VS Code/Insiders host process plus chat storage scan | Semantic content-hash changes in `workspaceStorage/*/chatEditingSessions/*/state.json` |
 
-The unlock chord is an **ordered** sequence (press order is significant: `ctrl+l+alt` is not `ctrl+alt+l`), at least 3 keys, any mix of modifiers and regular keys. While the guard is armed a fully-opaque centered overlay covers the screen; it shows a generic "Press your unlock chord to continue" hint and never displays the literal combo, so an onlooker can't read it off the screen.
+The long-lived `node` router used by companion-style tools is intentionally excluded when its command line carries the `node_repl` token; Vigil watches the actual `copilot` worker instead.
 
-- `vigil lock` — arm with config defaults (`VIGIL_LOCK_COMBO`, `VIGIL_LOCK_MAX_SECS`)
-- `vigil lock --combo <combo>` — custom unlock chord for this run
-- `vigil lock --max-secs <seconds>` — watchdog timeout (`0` means no timeout, but only when passed explicitly on the CLI)
-- `vigil lock --countdown <seconds>` — pre-arm 3-2-1 countdown (default `3`; `0` arms immediately). Does not affect the power-hold wait.
-- `vigil lock setup` — capture a new chord by pressing it (interactive), or `vigil lock setup --combo <combo> [--max-secs <seconds>]` to write directly; persists `lock_combo`/`lock_max_secs` to `vigil.conf`
-- `vigil lock doctor` — print permission + tap readiness (`listen_event_access`, `accessibility_trusted`, `tap_create_active_hid_ok`; `post_event_access` is informational only)
-- `vigil lock doctor --prompt` — request OS permission prompts (if needed)
-- `vigil lock --help` — full lock-mode usage
+Deferred surfaces, including standalone GitHub Copilot.app and Antigravity/Gemini CLI, are tracked in [`ROADMAP.md`](./ROADMAP.md) and [`future/phase-N-agent-surface-refresh.md`](./future/phase-N-agent-surface-refresh.md).
 
-Required macOS grants: **Input Monitoring** and **Accessibility** (System Settings > Privacy & Security). Run `vigil lock doctor` to verify them before arming.
+## Install
 
-Config examples:
-
-- `VIGIL_LOCK_COMBO` (default `ctrl+alt+shift+cmd+l`)
-- `VIGIL_LOCK_MAX_SECS` (default `28800`)
-- `VIGIL_LOCK_HELPER` (default `$VIGIL_INSTALL_DIR/bin/vigil-lock-helper`)
-
-Recovery:
-
-- `pkill -TERM vigil-lock-helper`
-- `vigil lock --help` prints current command text and the expected recovery flow.
-
-## The Apple Silicon lid-closed caveat
-
-Vigil's normal hold uses the best-effort closed-lid path. `pmset disablesleep` writes the same `kIOPMSleepDisabledKey` flag that Apple's own private power-management SPI uses; there is **no hidden API that does more**. On Apple Silicon (M-series, macOS Ventura and later), Apple introduced a hardware-level magnet-sensor sleep that bypasses software assertions when the lid closes without an external display. In practice `pmset disablesleep` works most of the time on M-series, but the only Apple-supported lid-closed workflow is **clamshell mode** (external display + power + input). See [`docs/apple-silicon-lid-closed.md`](./docs/apple-silicon-lid-closed.md).
-
-If you depend on overnight closed-lid runs, plug into an external display first.
-
-## Install (manual, while pre-release)
-
-Vigil is a Rust workspace — there is no `bin/` directory and no shell entrypoint. Build the workspace, then run `setup`, which copies the install binaries into place and symlinks the dev build onto your `PATH`.
+The install path below is the supported macOS path while the project is pre-release. Linux work has started, but Phase 5.8 is not complete yet.
 
 ```bash
 git clone https://github.com/thangaram611/vigil.git ~/Documents/projects/personal/vigil
 cd ~/Documents/projects/personal/vigil
+
 cargo build --release
-./target/release/vigil setup     # builds + copies binaries, symlinks ~/.local/bin/vigil onto PATH
-vigil doctor                     # now resolvable on PATH (ensure ~/.local/bin is on $PATH)
+./target/release/vigil setup --dry-run
+./target/release/vigil setup
+vigil doctor
 ```
 
-Before running `setup`, the binary is at `./target/release/vigil`. After `setup`, `vigil` is on your `PATH` via `~/.local/bin/vigil` (a symlink pointing back at the repo's `target/release/vigil`, so `vigil reload`/`vigil setup` can rebuild from the checkout). The link directory is overridable with `VIGIL_BIN_LINK_DIR`. A real (non-symlink) file already at `~/.local/bin/vigil` is never clobbered, and a PATH hint is printed if `~/.local/bin` isn't on `$PATH`.
+`vigil setup --dry-run` prints the planned paths and touches nothing. Add `--verbose` to print generated plist and newsyslog bodies before installation.
 
-Use `./target/release/vigil setup --dry-run` first if you want to preview the install plan without changing the system — it touches nothing and prints the path table. Add `--verbose` to also print the generated plist and newsyslog file bodies. You can also pass `--yes`/`--non-interactive` to skip the confirm prompt.
+`vigil setup` performs five concrete steps:
 
-`vigil setup` does the following, each prompting only what's strictly needed:
+1. Creates user state and log directories.
+2. Builds and copies `vigil` plus `vigil-lock-helper` into `~/Library/Application Support/vigil/bin/`.
+3. Installs the root LaunchDaemon helper and its per-user IPC directory matrix.
+4. Installs `/etc/newsyslog.d/vigil.conf` for daemon log rotation.
+5. Installs and bootstraps the user LaunchAgent.
 
-1. Creates `~/Library/Application Support/vigil/state/` (mode 0700) and `~/Library/Logs/vigil/`.
-2. Builds `vigil` + `vigil-lock-helper` (release) and copies them into `~/Library/Application Support/vigil/bin/` — the TCC-safe install snapshot — then symlinks the dev build onto your `PATH`.
-3. Installs the root LaunchDaemon helper at `/Library/LaunchDaemons/com.thangaram.vigil.helper.plist`, sets up the per-uid IPC directory ownership matrix, and copies `vigil-root-helper` into `/Library/Application Support/vigil/bin/`. The helper owns the privileged `pmset -a disablesleep 0|1` transitions and accepts only `engage`, `release`, and `status` requests through its filesystem queue. (Any legacy `/etc/sudoers.d/vigil` is removed.)
-4. Writes `/etc/newsyslog.d/vigil.conf` — rotates `~/Library/Logs/vigil/daemon.log` at 1 MiB, keeps 5 gzipped generations. Standard macOS log-rotation pattern.
-5. Installs and bootstraps `~/Library/LaunchAgents/com.thangaram.vigil.plist`, whose `ProgramArguments` point at the installed snapshot (`<install>/bin/vigil daemon`).
+After setup, `vigil` is available on `PATH` through `~/.local/bin/vigil`, a symlink to the dev build. The LaunchAgent still runs the copied install snapshot, which is required because macOS TCC grants are tied to the executable path and signature. Override the link directory with `VIGIL_BIN_LINK_DIR`.
 
-Inspect the LaunchDaemon and newsyslog entries yourself before approving — `etc/com.thangaram.vigil.helper.plist.in` and `etc/vigil.newsyslog.in` are the templates.
-
-## Usage
+Useful install commands:
 
 ```bash
-vigil status            # concise service, scan readiness, activity, and power state
-vigil status --verbose  # include provider paths and raw power assertion rows
-vigil status --json     # machine-readable daemon and power state
-vigil log               # cat the daemon log (last 2000 lines)
-vigil log -f            # tail -f the daemon log
-vigil run claude …      # wrap a one-off command; holds sleep for its lifetime
-vigil lock              # local input-freeze guard (macOS-only)
-vigil lock setup        # capture/set the unlock chord and timeout
-vigil lock doctor       # verify helper permissions + tap readiness
-vigil lock doctor --prompt  # request missing permission prompts
-vigil doctor            # concise install diagnostics and next action
-vigil doctor --verbose  # include install paths and provider roots
-vigil doctor --power    # focused pmset/caffeinate/assertion diagnostics
-vigil config            # show the fully-resolved configuration
-vigil config --json     # machine-readable resolved config
-vigil completions <shell>   # print a shell completion script to stdout
-vigil start             # bootstrap the LaunchAgent
-vigil stop              # boot out the LaunchAgent
-vigil reload            # rebuild + re-sync install binaries, heal PATH symlink, restart launchd
-vigil uninstall         # remove helper + newsyslog + plist, restore baseline, wipe state
+vigil setup --dry-run --verbose
+vigil setup --yes
+vigil reload
+vigil uninstall
 ```
 
-`vigil status` reports the daemon's latest scan age. Immediately after `start`, `reload`, or login, it may show a bounded `pending first scan` / `expected hold: pending` state while launchd has started the daemon but the first power transition has not completed. It also summarizes active power assertions. Use `vigil status --verbose` to print the parsed `pmset -g assertions` rows; Vigil marks its own `caffeinate` child with `← vigil` so you can tell whether Vigil or another tool is keeping the Mac awake. Both `status` and `doctor` cap their helper-liveness probe at 2s so a dead or slow helper can't block the paint.
+`vigil uninstall` removes the helper, newsyslog entry, LaunchAgent, install state, and runtime state. Logs under `~/Library/Logs/vigil` are preserved, and the `~/.local/bin/vigil` symlink is left in place so setup can reinstall from the checkout.
 
-Power policy:
+## Daily Use
 
-- Vigil always uses the best-effort closed-lid/system-sleep path on macOS: `pmset disablesleep=1` plus `caffeinate -i`.
-- Vigil never uses a display-awake assertion by default, so display sleep and the native macOS Lock Screen remain allowed.
+```bash
+vigil status
+vigil status --verbose
+vigil status --json
+vigil doctor
+vigil doctor --power
+vigil log
+vigil log -f
+```
 
-`vigil doctor` and `vigil doctor --power` are readiness checks. Exit `0` means the required checks passed. Exit `1` means Vigil is not ready for this user: the output distinguishes `state: not installed` from `state: needs repair`. Warnings, such as the optional lock helper being absent before using `vigil lock`, do not fail the command.
+Wrap a one-off command when you want an explicit hold for the full child lifetime:
 
-`vigil uninstall` stops the LaunchAgent, restores your prior `SleepDisabled` baseline, removes the helper plist + newsyslog + LaunchAgent, and wipes `~/Library/Application Support/vigil`. Logs under `~/Library/Logs/vigil` are preserved, and the `~/.local/bin/vigil` PATH symlink is left in place (its target survives uninstall, so `vigil setup` can reinstall).
+```bash
+vigil run claude
+vigil run codex
+vigil run copilot
+```
 
-To wrap your existing `claudex` alias, edit `~/.zshrc`:
+To wrap an existing alias:
 
 ```diff
-- alias claudex="claude --dangerously-skip-permissions --chrome --plugin-dir …"
-+ alias claudex="vigil run claude --dangerously-skip-permissions --chrome --plugin-dir …"
+- alias claudex="claude --dangerously-skip-permissions --chrome --plugin-dir ..."
++ alias claudex="vigil run claude --dangerously-skip-permissions --chrome --plugin-dir ..."
 ```
 
-`vigil run` runs the child as a foreground subprocess and propagates its exit code (signal-terminated → `128 + signal`; command-not-found → `127`).
+`vigil run` keeps the child in the foreground, removes its wrapper pidfile on exit, and propagates the child exit code. A signal-terminated child returns `128 + signal`; command-not-found returns `127`.
+
+![Vigil status terminal preview](docs/assets/vigil-status.svg)
+
+## Command Surface
+
+| Command | Use |
+| --- | --- |
+| `vigil setup` | Install the user LaunchAgent, root helper, log rotation, install snapshot, and PATH link. |
+| `vigil start` / `vigil stop` | Bootstrap or boot out the LaunchAgent. |
+| `vigil reload` | Rebuild, re-sync install binaries, heal the PATH link, and restart launchd. |
+| `vigil status` | Print service, activity, and power state. |
+| `vigil doctor` | Diagnose installation readiness. |
+| `vigil doctor --power` | Focus on `pmset`, helper, `caffeinate`, and assertion state. |
+| `vigil run <cmd>` | Hold sleep prevention for an explicit foreground command. |
+| `vigil lock` | Arm the local input-freeze guard. |
+| `vigil lock setup` | Capture or set the ordered unlock chord. |
+| `vigil lock doctor` | Check Input Monitoring, Accessibility, and event-tap readiness. |
+| `vigil config` / `vigil config --json` | Print the fully resolved configuration. |
+| `vigil completions <shell>` | Emit shell completions. |
+| `vigil uninstall` | Remove install components and restore the baseline. |
+
+Immediately after `start`, `reload`, or login, `vigil status` may briefly report `pending first scan` or `expected hold: pending` while launchd has started the daemon but the first tick has not completed.
 
 ## Configuration
 
-The config file is `$VIGIL_CONFIG_FILE` or `~/.config/vigil/vigil.conf`, parsed as strict TOML (shell-style `export`/`$VAR`/`KEY=value` files are rejected with a clear error). Any field is also settable as a `VIGIL_<FIELD>` environment variable, which overrides the TOML value. `vigil config` prints the fully-resolved configuration; `vigil config --json` emits a sorted machine-readable form. Commonly-tuned knobs:
+Vigil reads strict TOML from `$VIGIL_CONFIG_FILE` or `~/.config/vigil/vigil.conf`. Shell-style `export`, `$VAR`, and `KEY=value` files are rejected clearly.
 
-- `VIGIL_IDLE_AFTER_SEC` (default `300`) — activity idle window
-- `VIGIL_TICK_SECS` (default `5`) — daemon tick interval
-- `VIGIL_BATTERY_FLOOR_PCT` (default `20`) — battery cutoff while unplugged
-- `VIGIL_START_WAIT_SECS` (default `6`) — bounds the first-scan wait after start/reload/setup and the lock pre-arm power-hold wait
-- `VIGIL_LOCK_COMBO` / `VIGIL_LOCK_MAX_SECS` / `VIGIL_LOCK_HELPER` — lock guard defaults
-- `VIGIL_INSTALL_DIR` (default `~/Library/Application Support/vigil`), `VIGIL_BIN_LINK_DIR` (default `~/.local/bin`)
+Every field can also be set through a `VIGIL_<FIELD>` environment variable, which overrides TOML. Inspect the final values with:
 
-## Safety
+```bash
+vigil config
+vigil config --json
+```
 
-- Normal runtime does not execute `sudo`. The user LaunchAgent requests `engage`, `release`, or `status` from the installed root helper through a filesystem queue.
-- The root helper has a narrow command surface and runs only fixed `/usr/bin/pmset -a disablesleep 0|1` argv (with `env_clear()` and a pinned `PATH`); the argv is never built from request content. Request files are validated by file descriptor for action, type, owner, and permissions before the helper acts.
-- `vigil setup` and `vigil uninstall` (and `reload`'s launchctl bounce) are the only admin paths. They refuse test mode (`VIGIL_TEST_NO_ADMIN`) and refuse environment-overridden privileged install paths before running any `sudo` command.
-- Tradeoff: this removes repeated runtime sudo, but Vigil now owns a persistent privileged component. Treat the helper boundary as a real privilege boundary.
-- Thermal and battery cut-offs are conservative by default and always enforced — there is no override. The daemon releases sleep prevention when the kernel reports thermal pressure or the battery falls below the floor, so Vigil never holds the machine awake while it is overheating or running low.
+Common knobs:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `VIGIL_IDLE_AFTER_SEC` | `300` | Session-activity window before an agent is considered idle. |
+| `VIGIL_TICK_SECS` | `5` | Daemon tick interval. |
+| `VIGIL_BATTERY_FLOOR_PCT` | `20` | Battery cutoff while unplugged. |
+| `VIGIL_START_WAIT_SECS` | `6` | First-scan and lock pre-arm wait bound. |
+| `VIGIL_LOCK_COMBO` | `ctrl+alt+shift+cmd+l` | Default local lock unlock chord. |
+| `VIGIL_LOCK_MAX_SECS` | `28800` | Default local lock watchdog timeout. |
+| `VIGIL_INSTALL_DIR` | `~/Library/Application Support/vigil` | Install snapshot, helper queue, and runtime tree. |
+| `VIGIL_BIN_LINK_DIR` | `~/.local/bin` | Directory where `setup` links the dev build onto `PATH`. |
+
+Provider homes honor the native provider variables (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`) and Vigil-specific overrides (`VIGIL_CLAUDE_HOME`, `VIGIL_CODEX_HOME`, `VIGIL_COPILOT_HOME`).
+
+## Local Lock Guard
+
+`vigil lock` freezes local mouse, keyboard, and scroll input until an ordered unlock chord is pressed. Display sleep and the native macOS Lock Screen are still allowed.
+
+This is a local input-freeze guard, not a replacement for the macOS login screen. If macOS locks while the guard is armed, login input passes through. After login, the Vigil chord is still required before desktop input is released.
+
+```bash
+vigil lock
+vigil lock --combo ctrl+alt+l
+vigil lock --max-secs 0
+vigil lock --countdown 0
+vigil lock setup
+vigil lock setup --combo ctrl+alt+shift+l --max-secs 3600
+vigil lock doctor
+vigil lock doctor --prompt
+```
+
+The unlock chord is ordered: `ctrl+l+alt` is not the same as `ctrl+alt+l`. It must contain at least three keys and may mix modifiers and regular keys. The overlay shows a generic "Press your unlock chord to continue" hint and never displays the literal combo.
+
+Required macOS grants: **Input Monitoring** and **Accessibility**. Run `vigil lock doctor` before arming.
+
+Recovery command:
+
+```bash
+pkill -TERM vigil-lock-helper
+```
+
+For the event-tap boundary and locked-use details, read [`docs/macos-lock-and-locked-use.md`](./docs/macos-lock-and-locked-use.md).
+
+## How It Works
+
+![Vigil architecture diagram](docs/assets/vigil-architecture.svg)
+
+Two launchd jobs drive macOS runtime behavior:
+
+- **LaunchAgent `com.thangaram.vigil`** runs `<install_dir>/bin/vigil daemon` as the user. The daemon ticks every `VIGIL_TICK_SECS`, detects agent processes, applies activity gates, garbage-collects stale pidfiles, evaluates thermal and battery cutoffs, and decides whether a hold should be engaged.
+- **LaunchDaemon `com.thangaram.vigil.helper`** runs `vigil-root-helper --serve` as root. It accepts only `engage`, `release`, and `status` through a per-uid filesystem request/response queue. The helper validates request files by file descriptor and runs only fixed `/usr/bin/pmset -a disablesleep 0|1` argv.
+
+The daemon also owns a `caffeinate -i` child while active work exists. It never uses a display-awake assertion by default, so macOS can still turn displays off and show the Lock Screen.
+
+`status` and `doctor` are read-only surfaces over one `CheckEngine`: they scan pid/tick/state files plus launchd state, but do not refresh, write, or garbage-collect anything. Their helper-liveness probe is capped at 2 seconds so a dead helper does not block the status paint behind the daemon's longer power timeout.
+
+Deep dives:
+
+- [`docs/architecture.md`](./docs/architecture.md) — daemon, helper, IPC, refcount, baseline, status/doctor internals.
+- [`docs/apple-silicon-lid-closed.md`](./docs/apple-silicon-lid-closed.md) — why closed-lid behavior on Apple Silicon is best effort.
+- [`docs/testing.md`](./docs/testing.md) — test conventions, especially bounded CPU hog safety.
+
+## Safety Model
+
+Vigil is intentionally conservative:
+
+- Normal runtime does not execute `sudo`.
+- The daemon never builds a privileged command from request content.
+- The root helper accepts only `engage`, `release`, and `status`.
+- Request and response files are validated with `O_NOFOLLOW` plus fd-based metadata checks.
+- The helper runs a fixed `pmset` argv with a cleared environment and pinned `PATH`.
+- Thermal pressure releases the hold.
+- Low battery while unplugged releases the hold.
+- Baseline restoration avoids clobbering another tool's `SleepDisabled` state.
+- Admin paths refuse test mode (`VIGIL_TEST_NO_ADMIN`) and refuse environment-overridden privileged install paths.
+
+The tradeoff is explicit: Vigil avoids repeated runtime sudo prompts by owning a persistent privileged component. Treat the helper queue as a real privilege boundary.
+
+## Apple Silicon Lid-Closed Caveat
+
+Vigil uses the strongest public macOS path available for this workflow: `pmset disablesleep` plus `caffeinate -i`.
+
+On Apple Silicon, macOS can still enter hardware-level magnet-sensor sleep when the lid closes without an external display. In practice the `pmset disablesleep` path works much of the time, but the only Apple-supported closed-lid workflow is clamshell mode: external display, power, and input.
+
+If you depend on overnight closed-lid runs, use clamshell mode. See [`docs/apple-silicon-lid-closed.md`](./docs/apple-silicon-lid-closed.md).
+
+## Roadmap
+
+The current next track is multi-OS support:
+
+1. **Phase 5.8 Linux** — implementation has started. Compile baseline, platform power facade, logind `idle:sleep` hold, Linux battery/thermal collectors, and focused power status/doctor text are in place. Systemd user service install is next.
+2. **Phase 5.9 Windows** — planned after Linux, based on `SetThreadExecutionState`, Task Scheduler logon tasks, and Windows battery/power probes.
+3. **Phase 6 native UI surfaces** — deferred menu-bar/tray/full GUI work.
+4. **Emerging agent surfaces** — deferred until tools such as Antigravity/Gemini CLI are stable enough to fresh-install and verify locally.
+
+See [`ROADMAP.md`](./ROADMAP.md) and the files under [`future/`](./future/).
+
+## Development
+
+Default verification for real changes:
+
+```bash
+cargo fmt --check
+cargo build
+cargo clippy -p vigil --all-targets -- -D warnings
+cargo test
+```
+
+Use the helper test seam only when explicitly testing the helper subprocess boundary:
+
+```bash
+cargo test --features helper-test-seam
+```
+
+Tests that spawn CPU-burning or long-lived children must use `BoundedCpuHog` or an equivalent self-bounded process-group guard. Do not hand-roll unbounded `while :; do :; done` children. See [`docs/testing.md`](./docs/testing.md).
 
 ## Acknowledgements
 
-Direction-setting and design references (with verified facts traced back to source):
+Direction-setting and design references:
 
 - [`CharlonTank/agents-sleep-preventer`](https://github.com/CharlonTank/agents-sleep-preventer) — tick loop, thermal probe, refcount discipline.
-- [`hiddenest/awake`](https://github.com/hiddenest/awake) — `caffeinate` lifecycle pattern, session-aware-providers model.
+- [`hiddenest/awake`](https://github.com/hiddenest/awake) — `caffeinate` lifecycle pattern, session-aware providers model.
 - [`iccir/Fermata`](https://github.com/iccir/Fermata) — confirmed via `Source/AppleSPI.h` and `RestlessEngine.m` that the private SPI uses the same `kIOPMSleepDisabledKey` as `pmset disablesleep`.
 - [`segevfiner/keepawake-rs`](https://github.com/segevfiner/keepawake-rs) — cross-OS sleep prevention reference for Linux/Windows.
 
