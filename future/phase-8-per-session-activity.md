@@ -1,8 +1,9 @@
 # Phase 8 — Per-session activity: "working", not "open"
 
-> **Status: PLAN, ready to execute.** Researched 2026-09-21 on this machine
-> (Claude Code 2.1.278, Codex inside ChatGPT.app, Copilot CLI 1.0.86). Step 0 is
-> measurement; do it first — two classifications below are still unmeasured.
+> **Status: PLAN, ready to execute; decisions made.** Researched 2026-09-21 on
+> this machine (Claude Code 2.1.278, Codex inside ChatGPT.app, Copilot CLI
+> 1.0.86). Step 0 is measurement; do it first — two classifications below are
+> still unmeasured.
 
 ## The problem
 
@@ -115,6 +116,21 @@ Then:
   `/Applications/` exclusion, as `app-codex`.
 - `vigil status` and the menu show what is working — `claude: 1 working,
   1 waiting` — instead of a bare number.
+- **Refresh on demand.** `vigil refresh`, and a "Refresh now" item in the menu,
+  make the daemon re-evaluate immediately and **skip the grace**: a session that
+  has just gone idle releases at once, and one that has just started working is
+  held at once, without waiting out the tick or the 30 s.
+  - Transport: `SIGUSR1` to the daemon. The interruptible sleep already polls a
+    shutdown flag every 100 ms; a second `signal_hook` flag beside it costs
+    nothing and needs no new IPC.
+  - `vigil refresh` reads the daemon pidfile, checks the pid really is the
+    daemon (the tick file's `pid` must match), signals it, waits — bounded at
+    2 s — for `updated_at` to advance, then prints the one-line result
+    (`holding — claude: 1 working` / `idle — nothing working`). If the daemon is
+    not running it says so and exits 1; it never starts one.
+  - The grace is skipped for that one tick only; the next tick is ordinary.
+  - The menu item is `bash=vigil param0=refresh terminal=false refresh=true`, so
+    the menu repaints from the fresh tick.
 - `vigil doctor` gains an on-demand contract check: direct file read versus
   `claude agents --json --all`, plus the Claude Code version. If Anthropic changes
   the file, doctor says so and rule 2 carries the load meanwhile.
@@ -143,8 +159,13 @@ Then:
 5. **ChatGPT.app carve-out.** *Check:* a detect test, and `vigil debug` lists the
    live `codex app-server`.
 6. **Grace window, status/menu text, doctor contract check.**
+6b. **`vigil refresh` + the menu item.** *Check:* a daemon test drives the
+   refresh flag and asserts the grace is bypassed for exactly one tick; a CLI
+   test covers daemon-not-running (exit 1, clear message) and a pidfile whose
+   pid does not match the tick file (refuses to signal a stranger).
 7. **Live verification.** Two sessions, one idle → menu says 1. Finish the turn →
-   0 within ~35 s and `SleepDisabled` returns to `No`. Start a background shell
+   0 within ~35 s and `SleepDisabled` returns to `No`; finish another and click
+   "Refresh now" → 0 within a second or two. Start a background shell
    and end the turn → stays 1 until it exits. Run a Codex turn in ChatGPT.app →
    held. Re-run the clamshell `release` arm → still sleeps.
 8. **Docs:** README agent-coverage table, `docs/architecture.md`, ROADMAP, CHANGELOG.
@@ -165,11 +186,12 @@ Then:
   is why Step 0's background-subagent case must be measured before shipping: a
   wrong "idle" there is a lost overnight run.
 
-## Decisions needed before executing
+## Decisions — made 2026-09-21
 
-1. **Does `waiting` on a *permission prompt* release the hold?** Recommended:
-   yes. Nothing progresses until you answer, and it matches "actively working".
-   adrafinil reached the same conclusion
+1. **`waiting` releases the hold, for every `waitingFor` reason**, including a
+   permission prompt. Nothing progresses until the user answers, and it matches
+   "actively working". adrafinil reached the same conclusion
    ([#20](https://github.com/kageroumado/adrafinil/issues/20)).
-2. **Is a 30-second grace right?** It trades a slightly earlier sleep against
-   flapping between quick back-to-back turns.
+2. **The grace is a fixed 30 seconds** — a constant, not a config knob. It only
+   debounces back-to-back turns, and `vigil refresh` is the escape hatch when
+   30 s is too long to wait.
