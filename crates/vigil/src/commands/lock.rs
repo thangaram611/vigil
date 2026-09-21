@@ -3,7 +3,7 @@
 //! `vigil-lock-helper` binary; that binary is NOT modified here.
 //!
 //! Exit matrix (ported byte-faithfully from bash `cmd_lock`/`cmd_lock_doctor`):
-//! - 64 (`EX_USAGE`): non-macOS, unknown subcommand, unknown arg.
+//! - 64 (`EX_USAGE`): unknown subcommand, unknown arg.
 //! - 1 (`EX_ERROR`): permission/preflight failure, helper missing/not exec, the
 //!   `--max-secs 0`-from-config rejection.
 //! - 0: success / doctor ready.
@@ -30,14 +30,6 @@ const EX_ERROR: i32 = crate::exit::EX_ERROR;
 
 /// `vigil lock [doctor] ...`.
 pub fn run(args: Vec<OsString>) -> ! {
-    // Non-macOS reject (bash returns 64). The helper is macOS-only.
-    if !cfg!(target_os = "macos") {
-        anstream::println!(
-            "vigil lock: phase-4 local lock guard is macOS-only (not yet in phase 5 scope)."
-        );
-        std::process::exit(EX_USAGE);
-    }
-
     let cfg = load_config_or_exit();
 
     // Subcommand dispatch on the FIRST token (bash `case "${1:-}"`).
@@ -228,20 +220,13 @@ fn lock_run(cfg: &VigilConfig, args: Vec<OsString>) -> i32 {
     match status {
         Ok(s) => {
             // Propagate the helper's exit code; signal-terminated → 128 + signal.
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::ExitStatusExt;
-                if let Some(code) = s.code() {
-                    code
-                } else if let Some(sig) = s.signal() {
-                    128 + sig
-                } else {
-                    EX_ERROR
-                }
-            }
-            #[cfg(not(unix))]
-            {
-                s.code().unwrap_or(EX_ERROR)
+            use std::os::unix::process::ExitStatusExt;
+            if let Some(code) = s.code() {
+                code
+            } else if let Some(sig) = s.signal() {
+                128 + sig
+            } else {
+                EX_ERROR
             }
         }
         Err(e) => {
@@ -736,13 +721,11 @@ fn doctor_should_print_prompt_note(prompt: bool, ready: bool) -> bool {
 
 /// Wait up to `VIGIL_START_WAIT_SECS` for the daemon tick to reflect the hold,
 /// BEFORE launching the helper (bash `cmd_wait_for_lock_power_hold`). Returns
-/// early if the LaunchAgent is not loaded. Reads `refcount_active`, `engaged`,
-/// `thermal_cut`, `battery_cut`, `cooling` from the tick file.
+/// early if the LaunchAgent is not loaded.
 ///
 /// This is the pre-arm power-hold guarantee. Its worst-case bound is driven ONLY
 /// by `start_wait_secs` (default 6s); the `--countdown` flag does NOT shorten or
-/// otherwise affect this wait. The early-return condition is unchanged:
-/// `refcount_active > 0` AND any of engaged/thermal/battery/cooling == 1.
+/// otherwise affect this wait.
 fn wait_for_lock_power_hold(cfg: &VigilConfig) {
     let probe = RealLoadProbe;
     if !probe.is_loaded(vigil::service::USER_AGENT_LABEL) {
@@ -751,55 +734,23 @@ fn wait_for_lock_power_hold(cfg: &VigilConfig) {
     let wait_secs = cfg.start_wait_secs; // default 6, parsed by config
     let max_ticks = wait_secs as u64 * 10;
     for _ in 0..max_ticks {
-        // Read the tick file ONCE per iteration (was 5x read_to_string per tick)
-        // and parse all five fields from that single snapshot. Same frozen ABI
-        // and same early-return condition — only the I/O is batched.
-        if lock_power_hold_satisfied(read_tick_fields(cfg).as_deref()) {
+        let tick = vigil::daemon::tick::read(std::path::Path::new(&cfg.daemon_tick_file));
+        if lock_power_hold_satisfied(tick.as_ref()) {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 }
 
-/// Snapshot of the daemon tick file (`None` if absent/unreadable). Caller parses
-/// the needed fields out of this single read via `tick_field_from`.
-fn read_tick_fields(cfg: &VigilConfig) -> Option<String> {
-    std::fs::read_to_string(&cfg.daemon_tick_file).ok()
-}
-
-/// Pure predicate for the pre-arm power-hold early-return condition over a single
-/// tick-file snapshot: `refcount_active > 0` AND any of
-/// engaged/thermal_cut/battery_cut/cooling == 1. A `None` snapshot (no tick file)
-/// is never satisfied.
-fn lock_power_hold_satisfied(tick: Option<&str>) -> bool {
-    let Some(text) = tick else {
-        return false;
-    };
-    let active_n = tick_field_from(text, "refcount_active").and_then(|s| s.parse::<u32>().ok());
-    let Some(n) = active_n else {
-        return false;
-    };
-    if n == 0 {
-        return false;
-    }
-    tick_field_from(text, "engaged").as_deref() == Some("1")
-        || tick_field_from(text, "thermal_cut").as_deref() == Some("1")
-        || tick_field_from(text, "battery_cut").as_deref() == Some("1")
-        || tick_field_from(text, "cooling").as_deref() == Some("1")
-}
-
-/// `awk -F= -v k=field '$1==k {...; print; exit}'` over a daemon-tick snapshot
-/// (frozen ABI: `=` is the first separator, one field per line, first-match
-/// wins). `None` if the key is missing.
-fn tick_field_from(text: &str, field: &str) -> Option<String> {
-    for line in text.lines() {
-        if let Some((k, v)) = line.split_once('=')
-            && k == field
-        {
-            return Some(v.to_string());
-        }
-    }
-    None
+/// Pure predicate for the pre-arm wait's early return over one tick snapshot:
+/// the daemon has counted this lock (`refcount_active > 0`) AND has either
+/// engaged or decided it must not (thermal/battery/cooling). Manual mode `off`
+/// also ends the wait — the daemon will never engage. No tick → not satisfied.
+fn lock_power_hold_satisfied(tick: Option<&vigil::daemon::tick::TickSnapshot>) -> bool {
+    tick.is_some_and(|t| {
+        t.mode == vigil::mode::Mode::Off
+            || (t.refcount_active > 0 && (t.engaged || t.thermal_cut || t.battery_cut || t.cooling))
+    })
 }
 
 // ── RAII pidfile cleanup ──────────────────────────────────────────────────────
@@ -974,60 +925,78 @@ mod tests {
         );
     }
 
-    /// The batched pre-arm power-hold predicate must keep the EXACT early-return
-    /// condition over a single tick snapshot: refcount_active > 0 AND any of
-    /// engaged/thermal_cut/battery_cut/cooling == 1. Also exercises the frozen
-    /// ABI (`=` first separator, one field per line, first-match wins).
     #[test]
-    fn lock_power_hold_satisfied_matches_frozen_condition() {
-        // No tick file → never satisfied.
-        assert!(!lock_power_hold_satisfied(None));
-
-        // refcount_active == 0 → not satisfied even with engaged=1.
-        let t = "refcount_active=0\nengaged=1\n";
-        assert!(!lock_power_hold_satisfied(Some(t)));
-
-        // refcount_active > 0 but no power flag set → not satisfied.
-        let t = "refcount_active=2\nengaged=0\nthermal_cut=0\nbattery_cut=0\ncooling=0\n";
-        assert!(!lock_power_hold_satisfied(Some(t)));
-
-        // refcount_active > 0 AND engaged=1 → satisfied.
-        let t = "refcount_active=1\nengaged=1\n";
-        assert!(lock_power_hold_satisfied(Some(t)));
-
-        // Each of the other three power flags independently satisfies.
-        assert!(lock_power_hold_satisfied(Some(
-            "refcount_active=1\nthermal_cut=1\n"
-        )));
-        assert!(lock_power_hold_satisfied(Some(
-            "refcount_active=1\nbattery_cut=1\n"
-        )));
-        assert!(lock_power_hold_satisfied(Some(
-            "refcount_active=1\ncooling=1\n"
-        )));
-
-        // Missing refcount_active field → not satisfied.
-        assert!(!lock_power_hold_satisfied(Some("engaged=1\n")));
-
-        // First-match-wins on duplicate keys (frozen ABI).
-        let t = "refcount_active=1\nrefcount_active=0\nengaged=1\n";
-        assert!(lock_power_hold_satisfied(Some(t)));
-    }
-
-    /// `tick_field_from` honors the frozen ABI: `=` is the first separator
-    /// (values may contain `=`), one field per line, first match wins.
-    #[test]
-    fn tick_field_from_frozen_abi() {
-        let t = "engaged=1\nnote=a=b=c\nrefcount_active=3\n";
-        assert_eq!(tick_field_from(t, "engaged"), Some("1".to_string()));
-        // Value retains everything after the FIRST `=`.
-        assert_eq!(tick_field_from(t, "note"), Some("a=b=c".to_string()));
-        assert_eq!(tick_field_from(t, "refcount_active"), Some("3".to_string()));
-        // Missing key.
-        assert_eq!(tick_field_from(t, "cooling"), None);
-        // First match wins.
-        let dup = "k=first\nk=second\n";
-        assert_eq!(tick_field_from(dup, "k"), Some("first".to_string()));
+    fn lock_power_hold_satisfied_table() {
+        use vigil::daemon::tick::TickSnapshot;
+        use vigil::mode::Mode;
+        let base = TickSnapshot {
+            pid: 1,
+            updated_at: 0,
+            tick_secs: 5,
+            refcount_active: 1,
+            desired_hold: false,
+            engaged: false,
+            thermal_cut: false,
+            battery_cut: false,
+            cooling: false,
+            mode: Mode::Auto,
+        };
+        assert!(!lock_power_hold_satisfied(None), "no tick file");
+        let cases: &[(&str, TickSnapshot, bool)] = &[
+            ("counted, no power flag yet", base, false),
+            (
+                "counted + engaged",
+                TickSnapshot {
+                    engaged: true,
+                    ..base
+                },
+                true,
+            ),
+            (
+                "counted + thermal",
+                TickSnapshot {
+                    thermal_cut: true,
+                    ..base
+                },
+                true,
+            ),
+            (
+                "counted + battery",
+                TickSnapshot {
+                    battery_cut: true,
+                    ..base
+                },
+                true,
+            ),
+            (
+                "counted + cooling",
+                TickSnapshot {
+                    cooling: true,
+                    ..base
+                },
+                true,
+            ),
+            (
+                "engaged but this lock not counted yet",
+                TickSnapshot {
+                    refcount_active: 0,
+                    engaged: true,
+                    ..base
+                },
+                false,
+            ),
+            (
+                "mode off: nothing to wait for",
+                TickSnapshot {
+                    mode: Mode::Off,
+                    ..base
+                },
+                true,
+            ),
+        ];
+        for (label, t, want) in cases {
+            assert_eq!(lock_power_hold_satisfied(Some(t)), *want, "{label}");
+        }
     }
 
     #[test]

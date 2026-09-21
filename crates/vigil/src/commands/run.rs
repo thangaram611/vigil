@@ -121,15 +121,12 @@ pub fn run(args: Vec<OsString>) -> ! {
 /// a normal exit propagates its code; a signal-terminated child propagates
 /// `128 + signal` (e.g. SIGTERM(15) → 143, SIGINT(2) → 130).
 fn propagate_status(status: &std::process::ExitStatus) -> i32 {
+    use std::os::unix::process::ExitStatusExt;
     if let Some(code) = status.code() {
         return code;
     }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        if let Some(sig) = status.signal() {
-            return 128 + sig;
-        }
+    if let Some(sig) = status.signal() {
+        return 128 + sig;
     }
     // No code and no signal should be unreachable on unix; default to a generic
     // failure rather than 0.

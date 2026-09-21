@@ -7,7 +7,7 @@
 
 // config, log, output, and the detection modules are declared in lib.rs;
 // reference them via the crate root.
-use vigil::{battery, config, daemon, debug, output, power_guard, thermal};
+use vigil::{config, daemon, debug, output, power_guard};
 
 mod commands;
 mod exit;
@@ -71,6 +71,13 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<OsString>,
     },
+    /// Show or set the manual override: auto (follow agents), on, off
+    Mode {
+        /// The mode to set; omit to print the current mode.
+        mode: Option<vigil::mode::Mode>,
+    },
+    /// Print the SwiftBar menu (called by the menu-bar plugin)
+    Menubar,
     /// Re-sync daemon + libs into install dir, restart launchd
     Reload {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -97,14 +104,11 @@ enum Command {
     /// VIGIL_* resolved values. No side effects — does not create directories.
     Config {
         /// Print machine-readable JSON object (stable sorted keys).
-        #[arg(long, conflicts_with = "show", conflicts_with = "kv")]
+        #[arg(long, conflicts_with = "show")]
         json: bool,
         /// Print human-readable table (default if neither flag given).
         #[arg(long)]
         show: bool,
-        /// Print sorted KEY=VALUE lines (used by the parity oracle test).
-        #[arg(long, hide = true)]
-        kv: bool,
     },
     /// The resident tick loop. Run by launchd via the LaunchAgent plist as
     /// `vigil daemon`; never invoked directly by users. Hidden from the public
@@ -134,16 +138,6 @@ enum DebugSub {
         #[arg(long)]
         ps_cmd: std::path::PathBuf,
     },
-    /// Hidden thermal cut oracle. Runs the LIVE env-driven thermal guard
-    /// (honoring VIGIL_THERMAL_FIXTURE + VIGIL_THERMAL_CPU_LIMIT_FLOOR) and
-    /// prints exactly `cut` or `nocut`. Cross-engine parity endpoint.
-    #[command(hide = true)]
-    Thermal,
-    /// Hidden battery cut oracle. Runs the LIVE env-driven battery guard
-    /// (honoring VIGIL_BATTERY_FIXTURE + VIGIL_BATTERY_FLOOR_PCT) and prints
-    /// exactly `cut` or `nocut`. Cross-engine parity endpoint.
-    #[command(hide = true)]
-    Battery,
 }
 
 fn main() {
@@ -197,7 +191,7 @@ fn resolve_color_choice() -> ColorChoice {
 fn parse_or_exit() -> Cli {
     // Resolve and apply `--color` BEFORE clap renders any help/version/error
     // text, because that output is produced during parsing. Two channels need
-    // it: (1) the process-global ColorChoice (anstream/owo-colors prints, and
+    // it: (1) the process-global ColorChoice (anstream prints, and
     // the streams clap writes through); (2) clap's OWN help/version/error
     // colorization, which is governed by the Command's `.color()` setting and
     // NOT by the colorchoice global — so we must set both or `--color` would be
@@ -251,8 +245,8 @@ fn dispatch(command: Command) -> ! {
             generate_completions(shell);
             std::process::exit(0);
         }
-        Command::Config { json, show: _, kv } => {
-            cmd_config(json, kv);
+        Command::Config { json, show: _ } => {
+            cmd_config(json);
             std::process::exit(0);
         }
         Command::Daemon => daemon::run(),
@@ -267,17 +261,19 @@ fn dispatch(command: Command) -> ! {
         Command::Status { args } => commands::status::run(args),
         Command::Log { args } => commands::log::run(args),
         Command::Run { args } => commands::run::run(args),
+        Command::Mode { mode } => commands::mode::run(mode),
+        Command::Menubar => commands::menubar::run(),
         Command::Reload { args } => commands::reload::run(args),
         Command::Lock { args } => commands::lock::run(args),
         Command::Doctor { args } => commands::doctor::run(args),
     }
 }
 
-/// Handle `vigil config [--show|--json|--kv]`.
+/// Handle `vigil config [--show|--json]`.
 ///
 /// Loads the fully-resolved config (no side effects) and prints it.
 /// On a malformed conf, emits a clear error to stderr and exits EX_USAGE (64).
-fn cmd_config(json: bool, kv: bool) {
+fn cmd_config(json: bool) {
     let conf_path = std::env::var("VIGIL_CONFIG_FILE")
         .unwrap_or_else(|_| format!("{}/.config/vigil/vigil.conf", home_dir()));
 
@@ -299,11 +295,6 @@ fn cmd_config(json: bool, kv: bool) {
                 anstream::eprintln!("vigil: config --json: {e}");
                 std::process::exit(exit::EX_ERROR);
             }
-        }
-    } else if kv {
-        // Hidden --kv mode: sorted KEY=VALUE lines (used by the parity oracle test).
-        for (k, v) in &map {
-            anstream::println!("{k}={v}");
         }
     } else {
         // Default: human-readable table (--show or no flag).
@@ -347,22 +338,6 @@ fn cmd_debug(sub: Option<DebugSub>, json: bool) {
                 // Plain println: byte-exact machine output, no ANSI.
                 println!("{row}");
             }
-        }
-        Some(DebugSub::Thermal) => {
-            // Resolve the floor knob from config so the env seam
-            // (VIGIL_THERMAL_CPU_LIMIT_FLOOR) and the config knob are ONE source
-            // of truth.
-            let cfg = load_config_or_exit();
-            let raw = thermal::read_therm_raw();
-            let cut = thermal::live_should_cut(&raw, cfg.thermal_cpu_limit_floor);
-            // Plain println, no ANSI: machine output for the parity oracle.
-            println!("{}", if cut { "cut" } else { "nocut" });
-        }
-        Some(DebugSub::Battery) => {
-            let cfg = load_config_or_exit();
-            let raw = battery::read_ps_raw();
-            let cut = battery::live_should_cut(&raw, cfg.battery_floor_pct);
-            println!("{}", if cut { "cut" } else { "nocut" });
         }
         None => {
             // READ-ONLY dump. Load config with NO side effects (no ensure_state_dir).

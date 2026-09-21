@@ -58,8 +58,6 @@ const G_INFO: &str = "\u{25c7}"; // ◇
 const G_WARN: &str = "\u{25b2}"; // ▲
 // Part of the clack vocabulary (error step glyph). Exposed via `Tui::error` for
 // callers beyond setup/uninstall; not yet wired into a step there.
-#[allow(dead_code)]
-const G_ERROR: &str = "\u{25a0}"; // ■
 const G_ARROW: &str = "\u{2192}"; // →
 
 /// Style the rail glyph the same muted blue everywhere (256-color 39 ≈ a soft
@@ -135,7 +133,6 @@ impl Tui {
     /// Success step: `✓  <bold title>` with a GREEN check (interactive), or the
     /// verbatim plain line. (API surface; the static step's [`Step::done`] is
     /// what setup/uninstall use to land a step on a green check.)
-    #[allow(dead_code)]
     pub(crate) fn step_success(self, title: &str, plain: &str) {
         if self.interactive {
             anstream::println!("{}  {}", style(G_SUCCESS).green(), style(title).bold());
@@ -144,35 +141,11 @@ impl Tui {
         }
     }
 
-    /// Info step: `◇  <title>` (interactive) or the verbatim plain line. (API
-    /// surface; setup/uninstall open each numbered step via [`Tui::step`], which
-    /// carries the same `◇` rail prefix.)
-    #[allow(dead_code)]
-    pub(crate) fn step_info(self, title: &str, plain: &str) {
-        if self.interactive {
-            anstream::println!("{}  {}", rail(G_INFO), title);
-        } else {
-            anstream::println!("{plain}");
-        }
-    }
-
     /// Warning: `▲  <yellow title>` (interactive) or the verbatim plain line.
     /// (API surface for callers beyond setup/uninstall.)
-    #[allow(dead_code)]
     pub(crate) fn warn(self, title: &str, plain: &str) {
         if self.interactive {
             anstream::println!("{}  {}", style(G_WARN).yellow(), style(title).yellow());
-        } else {
-            anstream::println!("{plain}");
-        }
-    }
-
-    /// Error: `■  <red title>` (interactive) or the verbatim plain line. (API
-    /// surface for callers beyond setup/uninstall.)
-    #[allow(dead_code)]
-    pub(crate) fn error(self, title: &str, plain: &str) {
-        if self.interactive {
-            anstream::println!("{}  {}", style(G_ERROR).red(), style(title).red());
         } else {
             anstream::println!("{plain}");
         }

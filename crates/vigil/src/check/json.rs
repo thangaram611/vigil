@@ -237,6 +237,7 @@ mod tests {
             cut_thermal: false,
             cut_battery: false,
             hold_engaged: false,
+            mode: crate::mode::Mode::Auto,
         };
         let json = snap.to_json();
 

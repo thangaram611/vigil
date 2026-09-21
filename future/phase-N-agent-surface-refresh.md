@@ -1,8 +1,7 @@
 # Phase N — Emerging agent surface refresh
 
-> **Status: DEFERRED (2026-06-19 research note).** This is not the next
-> implementation track. Revisit after the Linux/Windows slices, or earlier only
-> if the user has a fresh local install of the target agent and can provide live
+> **Status: DEFERRED (2026-06-19 research note).** Revisit only when a target
+> agent is freshly installed on this machine and can provide live
 > process/session artifacts.
 
 ## Why this is deferred
@@ -43,9 +42,3 @@ Before implementation, replace this note with a real plan that includes:
 - status/doctor JSON/text schema changes, if adding a new named agent;
 - fixture-backed tests for process detection, activity gating, refcounting, and
   stale-session behavior.
-
-## Explicit non-goal for the next phase
-
-Do not add Antigravity/Gemini support in Phase 5.8 or 5.9 unless it is needed to
-prove the cross-OS abstractions. The next product work is the multi-OS port:
-Linux first, then Windows.

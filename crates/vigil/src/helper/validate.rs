@@ -97,17 +97,6 @@ pub fn id_from_base(base: &str) -> Option<String> {
     Some(id.to_string())
 }
 
-/// Validate a response id used by the IPC CLIENT to construct `resp.<id>`. Same
-/// charset + `.`/`..` guard as [`id_from_base`] but the input is the raw id (no
-/// `req.` prefix). Returns true iff safe to use in `resp.<id>`.
-pub fn id_charset_ok(id: &str) -> bool {
-    if id.is_empty() || id == "." || id == ".." {
-        return false;
-    }
-    id.bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-')
-}
-
 /// A request rejected by [`request_is_single_action`], carrying both the
 /// [`Reason`] and the attempted first-line action WORD for the response
 /// `action=` field (bash parity — see [`request_is_single_action`]).
@@ -303,16 +292,6 @@ mod tests {
         assert_eq!(id_from_base("req.a/b"), None);
         assert_eq!(id_from_base("req.a b"), None);
         assert_eq!(id_from_base("req.a;b"), None);
-    }
-
-    #[test]
-    fn id_charset_guard() {
-        assert!(id_charset_ok("abc.123-x_y"));
-        assert!(!id_charset_ok(""));
-        assert!(!id_charset_ok("."));
-        assert!(!id_charset_ok(".."));
-        assert!(!id_charset_ok("a/b"));
-        assert!(!id_charset_ok("a b"));
     }
 
     #[test]

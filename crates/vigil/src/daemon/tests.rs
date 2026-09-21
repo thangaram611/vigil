@@ -13,7 +13,7 @@ use super::{ActivityFlags, act, desired_hold};
 use crate::ipc::{HelperClient, IpcError, Response};
 use crate::power::PowerMachine;
 use crate::power::caffeinate::CaffeinateAssertion;
-use crate::power::platform::{PowerController, PowerSummary};
+use crate::power::platform::PowerController;
 use crate::power::pmset::SleepReader;
 
 // ── desired-hold predicate truth table (bin/vigil-daemon:156-159) ─────────────
@@ -40,6 +40,31 @@ fn desired_hold_truth_table() {
     assert!(
         desired_hold(2, false, false, false),
         "multi-agent clear → hold"
+    );
+}
+
+#[test]
+fn manual_mode_outranks_detection_but_not_the_guards() {
+    use crate::mode::Mode;
+    assert!(
+        desired_hold(Mode::On.demand(0), false, false, false),
+        "on, no agents → hold"
+    );
+    assert!(
+        !desired_hold(Mode::Off.demand(3), false, false, false),
+        "off, active agents → no hold"
+    );
+    assert!(
+        !desired_hold(Mode::On.demand(0), true, false, false),
+        "on + thermal cut → no hold"
+    );
+    assert!(
+        !desired_hold(Mode::On.demand(0), false, true, false),
+        "on + battery cut → no hold"
+    );
+    assert!(
+        !desired_hold(Mode::On.demand(0), false, false, true),
+        "on + cooling → no hold"
     );
 }
 
@@ -276,17 +301,6 @@ impl PowerController for TraitFakePower {
 
     fn orphaned_hold_requires_release(&self) -> bool {
         self.orphaned
-    }
-
-    fn summary(&self) -> PowerSummary {
-        PowerSummary {
-            mode: "fake".to_string(),
-            platform_hold: self.observable,
-            baseline: None,
-            helper_ok: Some(true),
-            assertion_pid: None,
-            assertion_alive: false,
-        }
     }
 }
 

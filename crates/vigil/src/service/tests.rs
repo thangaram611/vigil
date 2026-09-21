@@ -41,6 +41,7 @@ fn golden_config() -> VigilConfig {
         caffeinate_pidfile: format!("{SBX}/state/caffeinate.pid"),
         daemon_pidfile: format!("{SBX}/state/daemon.pid"),
         daemon_tick_file: format!("{SBX}/state/daemon.tick"),
+        mode_file: format!("{SBX}/state/mode"),
         lock_file: format!("{SBX}/state/state.lock"),
         vscode_copilot_state_file: format!("{SBX}/state/vscode-copilot-chat.state"),
 

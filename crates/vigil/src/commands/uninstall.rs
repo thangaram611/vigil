@@ -199,6 +199,11 @@ pub fn run(args: Vec<OsString>) -> ! {
             &format!("     install dir: already absent {}", cfg.install_dir),
         );
     }
+    if let Some(dir) = vigil::swiftbar::plugin_dir()
+        && let Ok(true) = vigil::swiftbar::remove(&dir)
+    {
+        pb.detail("menu bar plugin: removed", "     menu bar plugin: removed");
+    }
     // The `vigil` PATH symlink points at your repo dev build (not the install
     // dir), so it survives uninstall — leave it so `vigil setup` can reinstall.
     pb.done("local state cleared");

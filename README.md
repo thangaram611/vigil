@@ -11,6 +11,7 @@
 <p align="center">
   <a href="#install">Install</a> ·
   <a href="#daily-use">Daily use</a> ·
+  <a href="#manual-mode-and-menu-bar">Menu bar</a> ·
   <a href="#agent-coverage">Agent coverage</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#safety-model">Safety model</a> ·
@@ -19,7 +20,7 @@
 
 ![Vigil hero image showing a locked laptop, command blocks, and a power shield](docs/assets/vigil-hero.png)
 
-> **Status: pre-release.** macOS is feature-complete through the Rust rewrite, local lock guard, launchd service, root helper, and UX overhaul. Linux support is underway in Phase 5.8; Windows follows in Phase 5.9. There is no version tag, Homebrew tap, or GitHub release yet.
+> **Status: personal macOS tool.** Feature-complete for one machine and one workflow. No releases, no Homebrew tap, no Linux or Windows port — see [`ROADMAP.md`](./ROADMAP.md) for why. If you want a packaged app for this, use [`adrafinil`](https://github.com/kageroumado/adrafinil).
 
 ## What Vigil Is
 
@@ -65,11 +66,9 @@ Deferred surfaces, including standalone GitHub Copilot.app and Antigravity/Gemin
 
 ## Install
 
-The install path below is the supported macOS path while the project is pre-release. Linux work has started, but Phase 5.8 is not complete yet.
-
 ```bash
-git clone https://github.com/thangaram611/vigil.git ~/Documents/projects/personal/vigil
-cd ~/Documents/projects/personal/vigil
+git clone https://github.com/thangaram611/vigil.git
+cd vigil
 
 cargo build --release
 ./target/release/vigil setup --dry-run
@@ -79,13 +78,14 @@ vigil doctor
 
 `vigil setup --dry-run` prints the planned paths and touches nothing. Add `--verbose` to print generated plist and newsyslog bodies before installation.
 
-`vigil setup` performs five concrete steps:
+`vigil setup` performs these steps:
 
 1. Creates user state and log directories.
 2. Builds and copies `vigil` plus `vigil-lock-helper` into `~/Library/Application Support/vigil/bin/`.
 3. Installs the root LaunchDaemon helper and its per-user IPC directory matrix.
 4. Installs `/etc/newsyslog.d/vigil.conf` for daemon log rotation.
 5. Installs and bootstraps the user LaunchAgent.
+6. Writes the SwiftBar menu-bar plugin, if SwiftBar has a plugin folder configured.
 
 After setup, `vigil` is available on `PATH` through `~/.local/bin/vigil`, a symlink to the dev build. The LaunchAgent still runs the copied install snapshot, which is required because macOS TCC grants are tied to the executable path and signature. Override the link directory with `VIGIL_BIN_LINK_DIR`.
 
@@ -98,7 +98,7 @@ vigil reload
 vigil uninstall
 ```
 
-`vigil uninstall` removes the helper, newsyslog entry, LaunchAgent, install state, and runtime state. Logs under `~/Library/Logs/vigil` are preserved, and the `~/.local/bin/vigil` symlink is left in place so setup can reinstall from the checkout.
+`vigil uninstall` removes the helper, newsyslog entry, LaunchAgent, menu-bar plugin, install state, and runtime state. Logs under `~/Library/Logs/vigil` are preserved, and the `~/.local/bin/vigil` symlink is left in place so setup can reinstall from the checkout.
 
 ## Daily Use
 
@@ -131,6 +131,37 @@ To wrap an existing alias:
 
 ![Vigil status terminal preview](docs/assets/vigil-status.svg)
 
+## Manual Mode And Menu Bar
+
+Agent detection decides when to hold. `vigil mode` overrides it:
+
+```bash
+vigil mode          # print the current mode
+vigil mode on       # hold now, agents or not
+vigil mode off      # never hold, even with active agents
+vigil mode auto     # back to agent detection (default)
+```
+
+The mode persists across restarts and takes effect on the daemon's next tick. Thermal pressure and the battery floor still release the hold in every mode — `on` outranks detection, not the safety guards.
+
+The menu-bar item is a [SwiftBar](https://github.com/swiftbar/SwiftBar) plugin: an icon for the current state, plus the three modes as one-click items.
+
+```bash
+brew install --cask swiftbar
+open -a SwiftBar        # pick a plugin folder on first launch
+vigil setup             # writes vigil.5s.sh into that folder
+```
+
+The plugin is a two-line shim around `vigil menubar`, which reads only the daemon's tick file and the mode file, so a 5-second refresh costs nothing.
+
+| Icon | Meaning |
+| --- | --- |
+| cup, filled | Holding sleep prevention |
+| cup, outline | Idle — the Mac may sleep |
+| thermometer / battery | Hold released by a safety guard |
+| warning triangle | Daemon not running or not ticking |
+| `ON` / `OFF` beside the icon | A manual mode is set |
+
 ## Command Surface
 
 | Command | Use |
@@ -142,6 +173,8 @@ To wrap an existing alias:
 | `vigil doctor` | Diagnose installation readiness. |
 | `vigil doctor --power` | Focus on `pmset`, helper, `caffeinate`, and assertion state. |
 | `vigil run <cmd>` | Hold sleep prevention for an explicit foreground command. |
+| `vigil mode [auto\|on\|off]` | Show or set the manual override. |
+| `vigil menubar` | Print the SwiftBar menu. Called by the plugin, not by hand. |
 | `vigil lock` | Arm the local input-freeze guard. |
 | `vigil lock setup` | Capture or set the ordered unlock chord. |
 | `vigil lock doctor` | Check Input Monitoring, Accessibility, and event-tap readiness. |
@@ -251,14 +284,7 @@ If you depend on overnight closed-lid runs, use clamshell mode. See [`docs/apple
 
 ## Roadmap
 
-The current next track is multi-OS support:
-
-1. **Phase 5.8 Linux** — implementation has started. Compile baseline, platform power facade, logind `idle:sleep` hold, Linux battery/thermal collectors, and focused power status/doctor text are in place. Systemd user service install is next.
-2. **Phase 5.9 Windows** — planned after Linux, based on `SetThreadExecutionState`, Task Scheduler logon tasks, and Windows battery/power probes.
-3. **Phase 6 native UI surfaces** — deferred menu-bar/tray/full GUI work.
-4. **Emerging agent surfaces** — deferred until tools such as Antigravity/Gemini CLI are stable enough to fresh-install and verify locally.
-
-See [`ROADMAP.md`](./ROADMAP.md) and the files under [`future/`](./future/).
+Vigil is done growing sideways. Linux, Windows, a native tray app, and public releases were dropped on 2026-09-20; what remains open is a clamshell hardware test and new agent surfaces as they land on this machine. See [`ROADMAP.md`](./ROADMAP.md).
 
 ## Development
 
@@ -267,7 +293,7 @@ Default verification for real changes:
 ```bash
 cargo fmt --check
 cargo build
-cargo clippy -p vigil --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test
 ```
 
@@ -286,7 +312,6 @@ Direction-setting and design references:
 - [`CharlonTank/agents-sleep-preventer`](https://github.com/CharlonTank/agents-sleep-preventer) — tick loop, thermal probe, refcount discipline.
 - [`hiddenest/awake`](https://github.com/hiddenest/awake) — `caffeinate` lifecycle pattern, session-aware providers model.
 - [`iccir/Fermata`](https://github.com/iccir/Fermata) — confirmed via `Source/AppleSPI.h` and `RestlessEngine.m` that the private SPI uses the same `kIOPMSleepDisabledKey` as `pmset disablesleep`.
-- [`segevfiner/keepawake-rs`](https://github.com/segevfiner/keepawake-rs) — cross-OS sleep prevention reference for Linux/Windows.
 
 ## License
 

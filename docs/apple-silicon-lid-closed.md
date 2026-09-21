@@ -32,6 +32,25 @@ Sources:
 
 Empirically, `pmset disablesleep 1` works **most of the time** on M-series, but the behavior is not Apple-supported and may regress with macOS updates. If you need reliable closed-lid operation for overnight agent runs, plug in an external display.
 
+## Measuring it on this Mac
+
+"Works most of the time" is not a measurement. [`tests/experiments/clamshell/run.sh`](../tests/experiments/clamshell/run.sh) is one: a heartbeat writes the time every 5 seconds, a sleeping Mac writes nothing, so the longest gap between beats is the time spent asleep.
+
+It must run **on battery with no external display** — with a display attached the Mac is in clamshell mode and any result is a false pass. The script refuses to start otherwise.
+
+```bash
+bash tests/experiments/clamshell/run.sh start control     # vigil mode off; close the lid 5 min
+bash tests/experiments/clamshell/run.sh finish
+bash tests/experiments/clamshell/run.sh start treatment   # vigil mode on; close the lid 20 min
+bash tests/experiments/clamshell/run.sh finish
+```
+
+The control is mandatory. Claude Code holds its own `caffeinate -i` while it runs, so without a run proving the closed lid *does* sleep this Mac, a passing treatment would not show that `disablesleep` did anything.
+
+| Date | Hardware | macOS | Control gap | Treatment gap | Verdict |
+| --- | --- | --- | --- | --- | --- |
+| _not yet run_ | MacBook Pro, M5 Pro | 26.7 | — | — | — |
+
 ## Thermal safety
 
 `man caffeinate` and Apple's thermal guidance both call out that running a laptop with the lid closed and no external cooling can lead to thermal throttling. Vigil's daemon parses `pmset -g therm` every tick and releases sleep prevention for at least 60 seconds when the kernel reports `CPU_Scheduler_Limit` or `thermal warning level`. This logic is borrowed from [`CharlonTank/agents-sleep-preventer`](https://github.com/CharlonTank/agents-sleep-preventer/blob/main/src/main.rs).

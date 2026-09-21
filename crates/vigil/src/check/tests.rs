@@ -215,7 +215,7 @@ fn json_clean_matches_golden_byte_for_byte() {
     // The golden is the BASH output (no version). Insert the single allowed diff
     // (`  "version": 1,` after the opening `{`) to build the expected Rust output.
     let golden = read_golden("status_clean.json");
-    let expected = apply_platform_power_mode(&apply_codex_artifact(&insert_version_line(&golden)));
+    let expected = apply_codex_artifact(&insert_version_line(&golden));
 
     sbx.clear_fixture_env();
     assert_eq!(
@@ -227,10 +227,7 @@ fn json_clean_matches_golden_byte_for_byte() {
     // INVARIANT (golden README): stripping the version line yields the bash
     // golden exactly (modulo the same codex artifact).
     let stripped = strip_version_line(&got);
-    assert_eq!(
-        stripped,
-        apply_platform_power_mode(&apply_codex_artifact(&golden))
-    );
+    assert_eq!(stripped, apply_codex_artifact(&golden));
 }
 
 #[test]
@@ -255,7 +252,7 @@ fn json_assertions_ok_state_projects_holders() {
     let got = report.snapshot.to_json();
 
     let golden = read_golden("status_assertions.json");
-    let expected = apply_platform_power_mode(&apply_codex_artifact(&insert_version_line(&golden)));
+    let expected = apply_codex_artifact(&insert_version_line(&golden));
 
     sbx.clear_fixture_env();
     assert_eq!(
@@ -308,13 +305,6 @@ fn strip_version_line(rust: &str) -> String {
 /// artifact to a single token; every other field reproduces exactly.
 fn apply_codex_artifact(golden: &str) -> String {
     golden.replace("\"codex\":\"idle\"", "\"codex\":\"active\"")
-}
-
-fn apply_platform_power_mode(golden: &str) -> String {
-    golden.replace(
-        "\"power_hold_mode\": \"best-effort\"",
-        &format!("\"power_hold_mode\": \"{}\"", platform_power_hold_mode()),
-    )
 }
 
 /// A fixed-path sandbox under `SBX` so the rendered provider paths match the
@@ -414,6 +404,7 @@ fn golden_config_under(root: &Path) -> VigilConfig {
         caffeinate_pidfile: format!("{r}/state/caffeinate.pid"),
         daemon_pidfile: format!("{r}/state/daemon.pid"),
         daemon_tick_file: format!("{r}/state/daemon.tick"),
+        mode_file: format!("{r}/state/mode"),
         lock_file: format!("{r}/state/state.lock"),
         vscode_copilot_state_file: format!("{r}/state/vscode-copilot-chat.state"),
 

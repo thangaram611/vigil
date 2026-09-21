@@ -128,7 +128,6 @@ fn cg_flags_to_mod_bits(flags: CGEventFlags) -> u8 {
     bits
 }
 
-#[cfg(target_os = "macos")]
 extern "C" fn signal_handler(_sig: c_int) {
     STOP_REQUESTED.store(true, Ordering::SeqCst);
 }

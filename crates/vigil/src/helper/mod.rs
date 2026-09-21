@@ -489,35 +489,6 @@ fn write_response<S: SleepReader>(
 
 // ── claim-then-validate request processing ─────────────────────────────────────
 
-/// Result of processing one request. The carried reason/message is surfaced via
-/// `Display` so callers (and tests) can assert the outcome; the fields are
-/// intentionally part of the public-ish shape even though the current
-/// `process_pending` only counts.
-#[derive(Debug)]
-enum Processed {
-    Ok,
-    Rejected(Reason),
-    PmsetFailed(&'static str),
-}
-
-impl Processed {
-    /// True iff the request was handled with `status=ok`.
-    #[allow(dead_code)]
-    fn is_ok(&self) -> bool {
-        matches!(self, Processed::Ok)
-    }
-
-    /// The reason/message token, when this is a non-ok outcome.
-    #[allow(dead_code)]
-    fn detail(&self) -> Option<&str> {
-        match self {
-            Processed::Ok => None,
-            Processed::Rejected(r) => Some(r.message()),
-            Processed::PmsetFailed(m) => Some(m),
-        }
-    }
-}
-
 /// Read the body from an already-validated fd, BOUNDED to [`MAX_REQUEST_BYTES`]
 /// (plus one sentinel byte to detect overflow). A request is a single short
 /// action line; reading the whole file would let the served uid OOM the root
@@ -569,7 +540,7 @@ fn process_request<P: PmsetDisableSleep, S: SleepReader>(
     pmset: &P,
     sleep: &S,
     base: &str,
-) -> Processed {
+) {
     // Step 1: id charset guard. Bad filename => remove from the request dir and
     // bail (no valid id to name a response).
     let Some(id) = id_from_base(base) else {
@@ -579,7 +550,7 @@ fn process_request<P: PmsetDisableSleep, S: SleepReader>(
             "WARN",
             &format!("reject request base={base} reason=bad_filename"),
         );
-        return Processed::Rejected(Reason::BadFilename);
+        return;
     };
 
     // Step 2: claim by renameat into the root-owned processing dir.
@@ -593,7 +564,7 @@ fn process_request<P: PmsetDisableSleep, S: SleepReader>(
     .is_err()
     {
         // Could not claim (already gone / race). Nothing to do.
-        return Processed::Rejected(Reason::InvalidRequestFile);
+        return;
     }
 
     // Helper closure to finalize a rejection: remove the moved file + write an
@@ -601,7 +572,7 @@ fn process_request<P: PmsetDisableSleep, S: SleepReader>(
     // response — mirrors bash `helper_reject_processed`: `unknown` for the
     // file-validation rejections (invalid_request_file/bad_filename), and the
     // attempted/valid action word for the content rejections.
-    let reject = |reason: Reason, action_word: &str| -> Processed {
+    let reject = |reason: Reason, action_word: &str| {
         let _ = unlinkat(
             &dirs.processing_fd,
             moved_name.as_str(),
@@ -624,7 +595,6 @@ fn process_request<P: PmsetDisableSleep, S: SleepReader>(
                 reason.message()
             ),
         );
-        Processed::Rejected(reason)
     };
 
     // Step 3: O_NOFOLLOW open the MOVED file + fstat the fd.
@@ -690,14 +660,6 @@ fn process_request<P: PmsetDisableSleep, S: SleepReader>(
             cfg.allowed_uid, cfg.allowed_user
         ),
     );
-
-    if status == "ok" {
-        Processed::Ok
-    } else if let Action::Status = action {
-        Processed::Ok
-    } else {
-        Processed::PmsetFailed(message)
-    }
 }
 
 /// List the `req.*` basenames currently in the request dir (a directory read).
@@ -796,7 +758,7 @@ pub fn process_pending<P: PmsetDisableSleep, S: SleepReader>(
 
     let mut count = 0;
     for base in list_request_bases(cfg) {
-        let _ = process_request(cfg, dirs, &request_dir_fd, pmset, sleep, &base);
+        process_request(cfg, dirs, &request_dir_fd, pmset, sleep, &base);
         count += 1;
     }
     count

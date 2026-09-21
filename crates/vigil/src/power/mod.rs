@@ -21,14 +21,12 @@
 
 pub mod assertions;
 pub mod caffeinate;
-pub mod linux;
 pub mod platform;
 pub mod pmset;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::ipc::HelperClient;
-use crate::power_guard::PowerGuard;
 use caffeinate::CaffeinateAssertion;
 use pmset::SleepReader;
 
@@ -266,17 +264,10 @@ impl<I: HelperClient, C: CaffeinateAssertion, S: SleepReader> PowerMachine<'_, I
     /// - then the [`recover_decision`] terminal action: Reconcile (engaged) or
     ///   Release (not engaged).
     ///
-    /// `can_hold` evaluates thermal+battery at startup via the 5.4
-    /// [`PowerGuard`].
-    pub fn recover_startup<G: PowerGuard>(
-        &self,
-        active_count: u32,
-        guard: &G,
-        now_unix: i64,
-    ) -> bool {
+    /// `can_hold` is the startup thermal+battery verdict (neither guard cuts).
+    pub fn recover_startup(&self, active_count: u32, can_hold: bool, now_unix: i64) -> bool {
         let baseline_present = self.baseline_file.exists();
         let pidfile_present = self.caffeinate_pidfile.exists();
-        let can_hold = guard.can_hold();
 
         match recover_decision(active_count, can_hold, baseline_present, pidfile_present) {
             RecoverAction::NotEngaged => false,
@@ -298,18 +289,10 @@ impl<I: HelperClient, C: CaffeinateAssertion, S: SleepReader> PowerMachine<'_, I
     }
 }
 
-/// Helper: does `path` exist as a plain file (no symlink-follow concern here —
-/// these are daemon-owned state files in a 0700 dir).
-#[allow(dead_code)]
-fn file_exists(path: &Path) -> bool {
-    path.exists()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ipc::{IpcError, Response};
-    use crate::power_guard::PowerGuard;
     use std::cell::RefCell;
     use std::path::PathBuf;
 
@@ -506,18 +489,6 @@ mod tests {
         }
     }
 
-    struct FixedGuard {
-        hold: bool,
-    }
-    impl PowerGuard for FixedGuard {
-        fn thermal_cut(&self) -> bool {
-            !self.hold
-        }
-        fn battery_cut(&self) -> bool {
-            false
-        }
-    }
-
     struct Harness {
         _dir: tempfile::TempDir,
         sleep_file: PathBuf,
@@ -693,7 +664,7 @@ mod tests {
             "{\"SleepDisabled\":0,\"captured_at\":1700000000}\n",
         )
         .unwrap();
-        let engaged = m.recover_startup(1, &FixedGuard { hold: true }, 1700000000);
+        let engaged = m.recover_startup(1, true, 1700000000);
         assert!(engaged, "recovery reports engaged");
         assert_eq!(h.sd(), 1, "startup recovery reasserts SleepDisabled");
         assert!(
@@ -712,7 +683,7 @@ mod tests {
             "{\"SleepDisabled\":0,\"captured_at\":1700000000}\n",
         )
         .unwrap();
-        let engaged = m.recover_startup(0, &FixedGuard { hold: true }, 1700000000);
+        let engaged = m.recover_startup(0, true, 1700000000);
         assert!(!engaged, "recovery should not report engaged with no refs");
         assert_eq!(h.sd(), 0, "startup recovery restores baseline when idle");
         assert!(!h.baseline_file.exists(), "idle recovery clears baseline");
@@ -722,7 +693,7 @@ mod tests {
     fn startup_recovery_not_engaged_when_nothing_present() {
         let h = Harness::new(0);
         let m = h.machine();
-        let engaged = m.recover_startup(1, &FixedGuard { hold: true }, 1700000000);
+        let engaged = m.recover_startup(1, true, 1700000000);
         assert!(!engaged, "no baseline + no pidfile => not engaged");
     }
 
@@ -1012,7 +983,7 @@ mod tests {
             "precondition: pidfile present"
         );
 
-        let engaged = m.recover_startup(1, &FixedGuard { hold: true }, 1700000000);
+        let engaged = m.recover_startup(1, true, 1700000000);
         assert!(
             engaged,
             "pidfile + active refs + can_hold => reconcile (engaged)"

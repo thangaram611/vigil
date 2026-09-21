@@ -20,7 +20,6 @@
 /// constants the old `core-graphics` crate provided, so we carry the frozen
 /// Carbon values directly. These are a stable macOS ABI and have not changed
 /// since Carbon shipped.
-#[cfg(target_os = "macos")]
 mod keycode {
     pub const ANSI_A: u16 = 0x00;
     pub const ANSI_S: u16 = 0x01;
@@ -148,114 +147,59 @@ fn normalize_modifier_token(token: &str) -> Option<Modifier> {
 }
 
 fn keycode_for_key(token: &str) -> Option<u16> {
-    #[cfg(not(target_os = "macos"))]
-    let unsupported = None;
-    #[cfg(target_os = "macos")]
-    let unsupported = None;
     match token {
-        #[cfg(target_os = "macos")]
         "a" => Some(keycode::ANSI_A),
-        #[cfg(target_os = "macos")]
         "b" => Some(keycode::ANSI_B),
-        #[cfg(target_os = "macos")]
         "c" => Some(keycode::ANSI_C),
-        #[cfg(target_os = "macos")]
         "d" => Some(keycode::ANSI_D),
-        #[cfg(target_os = "macos")]
         "e" => Some(keycode::ANSI_E),
-        #[cfg(target_os = "macos")]
         "f" => Some(keycode::ANSI_F),
-        #[cfg(target_os = "macos")]
         "g" => Some(keycode::ANSI_G),
-        #[cfg(target_os = "macos")]
         "h" => Some(keycode::ANSI_H),
-        #[cfg(target_os = "macos")]
         "i" => Some(keycode::ANSI_I),
-        #[cfg(target_os = "macos")]
         "j" => Some(keycode::ANSI_J),
-        #[cfg(target_os = "macos")]
         "k" => Some(keycode::ANSI_K),
-        #[cfg(target_os = "macos")]
         "l" => Some(keycode::ANSI_L),
-        #[cfg(target_os = "macos")]
         "m" => Some(keycode::ANSI_M),
-        #[cfg(target_os = "macos")]
         "n" => Some(keycode::ANSI_N),
-        #[cfg(target_os = "macos")]
         "o" => Some(keycode::ANSI_O),
-        #[cfg(target_os = "macos")]
         "p" => Some(keycode::ANSI_P),
-        #[cfg(target_os = "macos")]
         "q" => Some(keycode::ANSI_Q),
-        #[cfg(target_os = "macos")]
         "r" => Some(keycode::ANSI_R),
-        #[cfg(target_os = "macos")]
         "s" => Some(keycode::ANSI_S),
-        #[cfg(target_os = "macos")]
         "t" => Some(keycode::ANSI_T),
-        #[cfg(target_os = "macos")]
         "u" => Some(keycode::ANSI_U),
-        #[cfg(target_os = "macos")]
         "v" => Some(keycode::ANSI_V),
-        #[cfg(target_os = "macos")]
         "w" => Some(keycode::ANSI_W),
-        #[cfg(target_os = "macos")]
         "x" => Some(keycode::ANSI_X),
-        #[cfg(target_os = "macos")]
         "y" => Some(keycode::ANSI_Y),
-        #[cfg(target_os = "macos")]
         "z" => Some(keycode::ANSI_Z),
-        #[cfg(target_os = "macos")]
         "0" => Some(keycode::ANSI_0),
-        #[cfg(target_os = "macos")]
         "1" => Some(keycode::ANSI_1),
-        #[cfg(target_os = "macos")]
         "2" => Some(keycode::ANSI_2),
-        #[cfg(target_os = "macos")]
         "3" => Some(keycode::ANSI_3),
-        #[cfg(target_os = "macos")]
         "4" => Some(keycode::ANSI_4),
-        #[cfg(target_os = "macos")]
         "5" => Some(keycode::ANSI_5),
-        #[cfg(target_os = "macos")]
         "6" => Some(keycode::ANSI_6),
-        #[cfg(target_os = "macos")]
         "7" => Some(keycode::ANSI_7),
-        #[cfg(target_os = "macos")]
         "8" => Some(keycode::ANSI_8),
-        #[cfg(target_os = "macos")]
         "9" => Some(keycode::ANSI_9),
-        #[cfg(target_os = "macos")]
         "f1" => Some(keycode::F1),
-        #[cfg(target_os = "macos")]
         "f2" => Some(keycode::F2),
-        #[cfg(target_os = "macos")]
         "f3" => Some(keycode::F3),
-        #[cfg(target_os = "macos")]
         "f4" => Some(keycode::F4),
-        #[cfg(target_os = "macos")]
         "f5" => Some(keycode::F5),
-        #[cfg(target_os = "macos")]
         "f6" => Some(keycode::F6),
-        #[cfg(target_os = "macos")]
         "f7" => Some(keycode::F7),
-        #[cfg(target_os = "macos")]
         "f8" => Some(keycode::F8),
-        #[cfg(target_os = "macos")]
         "f9" => Some(keycode::F9),
-        #[cfg(target_os = "macos")]
         "f10" => Some(keycode::F10),
-        #[cfg(target_os = "macos")]
         "f11" => Some(keycode::F11),
-        #[cfg(target_os = "macos")]
         "f12" => Some(keycode::F12),
-        #[cfg(target_os = "macos")]
         "space" => Some(keycode::SPACE),
-        #[cfg(target_os = "macos")]
         "tab" => Some(keycode::TAB),
-        #[cfg(target_os = "macos")]
         "return" => Some(keycode::RETURN),
-        _ => unsupported,
+        _ => None,
     }
 }
 
@@ -263,7 +207,6 @@ fn keycode_for_key(token: &str) -> Option<u16> {
 /// token (e.g. `0x25` → `"l"`). `None` for an unmapped keycode (the same keys
 /// `keycode_for_key` rejects, e.g. F13). The capture flow rejects a chord that
 /// contains an unmappable key.
-#[cfg(target_os = "macos")]
 fn token_for_keycode(keycode: u16) -> Option<&'static str> {
     use keycode::*;
     let token = match keycode {
@@ -321,12 +264,6 @@ fn token_for_keycode(keycode: u16) -> Option<&'static str> {
         _ => return None,
     };
     Some(token)
-}
-
-/// Non-macOS stub: no keycodes map (the capture/freeze paths are macOS-only).
-#[cfg(not(target_os = "macos"))]
-fn token_for_keycode(_keycode: u16) -> Option<&'static str> {
-    None
 }
 
 fn token_for_chordkey(key: ChordKey) -> Option<&'static str> {
@@ -580,7 +517,6 @@ mod tests {
 
     // ── parse_chord ──────────────────────────────────────────────────────────
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn parse_preserves_press_order_and_normalizes() {
         let chord = parse_chord("CTRL + L + aLt").unwrap();
@@ -599,14 +535,12 @@ mod tests {
         assert_ne!(chord.canonical, other.canonical);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn parse_accepts_modifier_aliases_in_order() {
         let chord = parse_chord("control+option+super+space").unwrap();
         assert_eq!(chord.canonical, "ctrl+alt+cmd+space");
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn parse_rejects_too_short_dupes_escape_unknown() {
         // (label, input, exact Err message). Asserting the discriminator message
@@ -663,7 +597,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn canonical_from_sequence_round_trips_through_parse() {
         let seq = vec![

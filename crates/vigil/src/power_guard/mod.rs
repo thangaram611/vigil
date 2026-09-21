@@ -1,61 +1,9 @@
-//! Power guard abstraction + the pure thermal cooldown window (Phase 5.4).
-//!
-//! DEAD-FROM-RUST until 5.7: library-only. Nothing here is wired into a loop.
-//!
-//! ## Why `power_guard` and NOT `power`
-//! `crates/vigil/src/power/` is RESERVED for the 5.5 port of `lib/pmset.sh` (the
-//! privileged engage/release/reconcile state machine). Placing this read-only
-//! thermal+battery guard there would entangle the two. The dependency is
-//! one-directional: 5.5's `power` will DEPEND on `power_guard` (its
-//! `recover_startup`/`can_hold` evaluates the 5.4 guard at startup) — no cycle,
-//! no name clash.
-//!
-//! ## What lives here
-//! - [`PowerGuard`] — the trait the 5.5 startup recovery consumes. A real
-//!   env-driven impl ([`EnvPowerGuard`]) composes [`crate::thermal`] +
-//!   [`crate::battery`]; tests can pass a fake.
-//! - [`cooldown_state`] — the PURE sliding cooldown window ported verbatim from
-//!   `bin/vigil-daemon` (COOLDOWN_UNTIL re-armed every pressure tick).
+//! The read-only thermal+battery view for `vigil debug`, and the pure thermal
+//! cooldown window the daemon applies each tick.
 
 use serde::Serialize;
 
 use crate::{battery, thermal};
-
-/// The thermal+battery guard abstraction. `can_hold()` is true iff NEITHER the
-/// thermal nor the battery guard wants to cut — i.e. it is safe to hold sleep
-/// prevention. 5.5's `recover_startup` consumes this.
-pub trait PowerGuard {
-    /// True iff the thermal guard wants to cut (release sleep prevention).
-    fn thermal_cut(&self) -> bool;
-    /// True iff the battery guard wants to cut.
-    fn battery_cut(&self) -> bool;
-    /// True iff it is safe to hold sleep prevention (neither guard cuts).
-    fn can_hold(&self) -> bool {
-        !self.thermal_cut() && !self.battery_cut()
-    }
-}
-
-/// Real env-driven guard. Reads the fixture-or-pmset text via the
-/// [`crate::thermal`] / [`crate::battery`] collectors. Honors the env fixture
-/// seams (`VIGIL_THERMAL_FIXTURE`, `VIGIL_BATTERY_FIXTURE`) and the resolved
-/// config knobs (`floor` = `VIGIL_THERMAL_CPU_LIMIT_FLOOR`, `battery_floor_pct`
-/// = `VIGIL_BATTERY_FLOOR_PCT`).
-pub struct EnvPowerGuard {
-    /// `VIGIL_THERMAL_CPU_LIMIT_FLOOR` knob (None = unset = parity default).
-    pub floor: Option<u32>,
-    /// `VIGIL_BATTERY_FLOOR_PCT` (default 20).
-    pub battery_floor_pct: u32,
-}
-
-impl PowerGuard for EnvPowerGuard {
-    fn thermal_cut(&self) -> bool {
-        thermal::live_should_cut(&thermal::read_therm_raw(), self.floor)
-    }
-
-    fn battery_cut(&self) -> bool {
-        battery::live_should_cut(&battery::read_ps_raw(), self.battery_floor_pct)
-    }
-}
 
 /// READ-ONLY thermal+battery view for the `vigil debug` dump.
 ///
@@ -197,85 +145,5 @@ mod tests {
         let (until2, cooling2) = cooldown_state(150, true, until1, 60); // 210
         assert_eq!(until2, 210);
         assert!(cooling2);
-    }
-
-    // ── PowerGuard trait composition over a fake ──────────────────────────────
-
-    struct FakeGuard {
-        thermal: bool,
-        battery: bool,
-    }
-    impl PowerGuard for FakeGuard {
-        fn thermal_cut(&self) -> bool {
-            self.thermal
-        }
-        fn battery_cut(&self) -> bool {
-            self.battery
-        }
-    }
-
-    #[test]
-    fn can_hold_composition() {
-        assert!(
-            FakeGuard {
-                thermal: false,
-                battery: false
-            }
-            .can_hold()
-        );
-        assert!(
-            !FakeGuard {
-                thermal: true,
-                battery: false
-            }
-            .can_hold()
-        );
-        assert!(
-            !FakeGuard {
-                thermal: false,
-                battery: true
-            }
-            .can_hold()
-        );
-        assert!(
-            !FakeGuard {
-                thermal: true,
-                battery: true
-            }
-            .can_hold()
-        );
-    }
-
-    // ── EnvPowerGuard over fixtures ───────────────────────────────────────────
-    //
-    // Env-mutating: serialize against other env tests in this binary via a
-    // module-local lock. (Other modules use their own locks; cross-binary env
-    // races are avoided because cargo runs unit tests of one crate in one
-    // process — the config module's ENV_LOCK is a separate static, so we keep a
-    // local lock here for the env vars THIS test mutates.)
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    #[test]
-    fn env_guard_reads_fixtures() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("VIGIL_THERMAL_FIXTURE", "thermal warning level = warning");
-            std::env::set_var(
-                "VIGIL_BATTERY_FIXTURE",
-                "Now drawing from 'Battery Power' 5%; discharging",
-            );
-        }
-        let g = EnvPowerGuard {
-            floor: None,
-            battery_floor_pct: 20,
-        };
-        assert!(g.thermal_cut(), "warning fixture => thermal cut");
-        assert!(g.battery_cut(), "battery 5% < 20 => battery cut");
-        assert!(!g.can_hold());
-        unsafe {
-            std::env::remove_var("VIGIL_THERMAL_FIXTURE");
-            std::env::remove_var("VIGIL_BATTERY_FIXTURE");
-        }
     }
 }

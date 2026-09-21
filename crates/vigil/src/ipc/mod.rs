@@ -361,9 +361,10 @@ mod tests {
         let a = MacHelperClient::new_id();
         let b = MacHelperClient::new_id();
         assert_ne!(a, b, "ids must differ");
-        // id charset must pass the helper guard.
-        assert!(
-            crate::helper::validate::id_charset_ok(&a),
+        // The helper's own filename guard must accept a generated id.
+        assert_eq!(
+            crate::helper::validate::id_from_base(&format!("req.{a}")),
+            Some(a.clone()),
             "id {a} must be charset-valid"
         );
     }
@@ -385,7 +386,7 @@ mod tests {
     #[test]
     fn validated_response_accepts_self_owned_regular_file() {
         // A file we own (uid == our uid). On normal non-root test runners uid
-        // != 0, so the uid==0 check rejects it; in root-run Linux containers the
+        // != 0, so the uid==0 check rejects it; when the tests run as root the
         // same file is root-owned and must be accepted.
         let dir = tempfile::tempdir().unwrap();
         let resp = dir.path().join("resp.x");

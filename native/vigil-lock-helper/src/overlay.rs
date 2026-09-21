@@ -7,9 +7,9 @@
 //! existing main-thread CFRunLoop freeze loop (`macos.rs`) — there is NO
 //! separate UI thread.
 //!
-//! Everything is expressed behind the [`LockOverlay`] trait so the non-macOS
-//! build (and unit tests) compile against the headless [`StubOverlay`], which
-//! merely records the last [`OverlayState`] it was shown.
+//! Everything is expressed behind the [`LockOverlay`] trait so unit tests run
+//! against the headless `StubOverlay`, which merely records the last
+//! [`OverlayState`] it was shown.
 
 /// The data the overlay renders. Cheap to clone; the freeze loop builds a fresh
 /// one each tick and hands it to [`LockOverlay::show`].
@@ -51,11 +51,10 @@ pub trait LockOverlay {
     fn hide(&mut self);
 }
 
-/// Headless overlay used on non-macOS targets and in unit tests. Records the
-/// transition history so the freeze-loop wiring can be tested without a window
-/// server. On macOS the real [`MacOverlay`] is used at runtime, so the stub is
-/// only exercised by tests there.
-#[cfg_attr(all(target_os = "macos", not(test)), allow(dead_code))]
+/// Headless overlay used in unit tests. Records the transition history so the
+/// freeze-loop wiring can be tested without a window server; the real
+/// [`MacOverlay`] is used at runtime.
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub struct StubOverlay {
     /// Every state passed to `show`, in order.
@@ -68,13 +67,14 @@ pub struct StubOverlay {
     pub visible: bool,
 }
 
+#[cfg(test)]
 impl StubOverlay {
-    #[cfg_attr(all(target_os = "macos", not(test)), allow(dead_code))]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
+#[cfg(test)]
 impl LockOverlay for StubOverlay {
     fn show(&mut self, state: &OverlayState) {
         self.shown.push(state.clone());
@@ -89,10 +89,8 @@ impl LockOverlay for StubOverlay {
     }
 }
 
-#[cfg(target_os = "macos")]
 pub use macos::MacOverlay;
 
-#[cfg(target_os = "macos")]
 mod macos {
     use super::{LockOverlay, OverlayState};
     use objc2::rc::Retained;

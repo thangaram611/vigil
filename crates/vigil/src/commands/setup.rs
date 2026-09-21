@@ -209,6 +209,33 @@ pub fn run(args: Vec<OsString>) -> ! {
     }
     pb.done("user LaunchAgent loaded");
 
+    // 6. menu bar (optional): the SwiftBar shim points at the install snapshot.
+    ui.rail_space();
+    let pb = ui.step(
+        "installing menu bar plugin",
+        "  6. installing menu bar plugin",
+    );
+    match vigil::swiftbar::plugin_dir() {
+        Some(dir) => {
+            let snapshot = format!("{}/bin/vigil", cfg.install_dir);
+            match vigil::swiftbar::install(&dir, &snapshot) {
+                Ok(plugin) => pb.detail(
+                    &format!("plugin: {}", plugin.display()),
+                    &format!("     plugin: {}", plugin.display()),
+                ),
+                Err(e) => die(&format!("could not write the SwiftBar plugin: {e}")),
+            }
+            pb.done("menu bar plugin installed");
+        }
+        None => {
+            pb.detail(
+                "SwiftBar has no plugin folder — skipped (optional)",
+                "     SwiftBar has no plugin folder — skipped (optional)",
+            );
+            pb.done("menu bar plugin skipped");
+        }
+    }
+
     // Outro: rail bottom (interactive) or the verbatim plain completion lines.
     if ui.is_interactive() {
         ui.outro("vigil: setup complete");
@@ -224,71 +251,6 @@ pub fn run(args: Vec<OsString>) -> ! {
 /// Dry-run path: print the path summary; `--verbose` adds the three previews.
 /// Touches NOTHING (no dir creation, no launchctl, no sudo).
 fn dry_run_summary(cfg: &VigilConfig, verbose: bool) {
-    #[cfg(target_os = "linux")]
-    {
-        dry_run_summary_linux(cfg, verbose);
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        dry_run_summary_macos(cfg, verbose);
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn dry_run_summary_linux(cfg: &VigilConfig, verbose: bool) {
-    anstream::println!("vigil: setup dry run (no changes will be made)");
-    anstream::println!();
-    anstream::println!("  user:");
-    anstream::println!("    state dir:        {}", cfg.state_dir);
-    anstream::println!("    log dir:          {}", cfg.log_dir);
-    anstream::println!("    install dir:      {}", cfg.install_dir);
-    let dev_target = super::resolve_repo_root()
-        .map(|r| format!("{}/target/release/vigil", r.display()))
-        .unwrap_or_else(|| "(vigil dev build, resolved at install time)".to_string());
-    anstream::println!(
-        "    PATH symlink:     {} -> {}",
-        bin_link_path(),
-        dev_target
-    );
-    anstream::println!(
-        "    systemd unit:     {}",
-        vigil::service::systemd_user_unit_path().display()
-    );
-    anstream::println!();
-    anstream::println!("  power:");
-    anstream::println!("    sleep hold:       logind idle + sleep inhibitors");
-    anstream::println!("    battery:          UPower");
-    anstream::println!("    thermal:          /sys/class/thermal");
-    anstream::println!();
-    anstream::println!("  log rotation:");
-    anstream::println!(
-        "    logrotate:        {}",
-        vigil::service::LINUX_LOGROTATE_FILE
-    );
-
-    if verbose {
-        anstream::println!();
-        anstream::println!("  systemd unit (preview):");
-        indent_print(&vigil::service::render_systemd_user_unit(cfg), 4);
-        anstream::println!();
-        anstream::println!("  logrotate (preview):");
-        indent_print(&vigil::service::render_linux_logrotate(cfg), 4);
-    } else {
-        anstream::println!();
-        anstream::println!(
-            "  generated file previews: hidden (use --verbose to print systemd/logrotate contents)"
-        );
-    }
-
-    anstream::println!();
-    anstream::println!(
-        "vigil: dry run complete. No files were installed and systemd was not changed."
-    );
-}
-
-#[cfg(not(target_os = "linux"))]
-fn dry_run_summary_macos(cfg: &VigilConfig, verbose: bool) {
     anstream::println!("vigil: setup dry run (no changes will be made)");
     anstream::println!();
     anstream::println!("  user:");
@@ -304,6 +266,13 @@ fn dry_run_summary_macos(cfg: &VigilConfig, verbose: bool) {
         dev_target
     );
     anstream::println!("    LaunchAgent:      {}", user_plist_path().display());
+    match vigil::swiftbar::plugin_dir() {
+        Some(dir) => anstream::println!(
+            "    menu bar plugin:  {}",
+            dir.join(vigil::swiftbar::PLUGIN_FILE).display()
+        ),
+        None => anstream::println!("    menu bar plugin:  skipped (SwiftBar has no plugin folder)"),
+    }
     anstream::println!();
     anstream::println!("  root:");
     anstream::println!("    helper binary:    {}", cfg.root_helper);

@@ -1,31 +1,35 @@
 # Vigil Roadmap
 
-Phases ship locally, in order. **No version tag, no GitHub release, no Homebrew tap until every phase has shipped and stabilized.** Each phase from 2 onward gets a *detailed plan written before implementation starts* — the sketches below are direction-setting only. For phases already shipped, the per-phase design detail lives in git history (see the referenced commits); the remaining open work keeps its `future/phase-N-*.md` sketch.
+**Vigil is a personal macOS tool.** It is not a product: no releases, no Homebrew tap, no cross-OS port. `main` is the working state.
 
-The repository is now a Rust workspace (`crates/vigil` + `native/vigil-lock-helper`) — there is no `bin/` or `lib/` shell tree anymore. The user-facing `vigil` binary runs the resident daemon as a hidden `daemon` subcommand; a separate root binary `vigil-root-helper` owns the privileged `pmset` boundary, and `vigil-lock-helper` owns the input-freeze event tap. macOS parity is reached.
+That was decided on 2026-09-20. The category is covered — [`adrafinil`](https://github.com/kageroumado/adrafinil) owns the macOS niche, and Claude Code, Codex, and Copilot CLI all inhibit idle sleep themselves. The evidence is in [`VIABILITY-REVIEW-2026-08-04.md`](./VIABILITY-REVIEW-2026-08-04.md). What Vigil still does that nothing else does for this machine: hookless Copilot CLI and VS Code Copilot Chat detection, restoring the prior `SleepDisabled` value, and the built-in lock guard.
 
-**Current next track (2026-06-19):** proceed with multi-OS in order — **5.8 Linux first, then 5.9 Windows**. Phase 5.8 implementation has started: Gate 0/Gate 1/Gate 2 landed the Linux compile baseline, platform power facade, and logind `idle:sleep` hold. Linux battery/thermal collectors plus focused power status/doctor text are also in place; the next Linux gate is systemd user service install. Emerging agent-surface work such as Antigravity/Gemini CLI support is documented but deferred until those tools are stable enough to install from scratch and verify locally.
+## Shipped
 
-| Phase | Scope | Status |
-| --- | --- | --- |
-| **1. CLI + wrapper** | Detect `claude`, `codex`, `copilot` CLIs. `vigil run <cmd>` wrapper. Resident daemon, root LaunchDaemon helper for `pmset` transitions, LaunchAgent, refcount, thermal/battery guards, baseline-state restore. | **SHIPPED** |
-| **2. copilot-companion integration** | End-to-end re-evaluation of the companion daemon. Long-lived `node` router is excluded via the `node_repl` command-line guard; the bundled `copilot` CLI (incl. `copilot --acp` workers) is caught by basename detection plus the `~/.copilot/session-state` activity probe. | **SHIPPED — audited, no code change needed** |
-| **3. Desktop app detection** | Session-aware Codex.app host (`/…/Codex.app/Contents/MacOS/Codex`, carved out before the `/Applications/` exclusion) + Claude.app LAM (transitive via the bundled `claude` binary writing to `~/.claude/projects/`) + the OpenAI ChatGPT VS Code extension (transitive via the plain `codex` worker it spawns outside `/Applications/`). VS Code + GitHub Copilot Chat deferred to phase 3.1. | **SHIPPED** |
-| **3.1. VS Code + GitHub Copilot Chat detection** | In-process JavaScript chat: VS Code / Insiders host-process anchor plus semantic content-hash changes in `workspaceStorage/*/chatEditingSessions/*/state.json`. Raw mtime was rejected because VS Code rewrites the file while idle, so the signal is a sha256 change gated on the running host. | **SHIPPED** |
-| **4. Lock feature** | `vigil lock` freezes input until a configured key combo. Native Rust helper (`vigil-lock-helper`) with a CoreGraphics HID event tap; the macOS Lock Screen is passed through (login input allowed), and the combo is still required after login. | **SHIPPED** |
-| **5. Full Rust rewrite + UX overhaul + cross-OS** | Strangle into a single Rust `vigil` binary (+ root `vigil-root-helper`, + `vigil-lock-helper`) one **vertical slice** at a time — each slice bundled the Rust port, its UX overhaul, and its security hardening (not separate passes). Sub-phases 5.1–5.7 reached **macOS parity** (CLI/output substrate, config via figment + logging via tracing, detection core, thermal/battery policy, the privileged power boundary, lock overlay window, daemon + launchd service + a unified `CheckEngine`). The 5.6 work added the opaque centered overlay window and migrated the lock helper off `core-graphics` 0.25 to `objc2` / `objc2-core-foundation` / `objc2-core-graphics`, alongside the ordered-chord (press-order) unlock model. A subsequent UX overhaul added a clack-style TUI, the ordered-chord lock (anchor capture, press-order matching), and a PATH-managed install (`~/.local/bin/vigil` symlink) with faster `status`/`doctor`. | **5.1–5.7 SHIPPED (macOS parity); 5.6 overlay + objc2 CF migration SHIPPED; 5.8 / 5.9 REMAIN** |
-| **5.8. Linux** | logind power-inhibit via `zbus`/`logind-zbus`, systemd user service install, Linux battery/thermal probes, and Linux status/doctor messaging behind the existing seams. | **implementation started; Gate 0/Gate 1/Gate 2 complete; service install next** ([`future/phase-5.8-linux.md`](./future/phase-5.8-linux.md)) |
-| **5.9. Windows** | `SetThreadExecutionState(ES_CONTINUOUS \| ES_SYSTEM_REQUIRED)`, Task Scheduler logon task, Windows battery/power probes, and Windows status/doctor messaging behind the existing seams. | planned after Linux ([`future/phase-5.8-5.9-cross-os.md`](./future/phase-5.8-5.9-cross-os.md)) |
-| **6. Native UI surfaces (deferred)** | Menu-bar / tray status item, optional full GUI app, and the eventual `doctor`/`status` command **merge** (5.7 already unifies the underlying `CheckEngine`, so the merge is then trivial). Explicitly out of the Phase 5 rewrite. | deferred — not yet planned |
-| **N. Emerging agent surfaces** | Revisit Antigravity CLI, legacy Gemini CLI, and other new agent providers once their process/session artifacts stabilize and can be fresh-installed/tested locally. | deferred — not next ([`future/phase-N-agent-surface-refresh.md`](./future/phase-N-agent-surface-refresh.md)) |
-| **N. Conflict detection** | Detect and reconcile conflicting external sleep policy (other `pmset`/`caffeinate` holders, MDM `SleepDisabled` overrides) against Vigil's baseline. Direction-setting sketch only. | sketch — future ([`future/phase-N-conflict-detection.md`](./future/phase-N-conflict-detection.md)) |
+| Phase | Scope |
+| --- | --- |
+| **1. CLI + wrapper** | Detect `claude`, `codex`, `copilot`. `vigil run <cmd>`. Resident daemon, root LaunchDaemon helper for `pmset`, LaunchAgent, refcount, thermal/battery guards, baseline restore. |
+| **2. copilot-companion** | Audited, no code change: the `node` router is excluded by the `node_repl` guard; the bundled `copilot` worker is caught by basename plus `~/.copilot/session-state` activity. |
+| **3. Desktop app detection** | Codex.app host, Claude.app Local Agent Mode, and the ChatGPT VS Code extension's bundled `codex` worker. |
+| **3.1. VS Code + Copilot Chat** | Host-process anchor plus sha256 content-hash changes in `chatEditingSessions/*/state.json` (raw mtime is unusable — VS Code rewrites the file while idle). |
+| **4. Lock guard** | `vigil lock`: CoreGraphics event tap freezes input until an ordered chord. The macOS Lock Screen passes through. |
+| **5. Rust rewrite** | One `vigil` binary, a root `vigil-root-helper`, and `vigil-lock-helper`. All shell deleted. Unified `CheckEngine` behind `status` and `doctor`. |
+| **6. Manual mode + menu bar** | `vigil mode auto\|on\|off` overrides agent detection; thermal and battery guards still win. A SwiftBar plugin shows state and switches mode from the menu bar. |
+
+## Dropped
+
+- **Linux (5.8) and Windows (5.9).** The partial Linux power path was removed; the workspace refuses to compile off macOS.
+- **Native menu-bar/tray app.** Replaced by the SwiftBar plugin.
+- **The all-phases release gate, v1.0.0, and the Homebrew tap.**
+
+## Open
+
+- **Clamshell test.** Does `pmset disablesleep` beat the lid sensor on this M5 Pro, on battery, with no external display? Protocol and result: [`docs/apple-silicon-lid-closed.md`](./docs/apple-silicon-lid-closed.md).
+- **New agent surfaces** — only when one is installed here and can be verified live. Sketch: [`future/phase-N-agent-surface-refresh.md`](./future/phase-N-agent-surface-refresh.md).
+- **Conflict detection** against other sleep holders. Sketch: [`future/phase-N-conflict-detection.md`](./future/phase-N-conflict-detection.md).
 
 ## Working policy
 
-- **No release until all phases ship and stabilize locally.** Then v1.0.0 + Homebrew tap.
-- **Re-plan every deferred phase before implementing.** Turn the corresponding sketch into a real plan before starting work; this applies to the remaining open phases (5.8 Linux, 5.9 Windows, 6 native UI, N conflict detection).
-- **The Bash → Rust cutover is DONE.** All shell (`bin/vigil-daemon`, `lib/*.sh`) was deleted in 5.7; the project is now a single Rust workspace (`crates/vigil` + `native/vigil-lock-helper`), with the daemon as a hidden `vigil daemon` subcommand and a separate root `vigil-root-helper`. **Cargo is the sole test suite** — there is no bash test harness; `tests/` holds only fixtures and an experiment script. Rust over Swift to avoid Apple lock-in.
-- **Platform seams are stable.** macOS power (`pmset` via the root helper), thermal/battery guards, and the power-machine orchestration sit behind platform-trait seams so the remaining 5.8/5.9 work is a matter of filling impls, not reshaping the daemon.
-- **No interim semver.** `main` is the working state until v1.0.0.
-
----
+- **Cargo is the sole test suite.** `tests/` holds only fixtures and an experiment script.
+- **Re-plan a sketch before implementing it.**
+- **Rust over Swift**, latest crate versions, no pins.

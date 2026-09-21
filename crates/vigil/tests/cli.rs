@@ -48,7 +48,6 @@ fn color_never_help_has_no_ansi() {
 /// and return the captured (combined) bytes. A real tty is required to exercise
 /// the `--color` contract: piped output is stripped by clap's default Auto
 /// detection regardless of the flag, which would mask whether the flag works.
-#[cfg(all(unix, not(target_os = "linux")))]
 fn run_under_tty(args: &[&str]) -> Vec<u8> {
     let exe = env!("CARGO_BIN_EXE_vigil");
     // macOS/BSD `script`: `script -q <file> command [args...]`.
@@ -67,35 +66,6 @@ fn run_under_tty(args: &[&str]) -> Vec<u8> {
     out.stdout
 }
 
-#[cfg(target_os = "linux")]
-fn run_under_tty(args: &[&str]) -> Vec<u8> {
-    let exe = env!("CARGO_BIN_EXE_vigil");
-    let mut command = shell_quote(exe);
-    for arg in args {
-        command.push(' ');
-        command.push_str(&shell_quote(arg));
-    }
-    // util-linux `script`: `script -q -c <command> <file>`.
-    let out = Command::new("script")
-        .arg("-q")
-        .arg("-c")
-        .arg(command)
-        .arg("/dev/null")
-        .output()
-        .expect("spawn `script` (PTY harness)");
-    assert!(
-        out.status.success(),
-        "`script` failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    out.stdout
-}
-
-#[cfg(target_os = "linux")]
-fn shell_quote(raw: &str) -> String {
-    format!("'{}'", raw.replace('\'', "'\\''"))
-}
-
 fn esc_count(bytes: &[u8]) -> usize {
     bytes.iter().filter(|&&b| b == 0x1b).count()
 }
@@ -105,7 +75,6 @@ fn esc_count(bytes: &[u8]) -> usize {
 /// default. `never` strips to zero ESC bytes; `always` emits ANSI; subcommand
 /// help is governed too. Each row carries `want_ansi` so the assertion DIRECTION
 /// (esc==0 vs esc>0) is preserved per case.
-#[cfg(unix)]
 #[test]
 fn color_flag_governs_styled_output_under_tty() {
     let cases: &[(&[&str], bool, &str)] = &[

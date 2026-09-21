@@ -40,7 +40,6 @@ impl BoundedCpuHog {
     /// stdio is inherited (not nulled) so a test runner's leak detection can
     /// still observe the child while it lives.
     pub(crate) fn spawn(bound_secs: u32) -> Self {
-        #[cfg(unix)]
         use std::os::unix::process::CommandExt;
         use std::process::Command;
 
@@ -54,7 +53,6 @@ impl BoundedCpuHog {
         // a negated-pid kill. This pairing is INSEPARABLE from the negated-pid
         // kill in `Drop`: without `process_group(0)` the child shares the
         // runner's group and `-pid` would signal the test runner itself.
-        #[cfg(unix)]
         cmd.process_group(0);
         let child = cmd.spawn().expect("spawn bounded cpu hog");
         Self { child }
@@ -69,7 +67,6 @@ impl BoundedCpuHog {
 
 impl Drop for BoundedCpuHog {
     fn drop(&mut self) {
-        #[cfg(unix)]
         // SAFETY: a plain libc `kill(2)`. The negated pid is the id of the group
         // this child leads (see `spawn`'s `process_group(0)`), so this signals
         // exactly our subtree and nothing else. ESRCH (group already gone, e.g.

@@ -1,11 +1,25 @@
 # Changelog
 
-This is a pre-release, single-user project: there are no version tags or public
-releases yet. Everything below is the shipped-but-unreleased history at a high
-level. Per-commit detail lives in `git log`; per-phase scope and closeouts live
-in [`ROADMAP.md`](./ROADMAP.md) and the `future/phase-*.md` plans.
+Vigil is a personal macOS tool: there are no version tags or releases, and none
+are planned. Everything below is history at a high level. Per-commit detail
+lives in `git log`; scope lives in [`ROADMAP.md`](./ROADMAP.md).
 
-## [Unreleased]
+## Scope reset — 2026-09-20
+
+- **Personal macOS tool.** Linux (5.8), Windows (5.9), the native tray app, and
+  the release gate are dropped. The partial Linux power path, its `zbus` /
+  `logind-zbus` / `service-manager` dependencies, and every platform gate were
+  removed; the workspace refuses to compile off macOS. Evidence:
+  [`VIABILITY-REVIEW-2026-08-04.md`](./VIABILITY-REVIEW-2026-08-04.md).
+- **Manual mode.** `vigil mode auto|on|off` overrides agent detection. Thermal
+  and battery guards still release the hold in every mode. The daemon tick file
+  gains a tenth `mode=` line.
+- **Menu bar.** `vigil menubar` prints a SwiftBar menu from the tick and mode
+  files alone; `vigil setup` writes the `vigil.5s.sh` shim into SwiftBar's
+  plugin folder and `vigil uninstall` removes it.
+- **Clamshell experiment harness** under `tests/experiments/clamshell/`.
+
+## History
 
 ### Detection, wrapper, and power core (phases 1–4)
 
@@ -36,8 +50,7 @@ in [`ROADMAP.md`](./ROADMAP.md) and the `future/phase-*.md` plans.
 ### Phase 5 — full Rust rewrite (5.1–5.7)
 
 The Bash implementation has been fully replaced by a single Rust workspace; all
-`bin/*.sh` and `lib/*.sh` are deleted. The remaining cross-OS slices (5.8 Linux,
-5.9 Windows) are planned in [`future/phase-5.8-5.9-cross-os.md`](./future/phase-5.8-5.9-cross-os.md).
+`bin/*.sh` and `lib/*.sh` are deleted.
 
 - **Self-contained binary.** One shipped `vigil` binary (the daemon is a hidden
   `vigil daemon` subcommand) plus a separate root `vigil-root-helper`. `vigil

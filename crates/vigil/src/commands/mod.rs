@@ -19,6 +19,8 @@ pub mod conf_writer;
 pub mod doctor;
 pub mod lock;
 pub mod log;
+pub mod menubar;
+pub mod mode;
 pub mod reload;
 pub mod run;
 pub mod setup;
@@ -352,31 +354,28 @@ fn cmd_sync_install(cfg: &VigilConfig, ui: tui::Tui) -> Result<String, String> {
         &format!("  root helper: staged to {helper_dst}"),
     );
 
-    // Darwin-only: build + install the lock helper.
-    if cfg!(target_os = "macos") {
-        let helper_manifest = repo_root.join("native/vigil-lock-helper/Cargo.toml");
-        let status = std::process::Command::new("cargo")
-            .arg("build")
-            .arg("--quiet")
-            .arg("--release")
-            .arg("--manifest-path")
-            .arg(&helper_manifest)
-            .status()
-            .map_err(|e| format!("could not run cargo build (lock helper): {e}"))?;
-        if !status.success() {
-            return Err("failed to build vigil-lock-helper (see above)".to_string());
-        }
-        let helper_target =
-            cargo_target_dir(&helper_manifest).unwrap_or_else(|| target_dir.clone());
-        let helper_src = format!("{helper_target}/release/vigil-lock-helper");
-        let helper_dst = format!("{install_bin}/vigil-lock-helper");
-        install_binary(&helper_src, &helper_dst, 0o755)
-            .map_err(|e| format!("failed to install vigil-lock-helper: {e}"))?;
-        ui.detail(
-            &format!("lock helper: installed to {helper_dst}"),
-            &format!("  lock helper: installed to {helper_dst}"),
-        );
+    // Build + install the lock helper.
+    let helper_manifest = repo_root.join("native/vigil-lock-helper/Cargo.toml");
+    let status = std::process::Command::new("cargo")
+        .arg("build")
+        .arg("--quiet")
+        .arg("--release")
+        .arg("--manifest-path")
+        .arg(&helper_manifest)
+        .status()
+        .map_err(|e| format!("could not run cargo build (lock helper): {e}"))?;
+    if !status.success() {
+        return Err("failed to build vigil-lock-helper (see above)".to_string());
     }
+    let helper_target = cargo_target_dir(&helper_manifest).unwrap_or_else(|| target_dir.clone());
+    let helper_src = format!("{helper_target}/release/vigil-lock-helper");
+    let helper_dst = format!("{install_bin}/vigil-lock-helper");
+    install_binary(&helper_src, &helper_dst, 0o755)
+        .map_err(|e| format!("failed to install vigil-lock-helper: {e}"))?;
+    ui.detail(
+        &format!("lock helper: installed to {helper_dst}"),
+        &format!("  lock helper: installed to {helper_dst}"),
+    );
 
     Ok(vigil_src)
 }

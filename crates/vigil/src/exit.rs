@@ -27,17 +27,6 @@ pub fn admin_allowed() -> Result<(), String> {
     }
 }
 
-/// Convenience used by future admin commands: enforce the guard or terminate the
-/// process with a clear message and a non-zero exit code. Lands now so the
-/// abort entrypoint is uniform from slice 1.
-#[allow(dead_code)]
-pub fn require_admin_allowed() {
-    if let Err(msg) = admin_allowed() {
-        anstream::eprintln!("{msg}");
-        std::process::exit(EX_ERROR);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

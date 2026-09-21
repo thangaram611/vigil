@@ -7,7 +7,8 @@ use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use vigil::activity::scan::{
-    Agent, AgentState, agent_state, is_active, latest_activity_age_secs, session_dir_from_home,
+    Agent, AgentState, agent_state, is_active, latest_activity_age_secs,
+    session_dir_from_provider_home,
 };
 use vigil::activity::vscode::{VscodeState, chat_is_active, host_running};
 
@@ -27,6 +28,11 @@ fn set_mtime(path: &Path, unix_secs: i64) {
 }
 
 // ── session-dir model ───────────────────────────────────────────────────────
+
+/// `<home>/.<agent>/<session subdir>` — the layout the fixtures below write.
+fn session_dir_from_home(agent: Agent, home: &std::path::Path) -> std::path::PathBuf {
+    session_dir_from_provider_home(&home.join(format!(".{}", agent.token())), agent)
+}
 
 #[test]
 fn session_dir_for_known_agents() {

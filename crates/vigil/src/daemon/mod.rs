@@ -4,13 +4,12 @@
 //! Owns ONE long-lived [`ProcScanner`] (the single `sysinfo::System` for
 //! detect/start-time) plus a SECOND bare `sysinfo::System` for the gc cpu probe
 //! (Q9: two Systems, simplest correct). Power hold/release goes through the
-//! platform [`PowerController`](crate::power::platform::PowerController) facade;
-//! macOS delegates to the existing `pmset` + `caffeinate` state machine, while
-//! future Linux/Windows impls fill the same contract.
+//! [`PowerController`](crate::power::platform::PowerController) facade, which
+//! delegates to the macOS `pmset` + `caffeinate` state machine.
 //!
 //! Per-tick order (§2.1.3): detect+touch → gc → per-agent activity → activity-
-//! filtered count → cutoff checks + cooldown re-arm → decide → act → write tick
-//! (POST-action engaged) → sleep.
+//! filtered count → manual-mode demand → cutoff checks + cooldown re-arm →
+//! decide → act → write tick (POST-action engaged) → sleep.
 
 pub mod lock;
 pub mod tick;
@@ -23,13 +22,8 @@ use std::time::Duration;
 use crate::activity::scan::{self, Agent};
 use crate::activity::vscode;
 use crate::config::{self, VigilConfig};
-#[cfg(target_os = "linux")]
-use crate::power::linux::LinuxLogindPower;
-#[cfg(target_os = "macos")]
-use crate::power::platform::MacPowerController;
-use crate::power::platform::PowerController;
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-use crate::power::platform::UnsupportedPowerController;
+use crate::mode::{self, Mode};
+use crate::power::platform::{MacPowerController, PowerController};
 use crate::procscan::ProcScanner;
 use crate::refcount;
 use crate::{battery, thermal};
@@ -51,11 +45,12 @@ pub struct ActivityFlags {
     pub vscode: bool,
 }
 
-/// The desired-hold predicate, VERBATIM from the bash contract
-/// (`bin/vigil-daemon:156-159`): hold iff there is active work AND no thermal
-/// cut AND no battery cut AND not in the post-thermal cooldown window.
-pub fn desired_hold(count: u32, cut_thermal: bool, cut_battery: bool, cooling: bool) -> bool {
-    count > 0 && !cut_thermal && !cut_battery && !cooling
+/// The desired-hold predicate: hold iff there is demand AND no thermal cut AND
+/// no battery cut AND not in the post-thermal cooldown window. `demand` is the
+/// active-agent count after the manual mode ([`Mode::demand`]), so a mode can
+/// override detection but never a safety cut.
+pub fn desired_hold(demand: u32, cut_thermal: bool, cut_battery: bool, cooling: bool) -> bool {
+    demand > 0 && !cut_thermal && !cut_battery && !cooling
 }
 
 /// The act-branch result: the new `engaged` value after acting on `(desired,
@@ -69,7 +64,7 @@ pub fn act(
     power: &mut dyn PowerController,
     desired: bool,
     engaged: bool,
-    count: u32,
+    demand: u32,
     cut_thermal: bool,
     cut_battery: bool,
     cooldown_secs: u32,
@@ -84,7 +79,7 @@ pub fn act(
             let ps = if flags.copilot { "active" } else { "idle" };
             let vs = if flags.vscode { "active" } else { "idle" };
             tracing::info!(
-                "engage — count={count} thermal=ok battery=ok claude={cs} codex={xs} copilot={ps} vscode_copilot_chat={vs}"
+                "engage — demand={demand} thermal=ok battery=ok claude={cs} codex={xs} copilot={ps} vscode_copilot_chat={vs}"
             );
             // engaged := true ONLY if the helper engage succeeds (bash:
             // `if vigil_pmset_engage; then DAEMON_ENGAGED=1; fi`).
@@ -132,8 +127,8 @@ pub fn act(
             } else if cut_battery {
                 tracing::warn!("release — battery floor ({battery_summary})");
                 power.full_release();
-            } else if count == 0 {
-                tracing::info!("release — no active agents");
+            } else if demand == 0 {
+                tracing::info!("release — no demand");
                 power.full_release();
             }
             // engaged := false ALWAYS, even if a release no-ops.
@@ -178,6 +173,8 @@ pub struct Daemon {
     // ── transition state ──
     engaged: bool,
     cooldown_until: i64,
+    /// Last tick's manual mode, so a change is logged once.
+    mode: Mode,
     /// The lock-dir guard (held for the daemon's whole life).
     lock: DaemonLock,
     /// Set by the INT/TERM signal handler; checked at the loop top + during sleep.
@@ -297,6 +294,13 @@ impl Daemon {
             flags.copilot,
             flags.vscode,
         );
+        // 4b. the manual mode turns the count into the hold demand.
+        let mode = mode::read(Path::new(&self.cfg.mode_file));
+        if mode != self.mode {
+            tracing::info!("mode {} → {}", self.mode.as_str(), mode.as_str());
+            self.mode = mode;
+        }
+        let demand = mode.demand(count);
         // 5. cutoff checks (+ cooldown re-arm).
         let now = now_unix();
         // Fail CLOSED: a genuine pmset read failure cuts the hold so a keep-awake
@@ -312,7 +316,7 @@ impl Daemon {
         );
         self.cooldown_until = cooldown_until;
         // 6. decide.
-        let desired = desired_hold(count, cut_thermal, cut_battery, cooling);
+        let desired = desired_hold(demand, cut_thermal, cut_battery, cooling);
         // 7. act. The battery summary reuses the already-read raw (no second read).
         let battery_summary =
             battery::battery_summary(&battery::parse_ps(&battery_raw), self.cfg.battery_floor_pct);
@@ -320,7 +324,7 @@ impl Daemon {
             self.power.as_mut(),
             desired,
             self.engaged,
-            count,
+            demand,
             cut_thermal,
             cut_battery,
             self.cfg.thermal_cooldown_secs,
@@ -339,6 +343,7 @@ impl Daemon {
             thermal_cut: cut_thermal,
             battery_cut: cut_battery,
             cooling,
+            mode,
         };
         if let Err(e) = tick::write_tick(Path::new(&self.cfg.daemon_tick_file), &snap) {
             tracing::warn!("write tick file: {e}");
@@ -368,9 +373,12 @@ impl Daemon {
         let battery_should =
             battery::live_should_cut(&battery::read_ps_raw(), self.cfg.battery_floor_pct);
         let can_hold = !thermal_should && !battery_should;
-        // 4. if baseline exists → recover_startup.
+        // 4. if baseline exists → recover_startup, judged against the demand.
+        self.mode = mode::read(Path::new(&self.cfg.mode_file));
         if Path::new(&self.cfg.baseline_file).exists() {
-            self.engaged = self.power.recover_startup(startup_count, can_hold, now);
+            self.engaged =
+                self.power
+                    .recover_startup(self.mode.demand(startup_count), can_hold, now);
         }
     }
 
@@ -378,8 +386,9 @@ impl Daemon {
     /// or an error exit handled by [`run`].
     fn run_loop(mut self) -> ! {
         tracing::info!(
-            "vigil-daemon started (tick={}s, lock={})",
+            "vigil-daemon started (tick={}s, mode={}, lock={})",
             self.cfg.tick_secs,
+            self.mode.as_str(),
             self.cfg.lock_file,
         );
         let tick_secs = self.cfg.tick_secs.max(1);
@@ -495,6 +504,7 @@ pub fn run() -> ! {
         power,
         engaged: false,
         cooldown_until: 0,
+        mode: Mode::Auto,
         lock,
         shutdown,
         cfg,
@@ -506,7 +516,6 @@ pub fn run() -> ! {
     daemon.run_loop();
 }
 
-#[cfg(target_os = "macos")]
 fn build_power_controller(cfg: &VigilConfig) -> Result<Box<dyn PowerController>, String> {
     let controller = MacPowerController::new(cfg);
     // Helper round-trip: a missing-dirs error means setup/doctor is needed. Any
@@ -518,18 +527,6 @@ fn build_power_controller(cfg: &VigilConfig) -> Result<Box<dyn PowerController>,
         );
     }
     Ok(Box::new(controller))
-}
-
-#[cfg(target_os = "linux")]
-fn build_power_controller(_cfg: &VigilConfig) -> Result<Box<dyn PowerController>, String> {
-    Ok(Box::new(LinuxLogindPower::system_default()))
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn build_power_controller(_cfg: &VigilConfig) -> Result<Box<dyn PowerController>, String> {
-    Ok(Box::new(UnsupportedPowerController::new(
-        std::env::consts::OS,
-    )))
 }
 
 #[cfg(test)]

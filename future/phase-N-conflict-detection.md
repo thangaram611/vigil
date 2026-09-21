@@ -76,11 +76,6 @@ Two complementary behaviors:
   and release. Stale files (daemon crash mid-engage) are already handled by
   `vigil uninstall` and the `vigil_pmset_clear_baseline` path; conflict.json
   follows the same lifecycle.
-- **Cross-OS portability.** This feature is built on `pmset -g assertions`,
-  which has no Linux/Windows equivalent. Phase 5 (Rust cross-OS) would need
-  per-OS implementations: D-Bus `Inhibit` introspection on Linux,
-  `PowerGetEffectiveOverlayScheme` / event-tracing on Windows. Whether the
-  feature is worth the per-OS effort is part of the phase-5 scope decision.
 
 ## What this is NOT
 

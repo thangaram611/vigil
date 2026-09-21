@@ -38,11 +38,7 @@ pub const LEGACY_SUDOERS_FILE: &str = "/etc/sudoers.d/vigil";
 
 #[derive(Debug)]
 pub enum ConfigError {
-    ShellSyntax {
-        path: String,
-        hint: String,
-    },
-    #[allow(dead_code)]
+    ShellSyntax { path: String, hint: String },
     Parse(String),
     Figment(Box<figment::Error>),
 }
@@ -78,11 +74,6 @@ fn home() -> String {
 
 fn default_install_dir() -> String {
     format!("{}/Library/Application Support/vigil", home())
-}
-
-#[allow(dead_code)]
-fn default_state_dir() -> String {
-    format!("{}/state", default_install_dir())
 }
 
 fn default_log_dir() -> String {
@@ -285,6 +276,7 @@ pub struct VigilConfig {
     pub caffeinate_pidfile: String,
     pub daemon_pidfile: String,
     pub daemon_tick_file: String,
+    pub mode_file: String,
     pub lock_file: String,
     pub vscode_copilot_state_file: String,
 
@@ -514,6 +506,7 @@ fn derive_paths(raw: RawConfig) -> VigilConfig {
     let caffeinate_pidfile = format!("{}/caffeinate.pid", state_dir);
     let daemon_pidfile = format!("{}/daemon.pid", state_dir);
     let daemon_tick_file = format!("{}/daemon.tick", state_dir);
+    let mode_file = format!("{}/mode", state_dir);
     let lock_file_path = format!("{}/state.lock", state_dir);
     let vscode_copilot_state_file = format!("{}/vscode-copilot-chat.state", state_dir);
 
@@ -527,6 +520,7 @@ fn derive_paths(raw: RawConfig) -> VigilConfig {
         caffeinate_pidfile,
         daemon_pidfile,
         daemon_tick_file,
+        mode_file,
         lock_file: lock_file_path,
         vscode_copilot_state_file,
         log_file,
@@ -664,7 +658,6 @@ pub fn load(conf_path: &str, cli: Option<CliOverrides>) -> Result<VigilConfig, C
 }
 
 /// Convenience: load using the default config file path (from env or default).
-#[allow(dead_code)]
 pub fn load_default() -> Result<VigilConfig, ConfigError> {
     let conf_path = std::env::var("VIGIL_CONFIG_FILE").unwrap_or_else(|_| default_config_file());
     load(&conf_path, None)
@@ -676,7 +669,6 @@ impl VigilConfig {
     /// Validate all security-critical paths against their canonical hardcoded
     /// values using EXACT string equality (NOT prefix). Call from admin paths
     /// only; NEVER from `config --show`.
-    #[allow(dead_code)]
     pub fn validate_security_paths(&self) -> Result<(), String> {
         let uid = get_uid().to_string();
         let root = VIGIL_ROOT;
@@ -773,7 +765,6 @@ impl VigilConfig {
     /// Create the state directory (and active subdir + log dir) with mode 0700
     /// on the state dir. Only call from daemon/setup paths; NEVER from
     /// `config --show`.
-    #[allow(dead_code)]
     pub fn ensure_state_dir(&self) -> io::Result<()> {
         std::fs::create_dir_all(&self.state_dir)?;
         std::fs::create_dir_all(&self.active_dir)?;
@@ -787,7 +778,7 @@ impl VigilConfig {
     }
 
     /// Convert the fully-resolved config to a stable sorted BTreeMap<String, String>
-    /// using VIGIL_* env-var names as keys. Used by `config --show`/`--json`/`--kv`.
+    /// using VIGIL_* env-var names as keys. Used by `config --show`/`--json`.
     pub fn to_kv_map(&self) -> BTreeMap<String, String> {
         let mut m = BTreeMap::new();
         m.insert("VIGIL_ACTIVE_DIR".into(), self.active_dir.clone());
@@ -832,6 +823,7 @@ impl VigilConfig {
         m.insert("VIGIL_LOCK_MAX_SECS".into(), self.lock_max_secs.to_string());
         m.insert("VIGIL_LOG_DIR".into(), self.log_dir.clone());
         m.insert("VIGIL_LOG_FILE".into(), self.log_file.clone());
+        m.insert("VIGIL_MODE_FILE".into(), self.mode_file.clone());
         m.insert("VIGIL_NEWSYSLOG_FILE".into(), self.newsyslog_file.clone());
         m.insert(
             "VIGIL_POWER_HELPER_DIR".into(),
@@ -880,14 +872,8 @@ impl VigilConfig {
             "VIGIL_THERMAL_COOLDOWN_SECS".into(),
             self.thermal_cooldown_secs.to_string(),
         );
-        // Rust-only knob (the smarter 5.4 policy; bash has no counterpart). The
-        // key is OMITTED entirely when None so that a default-config `vigil
-        // config --kv` stays byte-identical to the bash oracle (whose key list
-        // has no such var) — this keeps tests/config_parity_test.sh green. When
-        // Some(F) the floor is configured and the numeric value is emitted.
-        // (Design note offered "unset" string OR omit-when-None; omit is chosen
-        // because the config parity oracle full-diffs --kv and would otherwise
-        // flag a Rust-only key.)
+        // Optional knob: the key is omitted entirely when unset, and carries the
+        // numeric floor when configured.
         if let Some(v) = self.thermal_cpu_limit_floor {
             m.insert("VIGIL_THERMAL_CPU_LIMIT_FLOOR".into(), v.to_string());
         }
@@ -1459,7 +1445,7 @@ mod tests {
         // The full sorted key set emitted by to_kv_map() for a default config.
         // VIGIL_THERMAL_CPU_LIMIT_FLOOR is OMITTED here (floor is None by default);
         // the conditional emit is covered by env_split_thermal_cpu_limit_floor. The
-        // remaining 43 keys are unconditional m.insert()s, asserted EXACTLY (set
+        // remaining 44 keys are unconditional m.insert()s, asserted EXACTLY (set
         // equality), so any added/removed/renamed key fails this golden.
         let (_g, _tmp, conf) = fixture();
         unsafe {
@@ -1489,6 +1475,7 @@ mod tests {
             "VIGIL_LOCK_MAX_SECS",
             "VIGIL_LOG_DIR",
             "VIGIL_LOG_FILE",
+            "VIGIL_MODE_FILE",
             "VIGIL_NEWSYSLOG_FILE",
             "VIGIL_POWER_HELPER_DIR",
             "VIGIL_POWER_HELPER_TIMEOUT_SECS",

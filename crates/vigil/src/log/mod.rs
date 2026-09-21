@@ -11,7 +11,6 @@
 //! - Tracing TRACE level maps to DEBUG (bash has no TRACE).
 //! - Appender: NonBlocking over an APPEND-mode file. NEVER use rolling rotation
 //!   (the appender's own rotator is not used; macOS relies on external newsyslog).
-//! - A `LogRotation` seam exists; the macOS impl is a no-op stub in 5.2.
 //! - EnvFilter defaults to "info"; overridable via RUST_LOG or VIGIL_LOG.
 
 use std::fs::OpenOptions;
@@ -23,35 +22,6 @@ use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
-
-// ── Log rotation seam ─────────────────────────────────────────────────────────
-
-/// Seam for log rotation. The macOS implementation (5.2) is a no-op stub;
-/// rotation is managed externally by newsyslog which renames the file.
-///
-/// # macOS rotation note
-/// newsyslog renames the current log file; the NonBlocking worker has the file
-/// open by inode and will continue writing to the renamed inode until the
-/// process reopens it. A `reload-log` reopen path is a later slice (Linux).
-/// In 5.2 this seam exists; macOS relies on newsyslog and the file staying the
-/// source of truth.
-#[allow(dead_code)]
-pub trait LogRotation {
-    /// Ensure the rotation infrastructure is installed (newsyslog conf, etc.).
-    /// In 5.2 this is a no-op; wired in 5.7.
-    fn ensure_installed(&self) -> io::Result<()>;
-}
-
-/// macOS newsyslog rotation — no-op stub for 5.2.
-#[allow(dead_code)]
-pub struct MacOsNewsyslogRotation;
-
-impl LogRotation for MacOsNewsyslogRotation {
-    fn ensure_installed(&self) -> io::Result<()> {
-        // 5.2 stub: newsyslog installation happens in 5.7 (cmd_setup).
-        Ok(())
-    }
-}
 
 // ── Custom FormatEvent — exact bash log-line format ───────────────────────────
 //
@@ -111,7 +81,6 @@ where
 ///
 /// # Panics
 /// Panics if the global subscriber has already been set (call once per process).
-#[allow(dead_code)]
 pub fn init_file_subscriber(
     log_file_path: &str,
     log_level_override: Option<&str>,

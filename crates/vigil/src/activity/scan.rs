@@ -68,16 +68,6 @@ impl AgentGlob {
     }
 }
 
-/// home_override form (the tests' 2nd arg): `<home>/.claude/projects` etc.
-///
-/// Mirrors `vigil_session_dir_for_agent <agent> <home>`: appends `.<token>`
-/// (with the leading dot) then `/<subdir>`.
-pub fn session_dir_from_home(agent: Agent, home_override: &Path) -> PathBuf {
-    home_override
-        .join(format!(".{}", agent.token()))
-        .join(agent.session_subdir())
-}
-
 /// resolved-provider-home form (daemon): `VigilConfig.<provider>_home` is
 /// already `.../.claude`, so this just joins the subdir.
 pub fn session_dir_from_provider_home(provider_home: &Path, agent: Agent) -> PathBuf {

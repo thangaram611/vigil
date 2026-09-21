@@ -1,10 +1,10 @@
-//! The FROZEN daemon tick-file writer (§2.1.6) — a byte-stable ABI.
+//! The daemon tick file (§2.1.6): the daemon's per-tick state, written here and
+//! read back by `status`/`doctor`, `lock`, and `menubar`.
 //!
-//! Exactly nine `key=value\n` lines in this precise order, no JSON, no quoting,
-//! no extra fields, no trailing blank line. The reader (`cmd_daemon_tick_field`
-//! in bash, `read_tick_fields` in [`crate::check`]) does an `awk -F=` first-match
-//! parse, so `=` must be the FIRST separator and there is exactly one field per
-//! line. `pid` and `updated_at` MUST be byte-faithful — a wrong `pid`
+//! Exactly ten `key=value\n` lines in this precise order, no JSON, no quoting,
+//! no extra fields, no trailing blank line. Readers ([`parse`] here,
+//! `read_tick_fields` in [`crate::check`]) split on the FIRST `=` and take the
+//! first match, so there is exactly one field per line. `pid` and `updated_at` MUST be byte-faithful — a wrong `pid`
 //! permanently classifies the scan as `pending`/`missing`, and a non-numeric
 //! `updated_at` does the same.
 //!
@@ -15,7 +15,9 @@
 use std::io;
 use std::path::Path;
 
-/// The nine fields of one tick snapshot. `pid` and `updated_at` are the
+use crate::mode::Mode;
+
+/// The ten fields of one tick snapshot. `pid` and `updated_at` are the
 /// scan-state inputs; the five booleans are emitted as `0|1`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TickSnapshot {
@@ -29,6 +31,8 @@ pub struct TickSnapshot {
     pub thermal_cut: bool,
     pub battery_cut: bool,
     pub cooling: bool,
+    /// The manual mode the daemon applied this tick.
+    pub mode: Mode,
 }
 
 /// `bool -> "0"|"1"` (bash `(( … ))` numeric).
@@ -36,12 +40,12 @@ fn b(v: bool) -> u8 {
     v as u8
 }
 
-/// Render the nine frozen lines. Exposed so the byte-stability test can assert
+/// Render the ten lines. Exposed so the byte-stability test can assert
 /// the exact bytes without touching the filesystem.
 pub fn render(t: &TickSnapshot) -> String {
     format!(
         "pid={}\nupdated_at={}\ntick_secs={}\nrefcount_active={}\n\
-         desired_hold={}\nengaged={}\nthermal_cut={}\nbattery_cut={}\ncooling={}\n",
+         desired_hold={}\nengaged={}\nthermal_cut={}\nbattery_cut={}\ncooling={}\nmode={}\n",
         t.pid,
         t.updated_at,
         t.tick_secs,
@@ -51,7 +55,45 @@ pub fn render(t: &TickSnapshot) -> String {
         b(t.thermal_cut),
         b(t.battery_cut),
         b(t.cooling),
+        t.mode.as_str(),
     )
+}
+
+/// Parse a tick file body. `None` unless every field is present and well-formed:
+/// the writer is atomic, so a partial snapshot is never a state to interpret.
+pub fn parse(text: &str) -> Option<TickSnapshot> {
+    let field = |key: &str| {
+        text.lines()
+            .filter_map(|line| line.split_once('='))
+            .find_map(|(k, v)| (k == key).then_some(v))
+    };
+    let flag = |key: &str| match field(key)? {
+        "0" => Some(false),
+        "1" => Some(true),
+        _ => None,
+    };
+    Some(TickSnapshot {
+        pid: field("pid")?.parse().ok()?,
+        updated_at: field("updated_at")?.parse().ok()?,
+        tick_secs: field("tick_secs")?.parse().ok()?,
+        refcount_active: field("refcount_active")?.parse().ok()?,
+        desired_hold: flag("desired_hold")?,
+        engaged: flag("engaged")?,
+        thermal_cut: flag("thermal_cut")?,
+        battery_cut: flag("battery_cut")?,
+        cooling: flag("cooling")?,
+        mode: Mode::parse(field("mode")?)?,
+    })
+}
+
+/// Read and parse the tick file (`None` if absent or malformed).
+pub fn read(tick_file: &Path) -> Option<TickSnapshot> {
+    parse(&std::fs::read_to_string(tick_file).ok()?)
+}
+
+/// Seconds after which a tick written every `tick_secs` counts as stale.
+pub fn stale_after(tick_secs: i64) -> i64 {
+    (tick_secs * 2 + 5).max(15)
 }
 
 /// Atomic tmp+rename write of the frozen tick file. `tmp = {tick_file}.{pid}`,
@@ -83,13 +125,13 @@ mod tests {
             thermal_cut: false,
             battery_cut: false,
             cooling: false,
+            mode: Mode::Auto,
         }
     }
 
     #[test]
-    fn frozen_nine_field_bytes_exact() {
-        // The exact byte layout the bash `daemon_write_tick` emits (bin/vigil-daemon
-        // lines 70-78): nine key=value lines, key order frozen, no trailing blank.
+    fn ten_field_bytes_exact() {
+        // Ten key=value lines, key order fixed, no trailing blank.
         let want = "pid=4242\n\
                     updated_at=1700000000\n\
                     tick_secs=5\n\
@@ -98,7 +140,8 @@ mod tests {
                     engaged=1\n\
                     thermal_cut=0\n\
                     battery_cut=0\n\
-                    cooling=0\n";
+                    cooling=0\n\
+                    mode=auto\n";
         assert_eq!(render(&sample()), want);
     }
 
@@ -110,6 +153,7 @@ mod tests {
             thermal_cut: true,
             battery_cut: true,
             cooling: true,
+            mode: Mode::Off,
             ..sample()
         };
         let want = "pid=4242\n\
@@ -120,8 +164,40 @@ mod tests {
                     engaged=0\n\
                     thermal_cut=1\n\
                     battery_cut=1\n\
-                    cooling=1\n";
+                    cooling=1\n\
+                    mode=off\n";
         assert_eq!(render(&t), want);
+    }
+
+    #[test]
+    fn parse_round_trips_render() {
+        let t = TickSnapshot {
+            engaged: false,
+            thermal_cut: true,
+            mode: Mode::On,
+            ..sample()
+        };
+        assert_eq!(parse(&render(&t)), Some(t));
+    }
+
+    #[test]
+    fn parse_rejects_partial_or_malformed_snapshots() {
+        let full = render(&sample());
+        assert!(parse("").is_none());
+        assert!(
+            parse(&full.replace("mode=auto\n", "")).is_none(),
+            "missing field"
+        );
+        assert!(parse(&full.replace("engaged=1", "engaged=yes")).is_none());
+        assert!(parse(&full.replace("pid=4242", "pid=abc")).is_none());
+        assert!(parse(&full.replace("mode=auto", "mode=sideways")).is_none());
+    }
+
+    #[test]
+    fn stale_after_scales_with_tick_and_has_a_floor() {
+        assert_eq!(stale_after(5), 15);
+        assert_eq!(stale_after(1), 15, "floor");
+        assert_eq!(stale_after(20), 45);
     }
 
     #[test]

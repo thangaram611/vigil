@@ -2,6 +2,9 @@
 //!
 //! The binary crate re-uses these modules; integration tests access them here.
 
+#[cfg(not(target_os = "macos"))]
+compile_error!("vigil is macOS-only");
+
 pub mod activity;
 pub mod battery;
 pub mod check;
@@ -11,11 +14,13 @@ pub mod debug;
 pub mod helper;
 pub mod ipc;
 pub mod log;
+pub mod mode;
 pub mod power;
 pub mod power_guard;
 pub mod procscan;
 pub mod refcount;
 pub mod service;
+pub mod swiftbar;
 pub mod thermal;
 
 // Shared output substrate (anstream prints, comfy-table, --json). Lives in the
