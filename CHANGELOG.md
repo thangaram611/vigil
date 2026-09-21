@@ -17,7 +17,12 @@ lives in `git log`; scope lives in [`ROADMAP.md`](./ROADMAP.md).
 - **Menu bar.** `vigil menubar` prints a SwiftBar menu from the tick and mode
   files alone; `vigil setup` writes the `vigil.5s.sh` shim into SwiftBar's
   plugin folder and `vigil uninstall` removes it.
-- **Clamshell experiment harness** under `tests/experiments/clamshell/`.
+- **Clamshell experiment** under `tests/experiments/clamshell/`, run on
+  2026-09-21: `disablesleep` holds a closed M5 Pro awake on battery. It also
+  found two defects, both fixed in `power/lid.rs`: a release with the lid closed
+  left the Mac awake (now followed by `pmset sleepnow`), and a held Mac did not
+  lock when its lid closed (now followed by `pmset displaysleepnow`). Results:
+  [`docs/apple-silicon-lid-closed.md`](./docs/apple-silicon-lid-closed.md).
 
 ## History
 

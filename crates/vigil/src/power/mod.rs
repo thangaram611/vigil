@@ -21,6 +21,7 @@
 
 pub mod assertions;
 pub mod caffeinate;
+pub mod lid;
 pub mod platform;
 pub mod pmset;
 

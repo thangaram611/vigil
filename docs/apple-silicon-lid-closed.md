@@ -39,17 +39,28 @@ Empirically, `pmset disablesleep 1` works **most of the time** on M-series, but 
 It must run **on battery with no external display** — with a display attached the Mac is in clamshell mode and any result is a false pass. The script refuses to start otherwise.
 
 ```bash
-bash tests/experiments/clamshell/run.sh start control     # vigil mode off; close the lid 5 min
-bash tests/experiments/clamshell/run.sh finish
-bash tests/experiments/clamshell/run.sh start treatment   # vigil mode on; close the lid 20 min
-bash tests/experiments/clamshell/run.sh finish
+bash tests/experiments/clamshell/run.sh start <control|treatment|release|lock>   # then close the lid
+bash tests/experiments/clamshell/run.sh finish                                   # after reopening it
 ```
 
-The control is mandatory. Claude Code holds its own `caffeinate -i` while it runs, so without a run proving the closed lid *does* sleep this Mac, a passing treatment would not show that `disablesleep` did anything.
+The control is mandatory. Agents hold their own `caffeinate -i` while they run, so without a run proving the closed lid *does* sleep this Mac, a passing treatment would not show that `disablesleep` did anything.
 
-| Date | Hardware | macOS | Control gap | Treatment gap | Verdict |
-| --- | --- | --- | --- | --- | --- |
-| _not yet run_ | MacBook Pro, M5 Pro | 26.7 | — | — | — |
+### Results — 2026-09-21, MacBook Pro M5 Pro, macOS 26.7, on battery, no external display
+
+| Arm | Lid closed | What happened | Verdict |
+| --- | --- | --- | --- |
+| control (mode off) | 5 min | "Clamshell Sleep" 3 s after closing; asleep 321 s; lock screen on reopen | the lid sleeps this Mac — baseline valid |
+| treatment (mode on) | 20 min | 240 beats, `SleepDisabled = Yes` on all, longest gap 6 s, no sleep events | **`disablesleep` beats the lid sensor** |
+| release (mode on → off after 2 min) | 8 min | awake for the full 3 min after the release with `SleepDisabled = No`; asleep 5 s after `pmset sleepnow` | **a release does not sleep a closed Mac; `sleepnow` does** |
+| treatment, short | 2 min | awake; reopened straight to the desktop | **a held, closed Mac is not locked** |
+| lock (`displaysleepnow` 20 s after closing) | 2 min | awake, hold intact; reopened to the lock screen | **`displaysleepnow` locks it without breaking the hold** |
+
+Two consequences, both now handled by the daemon:
+
+- **Clamshell sleep is edge-triggered.** It fires when the lid closes. If sleep was disabled at that moment, re-enabling it later does nothing until the idle timer expires — and an agent's own `caffeinate -i` stops that timer too. So when Vigil releases with the lid closed, it runs `pmset sleepnow`. Without this the thermal and battery guards would release the hold and leave the Mac running in the bag.
+- **A held Mac does not lock when the lid closes.** macOS locks on sleep or display sleep, and a held, closed Mac does neither until the display-sleep timer (15 min here) expires. So when the lid closes under a hold, Vigil runs `pmset displaysleepnow`.
+
+Both apply only when `AppleClamshellCausesSleep` is true — with an external display attached, a closed lid is normal desk use and is left alone. The session-locked flag cannot verify the second fix: with the lid closed macOS raises the lock only when the display wakes, so the evidence is the paired observation above.
 
 ## Thermal safety
 

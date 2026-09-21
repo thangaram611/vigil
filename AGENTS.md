@@ -21,6 +21,7 @@ The LaunchAgent runs the install snapshot in `~/Library/Application Support/vigi
 - **Chord rules live twice.** `validate_combo` (`crates/vigil/src/commands/lock.rs`) and `parse_chord` (`native/vigil-lock-helper/src/combo.rs`) are independent implementations. Change both in one commit or capture and unlock silently diverge.
 - **The root helper is a privilege boundary.** It accepts only `engage`, `release`, `status`, and runs a fixed `pmset` argv. Never build a privileged command from request content.
 - **Thermal and battery guards outrank everything**, including `vigil mode on`.
+- **The closed-lid follow-ups are load-bearing** (`power/lid.rs`): `sleepnow` after a release, `displaysleepnow` when the lid closes under a hold. macOS does neither by itself; the measurements are in [`docs/apple-silicon-lid-closed.md`](./docs/apple-silicon-lid-closed.md). Do not remove them as "redundant".
 - **`status` and `doctor` are read-only.** They never write, refresh, or GC state.
 - **Tests that spawn CPU-burning or long-lived children use `BoundedCpuHog`** ([`docs/testing.md`](./docs/testing.md)).
 

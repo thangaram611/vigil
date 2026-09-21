@@ -9,7 +9,8 @@
 //!
 //! Per-tick order (§2.1.3): detect+touch → gc → per-agent activity → activity-
 //! filtered count → manual-mode demand → cutoff checks + cooldown re-arm →
-//! decide → act → write tick (POST-action engaged) → sleep.
+//! decide → act → closed-lid follow-ups → write tick (POST-action engaged) →
+//! sleep.
 
 pub mod lock;
 pub mod tick;
@@ -23,6 +24,7 @@ use crate::activity::scan::{self, Agent};
 use crate::activity::vscode;
 use crate::config::{self, VigilConfig};
 use crate::mode::{self, Mode};
+use crate::power::lid::{self, Lid, MacLid};
 use crate::power::platform::{MacPowerController, PowerController};
 use crate::procscan::ProcScanner;
 use crate::refcount;
@@ -170,11 +172,14 @@ pub struct Daemon {
     /// instead of spinning up a SECOND full process scan per tick.
     last_ps_text: String,
     power: Box<dyn PowerController>,
+    lid: Box<dyn Lid>,
     // ── transition state ──
     engaged: bool,
     cooldown_until: i64,
     /// Last tick's manual mode, so a change is logged once.
     mode: Mode,
+    /// A hold was engaged under a closed lid last tick (see [`lid::follow_up`]).
+    held_closed: bool,
     /// The lock-dir guard (held for the daemon's whole life).
     lock: DaemonLock,
     /// Set by the INT/TERM signal handler; checked at the loop top + during sleep.
@@ -320,6 +325,7 @@ impl Daemon {
         // 7. act. The battery summary reuses the already-read raw (no second read).
         let battery_summary =
             battery::battery_summary(&battery::parse_ps(&battery_raw), self.cfg.battery_floor_pct);
+        let was_engaged = self.engaged;
         self.engaged = act(
             self.power.as_mut(),
             desired,
@@ -331,6 +337,13 @@ impl Daemon {
             &battery_summary,
             flags,
             now,
+        );
+        // 7b. closed-lid follow-ups: sleep after a release, lock under a hold.
+        self.held_closed = lid::follow_up(
+            self.lid.as_ref(),
+            was_engaged,
+            self.engaged,
+            self.held_closed,
         );
         // 8. write tick (POST-action engaged).
         let snap = TickSnapshot {
@@ -502,9 +515,11 @@ pub fn run() -> ! {
         sys_for_gc: sysinfo::System::new(),
         last_ps_text: String::new(),
         power,
+        lid: Box::new(MacLid),
         engaged: false,
         cooldown_until: 0,
         mode: Mode::Auto,
+        held_closed: false,
         lock,
         shutdown,
         cfg,

@@ -15,6 +15,7 @@ That was decided on 2026-09-20. The category is covered — [`adrafinil`](https:
 | **4. Lock guard** | `vigil lock`: CoreGraphics event tap freezes input until an ordered chord. The macOS Lock Screen passes through. |
 | **5. Rust rewrite** | One `vigil` binary, a root `vigil-root-helper`, and `vigil-lock-helper`. All shell deleted. Unified `CheckEngine` behind `status` and `doctor`. |
 | **6. Manual mode + menu bar** | `vigil mode auto\|on\|off` overrides agent detection; thermal and battery guards still win. A SwiftBar plugin shows state and switches mode from the menu bar. |
+| **7. Clamshell test + closed-lid fixes** | Measured on the M5 Pro: `disablesleep` beats the lid sensor on battery. Found and fixed two closed-lid defects — sleep after a release, lock under a hold. [`docs/apple-silicon-lid-closed.md`](./docs/apple-silicon-lid-closed.md). |
 
 ## Dropped
 
@@ -24,7 +25,6 @@ That was decided on 2026-09-20. The category is covered — [`adrafinil`](https:
 
 ## Open
 
-- **Clamshell test.** Does `pmset disablesleep` beat the lid sensor on this M5 Pro, on battery, with no external display? Protocol and result: [`docs/apple-silicon-lid-closed.md`](./docs/apple-silicon-lid-closed.md).
 - **New agent surfaces** — only when one is installed here and can be verified live. Sketch: [`future/phase-N-agent-surface-refresh.md`](./future/phase-N-agent-surface-refresh.md).
 - **Conflict detection** against other sleep holders. Sketch: [`future/phase-N-conflict-detection.md`](./future/phase-N-conflict-detection.md).
 

@@ -269,6 +269,8 @@ Vigil is intentionally conservative:
 - The helper runs a fixed `pmset` argv with a cleared environment and pinned `PATH`.
 - Thermal pressure releases the hold.
 - Low battery while unplugged releases the hold.
+- A release with the lid closed is followed by `pmset sleepnow`. macOS only sleeps on the lid *closing*, so without this a release would leave a closed Mac running.
+- A lid closing under a hold is followed by `pmset displaysleepnow`, so the Mac locks. Without it a held, closed Mac opens straight to the desktop.
 - Baseline restoration avoids clobbering another tool's `SleepDisabled` state.
 - Admin paths refuse test mode (`VIGIL_TEST_NO_ADMIN`) and refuse environment-overridden privileged install paths.
 
@@ -276,7 +278,7 @@ The tradeoff is explicit: Vigil avoids repeated runtime sudo prompts by owning a
 
 ## Apple Silicon Lid-Closed Caveat
 
-Vigil uses the strongest public macOS path available for this workflow: `pmset disablesleep` plus `caffeinate -i`.
+Vigil uses the strongest public macOS path available for this workflow: `pmset disablesleep` plus `caffeinate -i`. Measured on an M5 Pro running macOS 26.7, on battery with no external display, it held for a 20-minute closed-lid run; the numbers are in [`docs/apple-silicon-lid-closed.md`](./docs/apple-silicon-lid-closed.md).
 
 On Apple Silicon, macOS can still enter hardware-level magnet-sensor sleep when the lid closes without an external display. In practice the `pmset disablesleep` path works much of the time, but the only Apple-supported closed-lid workflow is clamshell mode: external display, power, and input.
 
