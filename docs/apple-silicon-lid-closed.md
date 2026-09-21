@@ -55,6 +55,15 @@ The control is mandatory. Agents hold their own `caffeinate -i` while they run, 
 | treatment, short | 2 min | awake; reopened straight to the desktop | **a held, closed Mac is not locked** |
 | lock (`displaysleepnow` 20 s after closing) | 2 min | awake, hold intact; reopened to the lock screen | **`displaysleepnow` locks it without breaking the hold** |
 
+After the fixes, the same arms against the deployed daemon:
+
+| Arm | Lid closed | What happened | Verdict |
+| --- | --- | --- | --- |
+| treatment (mode on) | 21 min | daemon logged `lid closed under a hold — locking the display` 4 s after closing; macOS logged `Display is turned off` the same second; 252 beats awake; lock screen on reopen | **the daemon locks a held Mac, and the hold survives it** |
+| release (mode on → off after 2 min) | 4 min | daemon logged `released with the lid closed — sleeping now`; macOS entered "Software Sleep" 5 s later and stayed asleep until reopened | **the daemon sleeps a closed Mac on release** |
+
+The `Display is turned off` notification in `pmset -g log` is the discriminator for the lock: it is absent in the unfixed 2-minute run (reopened to the desktop) and present, to the second, in both fixed runs.
+
 Two consequences, both now handled by the daemon:
 
 - **Clamshell sleep is edge-triggered.** It fires when the lid closes. If sleep was disabled at that moment, re-enabling it later does nothing until the idle timer expires — and an agent's own `caffeinate -i` stops that timer too. So when Vigil releases with the lid closed, it runs `pmset sleepnow`. Without this the thermal and battery guards would release the hold and leave the Mac running in the bag.

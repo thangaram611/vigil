@@ -78,8 +78,12 @@ cmd_trigger() {
             vigil mode off >/dev/null
             echo "$(date +%s) mode-off" >>"$events"
             sleep 180
-            echo "$(date +%s) sleepnow" >>"$events"
-            pmset sleepnow >/dev/null
+            # Only ever sleep a closed Mac: if it slept on its own, this timer was
+            # paused with it and resumes after the lid is already open again.
+            if [ "$(power_state | cut -d' ' -f2)" = Yes ]; then
+                echo "$(date +%s) sleepnow" >>"$events"
+                pmset sleepnow >/dev/null
+            fi
             ;;
         lock)
             sleep 20
