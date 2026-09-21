@@ -25,6 +25,7 @@ That was decided on 2026-09-20. The category is covered — [`adrafinil`](https:
 
 ## Open
 
+- **Per-session activity (next).** "Active agents" counts open sessions, not working ones, holds for five minutes after a turn ends, and misses Codex inside ChatGPT.app entirely. Plan, with the measurements behind it: [`future/phase-8-per-session-activity.md`](./future/phase-8-per-session-activity.md).
 - **New agent surfaces** — only when one is installed here and can be verified live. Sketch: [`future/phase-N-agent-surface-refresh.md`](./future/phase-N-agent-surface-refresh.md).
 - **Conflict detection** against other sleep holders. Sketch: [`future/phase-N-conflict-detection.md`](./future/phase-N-conflict-detection.md).
 
