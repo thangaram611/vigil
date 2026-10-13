@@ -40,7 +40,11 @@ impl State {
             State::Down
         } else if t.engaged {
             State::Holding
-        } else if t.mode.demand(t.refcount_active) == 0 {
+        } else if t
+            .mode
+            .demand(t.refcount_active.max(u32::from(t.grace_remaining > 0)))
+            == 0
+        {
             State::Idle
         } else if t.thermal_cut || t.cooling {
             State::Thermal
@@ -73,6 +77,12 @@ impl State {
     }
 }
 
+fn count(value: Option<u32>) -> String {
+    value
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "unknown".into())
+}
+
 /// Render the whole menu. `requested` is the mode file (so a click shows at
 /// once, before the daemon's next tick); `exe` is this binary, for the actions.
 fn render(tick: Option<&TickSnapshot>, requested: Mode, now: i64, exe: &str) -> String {
@@ -90,7 +100,35 @@ fn render(tick: Option<&TickSnapshot>, requested: Mode, now: i64, exe: &str) -> 
     o.push_str("---\n");
     let _ = writeln!(o, "{}", state.sentence());
     if let Some(t) = tick.filter(|_| state != State::Down) {
-        let _ = writeln!(o, "Active agents: {}", t.refcount_active);
+        if let (Some(working), Some(waiting), Some(idle), Some(unknown)) =
+            (t.working, t.waiting, t.idle, t.unknown)
+        {
+            let _ = writeln!(
+                o,
+                "Sessions: {working} working, {waiting} waiting, {idle} idle, {unknown} unknown"
+            );
+            let _ = writeln!(
+                o,
+                "Detected hosts: {} · wrappers: {} · uncertain demand: {}",
+                count(t.detected_hosts),
+                count(t.wrappers),
+                count(t.uncertain)
+            );
+            if t.vscode == Some(true) {
+                o.push_str("VS Code Copilot Chat demand\n");
+            }
+        } else {
+            o.push_str("Session counts unknown — legacy tick\n");
+        }
+        let _ = writeln!(o, "Policy: {}", t.policy_reason());
+        if t.grace_remaining > 0 {
+            let _ = writeln!(o, "Release grace: {}s remaining", t.grace_remaining);
+        }
+        let _ = writeln!(
+            o,
+            "Cached evaluation: {}s ago",
+            now.saturating_sub(t.updated_at).max(0)
+        );
     }
     o.push_str("---\n");
     for (label, m) in [
@@ -106,6 +144,10 @@ fn render(tick: Option<&TickSnapshot>, requested: Mode, now: i64, exe: &str) -> 
         );
     }
     o.push_str("---\n");
+    let _ = writeln!(
+        o,
+        "Refresh now | bash=\"{exe}\" param0=refresh terminal=false refresh=true"
+    );
     let _ = writeln!(o, "Status… | bash=\"{exe}\" param0=status terminal=true");
     let _ = writeln!(
         o,
@@ -144,6 +186,8 @@ mod tests {
             battery_cut: false,
             cooling: false,
             mode: Mode::Auto,
+            working: Some(2),
+            ..Default::default()
         }
     }
 
@@ -151,6 +195,7 @@ mod tests {
     fn state_table() {
         let idle = TickSnapshot {
             refcount_active: 0,
+            working: Some(0),
             desired_hold: false,
             engaged: false,
             ..tick()
@@ -170,12 +215,12 @@ mod tests {
                 State::Down,
             ),
             ("engaged", Some(tick()), State::Holding),
-            ("no agents", Some(idle), State::Idle),
+            ("no agents", Some(idle.clone()), State::Idle),
             (
                 "mode off hides active agents",
                 Some(TickSnapshot {
                     mode: Mode::Off,
-                    ..released
+                    ..released.clone()
                 }),
                 State::Idle,
             ),
@@ -183,7 +228,7 @@ mod tests {
                 "mode on with no agents, not yet engaged",
                 Some(TickSnapshot {
                     mode: Mode::On,
-                    ..idle
+                    ..idle.clone()
                 }),
                 State::Engaging,
             ),
@@ -191,7 +236,7 @@ mod tests {
                 "thermal cut",
                 Some(TickSnapshot {
                     thermal_cut: true,
-                    ..released
+                    ..released.clone()
                 }),
                 State::Thermal,
             ),
@@ -199,7 +244,7 @@ mod tests {
                 "cooldown",
                 Some(TickSnapshot {
                     cooling: true,
-                    ..released
+                    ..released.clone()
                 }),
                 State::Thermal,
             ),
@@ -207,7 +252,7 @@ mod tests {
                 "battery cut",
                 Some(TickSnapshot {
                     battery_cut: true,
-                    ..released
+                    ..released.clone()
                 }),
                 State::Battery,
             ),
@@ -216,7 +261,7 @@ mod tests {
                 Some(TickSnapshot {
                     thermal_cut: true,
                     battery_cut: true,
-                    ..released
+                    ..released.clone()
                 }),
                 State::Thermal,
             ),
@@ -232,12 +277,16 @@ mod tests {
         let want = " | sfimage=cup.and.saucer.fill\n\
             ---\n\
             Holding — this Mac will not sleep\n\
-            Active agents: 2\n\
+            Sessions: 2 working, 0 waiting, 0 idle, 0 unknown\n\
+            Detected hosts: 0 · wrappers: 0 · uncertain demand: 0\n\
+            Policy: working-sessions\n\
+            Cached evaluation: 3s ago\n\
             ---\n\
             Auto — follow agents | checked=true bash=\"/a b/vigil\" param0=mode param1=auto terminal=false refresh=true\n\
             Keep awake | checked=false bash=\"/a b/vigil\" param0=mode param1=on terminal=false refresh=true\n\
             Never hold | checked=false bash=\"/a b/vigil\" param0=mode param1=off terminal=false refresh=true\n\
             ---\n\
+            Refresh now | bash=\"/a b/vigil\" param0=refresh terminal=false refresh=true\n\
             Status… | bash=\"/a b/vigil\" param0=status terminal=true\n\
             Log… | bash=\"/a b/vigil\" param0=log param1=-f terminal=true\n";
         assert_eq!(render(Some(&tick()), Mode::Auto, NOW, "/a b/vigil"), want);
@@ -259,6 +308,35 @@ mod tests {
     fn daemon_down_hides_the_agent_count() {
         let menu = render(None, Mode::Off, NOW, "vigil");
         assert!(menu.starts_with("OFF | sfimage=exclamationmark.triangle\n"));
-        assert!(!menu.contains("Active agents"), "{menu}");
+        assert!(!menu.contains("Sessions:"), "{menu}");
+    }
+    #[test]
+    fn grace_remains_visible_without_fabricating_working_sessions() {
+        let t = TickSnapshot {
+            working: Some(0),
+            refcount_active: 0,
+            grace_remaining: 12,
+            ..tick()
+        };
+        let menu = render(Some(&t), Mode::Auto, NOW, "vigil");
+        assert!(menu.contains("Sessions: 0 working"));
+        assert!(menu.contains("Policy: release-grace"));
+        assert!(menu.contains("Release grace: 12s remaining"));
+        assert!(menu.contains("Refresh now | bash=\"vigil\" param0=refresh"));
+    }
+
+    #[test]
+    fn legacy_count_is_not_presented_as_session_count() {
+        let t = TickSnapshot {
+            version: 1,
+            working: None,
+            waiting: None,
+            idle: None,
+            unknown: None,
+            ..tick()
+        };
+        let menu = render(Some(&t), Mode::Auto, NOW, "vigil");
+        assert!(menu.contains("Session counts unknown — legacy tick"));
+        assert!(!menu.contains("Sessions:"));
     }
 }

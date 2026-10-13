@@ -1,0 +1,215 @@
+{
+  "captured_at": "2026-10-13",
+  "repository_head": "5df1f8a",
+  "format": "selected native records with text/path redaction; not complete logs",
+  "files": [
+    {
+      "file": "copilot-shells-1.0.95.jsonl",
+      "sha256": "9f206dd6f4d9e2b49085fcfb2b8daf811bc5e3c87fb6ad4f43c8023aff317e38",
+      "source_sha256": "556f8cd37e71bbeaae02f8814a8c5341876af189ecf7f00efe3930beea01e871",
+      "source_name": "events.jsonl",
+      "records": 41,
+      "note": "Native envelopes and lifecycle fields retained. Message bodies, command text and unrelated telemetry omitted."
+    },
+    {
+      "file": "copilot-subagents-1.0.95.jsonl",
+      "sha256": "02fc7548673d251d2160eea1ada53464d34df2b36b9d38bb9d6f86279561bf9d",
+      "source_sha256": "95f3213bdd78561c4e39df96b631949cbf306fb1487ff19b08e1639fead897c8",
+      "source_name": "events.jsonl",
+      "records": 75,
+      "note": "Native envelopes and lifecycle fields retained. Message bodies, command text and unrelated telemetry omitted."
+    },
+    {
+      "file": "claude-parent-2.1.296.jsonl",
+      "sha256": "b53256140d028eb164b2726de95e62d80db4ef7afa2edc60ad2c535b48b2fb7a",
+      "source_sha256": "4ad3b5a7ecb773e5e6a98f13c9159fa8c68d055f8a1f1272a96453e058ab3585",
+      "source_name": "94291bcb-f77e-4e69-b676-2722f208e40a.jsonl",
+      "records": 11,
+      "note": "Native envelopes retained; transcript prose and tool inputs/outputs elided."
+    },
+    {
+      "file": "claude-child-2.1.296.jsonl",
+      "sha256": "d044464e1a3d0dba1bf6c7a0016c0a9054d9fd7d2b0c3c5cf8db45478795503f",
+      "source_sha256": "191f659b72c6120eee4361d52df163c30c66612209da788f87d3fa63489b838d",
+      "source_name": "agent-aecf9ba24458d94db.jsonl",
+      "records": 71,
+      "note": "Native envelopes retained; transcript prose and tool inputs/outputs elided."
+    },
+    {
+      "file": "claude-child-meta.json",
+      "sha256": "b90e2b197c45d76534d3cafe265666bb5f22888c22d00d02d6712f67c795a88c",
+      "source_sha256": "f1b9708f56854454d182a2430dc3b89c3342b41066c2265386f564290af2acf8",
+      "source_name": "agent-aecf9ba24458d94db.meta.json",
+      "records": null,
+      "note": ""
+    },
+    {
+      "file": "claude-wait-observations.json",
+      "sha256": "37fcec5b32c2c49de7e0b266991ecaa7f3c25e3aae3f2f78d90d1a17f2f77be5",
+      "source_sha256": "a6a69b6b2992bd1b5966966b51cdb4d22a423ffa9ca28f718b6786f4cbdb8dbb",
+      "source_name": "samples.jsonl",
+      "records": 16,
+      "note": "Observer samples, not provider log records. Child running intervals are in README/research timeline."
+    },
+    {
+      "file": "claude-loop-pending.json",
+      "sha256": "f2e9be7b37dc429424075a1dad3dd939b42feaf6a72f05b8dd2575ac3431b8c3",
+      "source_sha256": "7b3a194b95076bbac9dd70205d620c904f45c11da8395fdacdf5c519d795b6d1",
+      "source_name": "pending-snapshot.json",
+      "records": null,
+      "note": "Observer snapshot of native fields. final means after cancellation, not necessarily after worker exit."
+    },
+    {
+      "file": "claude-loop-cancelled.json",
+      "sha256": "f5a84be57e31089894043ee091f86bf31416169e2f97128fc321b345687ca979",
+      "source_sha256": "163df80ebeebccccdbf5fa58cb0c7470cddc9e804bcc4726d15e40f3ae51eeb3",
+      "source_name": "cancelled-snapshot.json",
+      "records": null,
+      "note": "Observer snapshot of native fields. final means after cancellation, not necessarily after worker exit."
+    },
+    {
+      "file": "claude-loop-final.json",
+      "sha256": "0a828ade89ed4f36d06482a7dff17b53af32e44eb20926846b4175f56bfb1c7b",
+      "source_sha256": "748cfb67d511597a60c2d5bb168dcab6844bfceb02895b1670c039c20c64768a",
+      "source_name": "final-snapshot.json",
+      "records": null,
+      "note": "Observer snapshot of native fields. final means after cancellation, not necessarily after worker exit."
+    },
+    {
+      "file": "codex-terminals.jsonl",
+      "sha256": "10dde2e123566fb21d609df6c99ed30c9e4f61b5131b93644bb3c19149a32bab",
+      "source_sha256": "862f8a40bcb93c12d77e1337ec9faccc16e5afb7adfdd786bf7ff19586e3d406",
+      "source_name": "rollout-2026-10-12T12-55-35-01a12f00-ab75-7cf3-84bc-52a10969528d.jsonl",
+      "records": 18,
+      "note": "Lifecycle-only native projection; tool code, arguments and outputs omitted. session_meta version is creation version."
+    },
+    {
+      "file": "codex-detached.jsonl",
+      "sha256": "96b3154fe8aa5314ad68cbb36c4cf9481e77f013e990ca19304980dbbf8be05d",
+      "source_sha256": "527f0a5c69b2b700fc16529905865e98fd4ee92d03f61f0c96b29276d74954b6",
+      "source_name": "rollout-2026-10-13T14-05-52-01a13467-6104-7ef0-b259-077e7eb29b14.jsonl",
+      "records": 4,
+      "note": "Lifecycle-only native projection; tool code, arguments and outputs omitted. session_meta version is creation version."
+    },
+    {
+      "file": "codex-approval-pending.jsonl",
+      "sha256": "cdc873969e6cde585b3e5468e1dd9ec66f983036010df3d823b5eb490f821807",
+      "source_sha256": "307802e3ffd6b225482c394cdac20c2d19873090c00f33988599c68d8f1aaad7",
+      "source_name": "codex-approval-pending-rollout.jsonl",
+      "records": 3,
+      "note": "Lifecycle-only native projection; tool code, arguments and outputs omitted. session_meta version is creation version."
+    },
+    {
+      "file": "codex-approval-finished.jsonl",
+      "sha256": "c20009d70f10b36a35da68378be485bfd027392db8051528936910fce541a040",
+      "source_sha256": "c880ff1d1312358c5e5591aa61c1161dd40d3163a2b5f294cc6635f305d9ac8c",
+      "source_name": "rollout-2026-10-13T14-12-29-01a1346d-6fc6-7212-87fe-2ebaba5c1389.jsonl",
+      "records": 5,
+      "note": "Lifecycle-only native projection; tool code, arguments and outputs omitted. session_meta version is creation version."
+    },
+    {
+      "file": "codex-approval-rpc.json",
+      "sha256": "b2632ca7d34739dcf03afc61bd49de0dfc4835738ee99eccfae633c9af7c31ae",
+      "source_sha256": "0f3530c4c987a28f7cd1d01be9429ae73e3fc656d223a776a31d841f77e9f975",
+      "source_name": "codex-approval-rpc.jsonl",
+      "records": 8,
+      "note": "Live API evidence from a dedicated app-server; NOT a rollout fixture or a supported connection to the desktop host."
+    },
+    {
+      "file": "codex-detached-observations.json",
+      "sha256": "a5a7fa0e4aec6085a4a45d39f5f1729c155ca6db7cfd30f36ece8c17bafde4d0",
+      "source_sha256": "380447f6c74a1254c1281c05034f29cdce8b30e03084b16b2aeef858d41dd4d3",
+      "source_name": "codex-summary.json",
+      "records": null,
+      "note": ""
+    },
+    {
+      "file": "local-analysis-result.json",
+      "sha256": "51bae0d6369db40d9e2c1178b945e5ae514333ec3bcec0e3190632106be01489",
+      "source_sha256": "d625ec6adbec97ed97656da7e3833a4844072df338dd54fe35f746b44b9ca74a",
+      "source_name": "local-analysis-result.json",
+      "records": null,
+      "note": "Rust program linked to current Vigil and sysinfo rlibs; no production edits."
+    },
+    {
+      "file": "claude-subagent-summary.json",
+      "sha256": "6d1886beea7a83bf92ca29bd14259491b2aadf591e8fe79eba483b819479d792",
+      "source_sha256": "e993cefa8cf3f788554e9e0789312cb62eefa3411f5eb9460adad64fb271685b",
+      "source_name": "summary.json",
+      "records": null,
+      "note": "Reduced prior experiment summary retained for timing and cleanup; paths normalized."
+    },
+    {
+      "file": "codex-terminals-summary.json",
+      "sha256": "fe772a90da604be3f1e8f9334271e2b9f3d83e9ac97fc0c32aab635b84936981",
+      "source_sha256": "203db9a8ef39a0b6cf845264744535739f2aae2196c4294453a54134f94f229a",
+      "source_name": "summary.json",
+      "records": null,
+      "note": "Reduced prior experiment summary retained for timing and cleanup; paths normalized."
+    },
+    {
+      "file": "provider-shells-summary.json",
+      "sha256": "ba0d9df90b125929a38f692e6071256f049b9c94b6609ace1cd58bf1da3f66da",
+      "source_sha256": "76af6b323eb7f03488f614f4b4ff5f682ae0501bc99cfd484715a82c2d91ccb6",
+      "source_name": "summary.json",
+      "records": null,
+      "note": "Reduced prior experiment summary retained for timing and cleanup; paths normalized."
+    },
+    {
+      "file": "claude-source-findings.json",
+      "sha256": "ad64efd96d392badd0ca3d862e3c101bede285e56b06c54c0f38d8ecbeb74cbd",
+      "source_sha256": null,
+      "source_name": null,
+      "records": null,
+      "note": "Installed source offsets and hashes; no raw proprietary source."
+    },
+    {
+      "file": "codex-thread-status-schema.json",
+      "sha256": "26f3c60c1b73f7fa2d31c74429cdc36f8746c76c33e3d314b3fb61d3661f05f6",
+      "source_sha256": null,
+      "source_name": null,
+      "records": null,
+      "note": "Schema generated by installed Codex binary; API type, not disk record."
+    },
+    {
+      "file": "copilot-subagents-summary.json",
+      "sha256": "d558b520317540186248e5ff1faabefc2cfe33d7ffe99cca143d663406ee17c3",
+      "source_sha256": null,
+      "source_name": null,
+      "records": null,
+      "note": "October 13 lifecycle observations and child shell marker."
+    }
+  ],
+  "versions": {
+    "claude": "2.1.296",
+    "codex": "0.162.0-alpha.17.2",
+    "copilot": "1.0.95",
+    "sysinfo": "0.39.3"
+  },
+  "today_cleanup": {
+    "claude_cli_exit": 0,
+    "copilot_cli_exit": 0,
+    "recorder_samples": 732,
+    "recorder_stopped": true,
+    "codex_dedicated_servers_exit": [
+      0,
+      0,
+      0
+    ],
+    "detached_workload_finished": true,
+    "known_probe_pids_absent": true,
+    "approval_fixture_created": false
+  },
+  "claude_new_live_probe": {
+    "result": "provider safeguard blocked setup before tools",
+    "model_switch": false,
+    "lifecycle_cases_not_run": [
+      "cancel",
+      "failure",
+      "resume",
+      "child permission",
+      "fixed cron",
+      "detached worker restart"
+    ]
+  }
+}

@@ -56,7 +56,11 @@ fn debug_json_has_expected_keys() {
     assert!(v.get("refcount").is_some(), "json has refcount");
     let rc = v.get("refcount").unwrap();
     assert!(rc.get("total").is_some());
-    assert!(rc.get("filtered").is_some());
+    assert!(
+        rc.get("filtered").is_none(),
+        "registrations are not working sessions"
+    );
+    assert!(v.get("activity").is_some(), "shared activity snapshot");
     assert!(rc.get("by_prefix").is_some());
 }
 

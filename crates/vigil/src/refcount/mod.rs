@@ -261,7 +261,7 @@ pub fn gc_decision(
 }
 
 /// `kill(pid, 0) == 0` — true iff the PID exists (and we may signal it).
-fn pid_alive(pid: u32) -> bool {
+pub(crate) fn pid_alive(pid: u32) -> bool {
     // SAFETY: kill with signal 0 performs no signal delivery, only existence /
     // permission checking; always safe to call.
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }

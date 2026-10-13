@@ -90,9 +90,56 @@ fn basename(comm: &str) -> &str {
     }
 }
 
+pub(crate) fn process_role<'a>(comm: &str, command_line: &'a str) -> &'a str {
+    command_line
+        .strip_prefix(comm)
+        .or_else(|| command_line.strip_prefix(basename(comm)))
+        .and_then(|s| s.strip_prefix(' '))
+        .or_else(|| {
+            command_line
+                .split_once(' ')
+                .filter(|(arg, _)| basename(arg) == basename(comm))
+                .map(|(_, rest)| rest)
+        })
+        .unwrap_or("")
+}
 /// Classify one `(pid, comm, command_line)` triple. Returns `None` when bash
 /// emits no row.
 pub fn detect_line(pid: u32, comm: &str, command_line: &str) -> Option<AgentMatch> {
+    let role = process_role(comm, command_line).to_owned();
+    let mut tokens = role.split_whitespace();
+    let mut command = tokens.next().unwrap_or("");
+    while command == "-c" || command == "--config" {
+        tokens.next();
+        command = tokens.next().unwrap_or("");
+    }
+    if [
+        "exec-server",
+        "--version",
+        "-V",
+        "--help",
+        "-h",
+        "agents",
+        "attach",
+        "supervisor",
+        "daemon",
+        "bg-pty-host",
+    ]
+    .contains(&command)
+    {
+        return None;
+    }
+    if (comm.ends_with("/codex-cli/CodexCLI.app/Contents/MacOS/codex")
+        || comm.ends_with("/ChatGPT.app/Contents/Resources/codex"))
+        && command == "app-server"
+    {
+        return Some(AgentMatch {
+            pid,
+            kind: AgentKind::AppCodex,
+            exe: comm.to_owned(),
+            args: role,
+        });
+    }
     // 1. Codex.app main process — carved out BEFORE /Applications/ exclusion.
     if comm.ends_with("/Codex.app/Contents/MacOS/Codex") {
         return Some(AgentMatch {

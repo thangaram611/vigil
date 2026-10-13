@@ -1,0 +1,50 @@
+{
+  "version": "2.1.296",
+  "binary_sha256": "c9b5341637becbd423ddffc5b254afb645682a3868cb708bbc6cc0e7bb419937",
+  "binary_size": 240664432,
+  "claims": [
+    {
+      "offset_start": 199458705,
+      "offset_end_exclusive": 199461000,
+      "sha256": "71bfd942327d0261ce8ba4d1c0096876e2f86ab4ea30644219b1a9712abf0f2c",
+      "finding": "Native agent notification builds completed/failed/killed status and optional runId; task ID may notify repeatedly; child background work can survive a reported completion.",
+      "confidence": "installed source; not a live lifecycle measurement"
+    },
+    {
+      "offset_start": 199461000,
+      "offset_end_exclusive": 199465900,
+      "sha256": "2ec339d039dd455d24d1d8a9a39fd8cf9b917f3cd7b6c86bd6a78e7c3d23e25c",
+      "finding": "Agent cancellation changes in-memory lifecycle to killed, aborts controller and handles owned orphan shell work; this does not establish every persisted cancellation path.",
+      "confidence": "installed source; not a live lifecycle measurement"
+    },
+    {
+      "offset_start": 199776800,
+      "offset_end_exclusive": 199778500,
+      "sha256": "31266470eda42555800dfc03c5504d8eaa3a54468f2fd508cdce14e8ed00339f",
+      "finding": "Agent metadata writer supports toolUseId, parentAgentId, stoppedByUser, spawnDepth and requestShape.",
+      "confidence": "installed source; not a live lifecycle measurement"
+    },
+    {
+      "offset_start": 194961000,
+      "offset_end_exclusive": 194965500,
+      "sha256": "80aa23a77d816d6639d887453d775a6991894aa5154ba9c380128631e9c6574a",
+      "finding": "Scheduler has in-memory task creation and durable project-file branches with session/process/project owner fields.",
+      "confidence": "installed source; not a live lifecycle measurement"
+    },
+    {
+      "offset_start": 195145000,
+      "offset_end_exclusive": 195149500,
+      "sha256": "181102d12c05d64b97e396fcf9db5cda3f8a0fcce6380d77a8983692fb0d6f93",
+      "finding": "inFlight includes session_cron tasks; wake details are derived specifically from loop-kind task; liveness checks PID, process start and zombie.",
+      "confidence": "installed source; not a live lifecycle measurement"
+    },
+    {
+      "offset_start": 202133750,
+      "offset_end_exclusive": 202135400,
+      "sha256": "b01f45a7deb97749c5f7217c94440e3a5491fd937ca1e13f1ee2bca4ae611fb1",
+      "finding": "Pending-wakeup sidecar uses bounded read and schema; serial write/remove operations are tied to background-session scheduling.",
+      "confidence": "installed source; not a live lifecycle measurement"
+    }
+  ],
+  "proprietary_source_copied": false
+}

@@ -1,0 +1,83 @@
+[
+  {
+    "at": 1791880949.982272,
+    "method": "thread/status/changed",
+    "params": {
+      "threadId": "01a1346d-6fc6-7212-87fe-2ebaba5c1389",
+      "status": {
+        "type": "active",
+        "activeFlags": []
+      }
+    }
+  },
+  {
+    "at": 1791880949.9824011,
+    "method": "turn/started",
+    "params": {
+      "threadId": "01a1346d-6fc6-7212-87fe-2ebaba5c1389"
+    }
+  },
+  {
+    "at": 1791880960.040722,
+    "method": "thread/status/changed",
+    "params": {
+      "threadId": "01a1346d-6fc6-7212-87fe-2ebaba5c1389",
+      "status": {
+        "type": "active",
+        "activeFlags": [
+          "waitingOnApproval"
+        ]
+      }
+    }
+  },
+  {
+    "at": 1791880960.0412228,
+    "method": "item/commandExecution/requestApproval",
+    "params": {
+      "kind": "command",
+      "threadId": "01a1346d-6fc6-7212-87fe-2ebaba5c1389",
+      "turnId": "01a1346d-7015-7721-a3b8-45f7d3e8a378",
+      "itemId": "exec-e56d8f53-e598-4b1e-924d-3ff8ca4e8ae7",
+      "startedAtMs": 1791880960040,
+      "environmentId": "local"
+    }
+  },
+  {
+    "at": 1791880963.055731,
+    "method": "thread/status/changed",
+    "params": {
+      "threadId": "01a1346d-6fc6-7212-87fe-2ebaba5c1389",
+      "status": {
+        "type": "active",
+        "activeFlags": []
+      }
+    }
+  },
+  {
+    "at": 1791880966.203517,
+    "method": "thread/status/changed",
+    "params": {
+      "threadId": "01a1346d-6fc6-7212-87fe-2ebaba5c1389",
+      "status": {
+        "type": "idle"
+      }
+    }
+  },
+  {
+    "at": 1791880966.2044091,
+    "method": "turn/completed",
+    "params": {
+      "threadId": "01a1346d-6fc6-7212-87fe-2ebaba5c1389"
+    }
+  },
+  {
+    "at": 1791880966.208544,
+    "method": "thread/status/changed",
+    "params": {
+      "threadId": "01a1346d-6fc6-7212-87fe-2ebaba5c1389",
+      "status": {
+        "type": "notLoaded"
+      }
+    }
+  }
+]

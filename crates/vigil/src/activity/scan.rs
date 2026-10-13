@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 /// The three CLI agents with a session-dir activity signal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Agent {
     Claude,
     Codex,
@@ -51,7 +51,7 @@ impl Agent {
 ///
 /// claude: `Suffix(".jsonl")`; codex: `PrefixSuffix("rollout-", ".jsonl")`;
 /// copilot: `Exact("events.jsonl")`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AgentGlob {
     Exact(&'static str),
     Suffix(&'static str),
@@ -95,6 +95,10 @@ fn mtime_secs(path: &Path) -> Option<i64> {
     let dur = mtime.duration_since(std::time::UNIX_EPOCH).ok()?;
     Some(dur.as_secs() as i64)
 }
+/// Exact-file fallback eligibility, without borrowing a sibling's activity.
+pub fn recent_file(path: &Path, idle_after_sec: u32, now: i64) -> bool {
+    mtime_secs(path).is_some_and(|mtime| now - mtime < window_secs(idle_after_sec))
+}
 
 /// True iff any file under `dir` whose name matches `pattern` (recursive, like
 /// `find -type f -name PAT`) was modified within the idle window measured from
@@ -111,6 +115,17 @@ fn mtime_secs(path: &Path) -> Option<i64> {
 /// N minutes). Short-circuits on the first matching recent file (mirrors
 /// `find ... -print -quit`). Fully recursive (no maxdepth), mirroring `find`.
 pub fn is_active(dir: &Path, pattern: AgentGlob, idle_after_sec: u32, now: i64) -> bool {
+    is_active_where(dir, pattern, idle_after_sec, now, |_| true)
+}
+
+/// The same bounded fallback, restricted to evidence the caller has not resolved.
+pub fn is_active_where(
+    dir: &Path,
+    pattern: AgentGlob,
+    idle_after_sec: u32,
+    now: i64,
+    eligible: impl Fn(&Path) -> bool,
+) -> bool {
     if !dir.is_dir() {
         return false;
     }
@@ -122,7 +137,7 @@ pub fn is_active(dir: &Path, pattern: AgentGlob, idle_after_sec: u32, now: i64) 
         let Some(name) = entry.file_name().to_str() else {
             continue;
         };
-        if !pattern.matches(name) {
+        if !pattern.matches(name) || !eligible(entry.path()) {
             continue;
         }
         if let Some(m) = mtime_secs(entry.path())
@@ -163,7 +178,7 @@ pub fn latest_activity_age_secs(dir: &Path, pattern: AgentGlob, now: i64) -> Opt
 }
 
 /// Tri-state for status: None = dir absent; else Active/Idle from [`is_active`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AgentState {
     None,
     Active,

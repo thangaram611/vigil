@@ -21,6 +21,7 @@ pub mod lock;
 pub mod log;
 pub mod menubar;
 pub mod mode;
+pub mod refresh;
 pub mod reload;
 pub mod run;
 pub mod setup;

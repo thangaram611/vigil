@@ -1,0 +1,41 @@
+{
+  "at_utc": "2026-10-13T13:48:19.026886+00:00",
+  "doctor_exit": 0,
+  "doctor_readonly_responsiveness_warning": true,
+  "concurrent_refreshes": [
+    {
+      "exit": 0,
+      "output": "Holding \u2014 working-sessions (2 working, 0 waiting, 1 idle, 4 unknown; uncertain demand 1)",
+      "error": ""
+    },
+    {
+      "exit": 0,
+      "output": "Holding \u2014 working-sessions (2 working, 0 waiting, 1 idle, 4 unknown; uncertain demand 1)",
+      "error": ""
+    }
+  ],
+  "status_version": 2,
+  "tick_version": 2,
+  "daemon_identity_matches": true,
+  "scan_state": "fresh",
+  "policy_reason": "working-sessions",
+  "installed_sha256": "7f4c6decf19d02ee7515373619e5d825f9c0d976a74d67088bdd9a24ce40bbb3",
+  "release_sha256": "7f4c6decf19d02ee7515373619e5d825f9c0d976a74d67088bdd9a24ce40bbb3",
+  "installed_matches_release": true,
+  "required_cargo_checks": [
+    "fmt --check",
+    "build",
+    "clippy --workspace --all-targets -- -D warnings",
+    "test",
+    "test --features helper-test-seam"
+  ],
+  "core_activity_regressions_passed": 18,
+  "live_os_acceptance_passed": 15,
+  "physical_lid_sleep_tested": false,
+  "fresh_subagent_review": {
+    "actionable_blockers": 0,
+    "independent_core_regressions_passed": 18,
+    "independent_live_os_acceptance_passed": 15,
+    "descriptor_failure_recovery_passed": true
+  }
+}

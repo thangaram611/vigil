@@ -1,18 +1,10 @@
-//! `vigil status` — native render on the unified CheckEngine (Phase 5.7 §5.1–5.3).
-//!
-//! Three surfaces from ONE [`vigil::check::CheckEngine`] run:
-//!   - `--json` → the byte-stable [`StatusSnapshot::to_json`] emitter (the only
-//!     allowed diff vs the bash golden is the prepended `"version": 1,` key).
-//!   - default text → service / activity / power blocks + the `expected_hold`
-//!     sub-state + the suppressible `--verbose` hint.
-//!   - `--verbose` → the above plus provider-root rows and the raw assertion rows.
-//!
-//! Exit is ALWAYS 0 on the non-usage path; only a flag violation dies with the
-//! usage message and exit 1 (status NEVER returns 64 — that is top-level dispatch).
+//! `vigil status` — shared read-only activity, cached policy and power evidence.
+//! Exit is always 0 except for a usage violation.
 
 use std::ffi::OsString;
 
-use vigil::check::{CheckEngine, CheckMode, DaemonScanState, StatusSnapshot, TriState};
+use vigil::activity::scan::Agent;
+use vigil::check::{CheckEngine, CheckMode, DaemonScanState, StatusSnapshot};
 
 use super::{load_config_or_exit, now_unix};
 
@@ -49,9 +41,7 @@ pub fn run(args: Vec<OsString>) -> ! {
     let mode = parse(&args);
     let cfg = load_config_or_exit();
     let now = now_unix();
-    // Animate a spinner on stderr while the snapshot is gathered (the helper
-    // liveness probe can take a beat). Interactive-only → piped/CI output (incl.
-    // --json) stays byte-identical; the spinner draws to stderr and self-clears.
+    // Interactive-only spinner; piped machine output contains only JSON.
     let interactive = super::interactive(false);
     let report = super::tui::with_activity(interactive, "Gathering status…", || {
         CheckEngine::run(&cfg, CheckMode::Status, now)
@@ -60,8 +50,7 @@ pub fn run(args: Vec<OsString>) -> ! {
 
     match mode {
         Mode::Json => {
-            // Byte-stable schema (reuse the frozen emitter verbatim — plain print,
-            // no ANSI: machine output that must match the golden byte-for-byte).
+            // Deterministic schema, plain JSON without ANSI.
             print!("{}", snap.to_json());
         }
         Mode::Text { verbose } => {
@@ -71,7 +60,7 @@ pub fn run(args: Vec<OsString>) -> ! {
     std::process::exit(0);
 }
 
-// ── text render (byte-faithful to bash `cmd_status`) ──────────────────────────
+// Text rendering.
 
 /// The daemon-scan human text for each of the six states (bash
 /// `cmd_daemon_scan_info` column 3). `age` is the `daemon_scan_age_secs` (only set
@@ -94,13 +83,12 @@ fn yes_no(b: bool) -> &'static str {
 
 /// The per-agent `agents:` line (bash `cmd_agent_states_line_from_flags`).
 fn agents_line(snap: &StatusSnapshot) -> String {
-    let t = |s: TriState| s.as_str();
     format!(
         "claude={}  codex={}  copilot={}  vscode_copilot_chat={}",
-        t(snap.agent_claude),
-        t(snap.agent_codex),
-        t(snap.agent_copilot),
-        t(snap.agent_vscode_copilot_chat),
+        snap.activity.provider_state(Agent::Claude),
+        snap.activity.provider_state(Agent::Codex),
+        snap.activity.provider_state(Agent::Copilot),
+        snap.agent_vscode_copilot_chat,
     )
 }
 
@@ -156,7 +144,7 @@ fn expected_hold(snap: &StatusSnapshot) -> Option<&'static str> {
     if snap.hold_engaged {
         return None;
     }
-    let work = snap.refcount_active + snap.pending_active_matches;
+    let work = snap.activity.demand();
     if snap.mode.demand(work) == 0 {
         // Plain idle needs no explanation; `off` suppressing real work does.
         return (work > 0).then_some("off by manual mode ('vigil mode auto' to resume)");
@@ -177,37 +165,23 @@ fn expected_hold(snap: &StatusSnapshot) -> Option<&'static str> {
         DaemonScanState::Stale | DaemonScanState::Missing
     ) {
         "pending (daemon scan is unavailable; try 'vigil reload')"
-    } else if snap.pending_active_matches > 0 {
-        "pending (live matches are waiting for the next daemon scan)"
     } else {
         "pending (daemon/helper transition in progress)"
     })
 }
 
-/// `launchctl print system/{helper_label}` → loaded / not loaded (bash
-/// `cmd_helper_launchd_status`). Read-only probe; not a privilege-boundary path.
-fn helper_launchd_status() -> &'static str {
-    let target = format!("system/{}", vigil::service::HELPER_LABEL);
-    let ok = std::process::Command::new("launchctl")
-        .args(["print", &target])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if ok { "loaded" } else { "not loaded" }
-}
-
-/// Render the full plain/verbose status text (byte-faithful to bash `cmd_status`).
-/// Uses anstream println so `--color` stripping is honored; the operational
-/// strings + spacing are identical to the captured golden.
+/// Render live activity and label the age and identity of cached daemon policy.
 fn render_text(snap: &StatusSnapshot, verbose: bool) {
     let daemon_pid = match snap.daemon_pid {
         Some(p) => p.to_string(),
         None => "-".to_string(),
     };
     let scan = scan_text(snap.daemon_scan_state, snap.daemon_scan_age_secs);
-    let helper = helper_launchd_status();
+    let helper = if snap.power_helper.launchd_loaded {
+        "loaded"
+    } else {
+        "not loaded"
+    };
 
     anstream::println!("vigil status");
     anstream::println!();
@@ -215,15 +189,43 @@ fn render_text(snap: &StatusSnapshot, verbose: bool) {
     anstream::println!("    launchd:      {}", yes_no(snap.launchd_loaded));
     anstream::println!("    daemon pid:    {daemon_pid}");
     anstream::println!("    scan:          {scan}");
-    anstream::println!("    root helper:   {helper}");
+    anstream::println!("    root helper:   {helper}; responsiveness unchecked");
     anstream::println!();
     anstream::println!("  activity");
     anstream::println!(
-        "    refcount:      {} active / {} total (idle window {}m)",
-        snap.refcount_active,
-        snap.refcount_total,
-        snap.idle_window_minutes,
+        "    sessions:      {} working / {} waiting / {} idle / {} unknown",
+        snap.activity.working(),
+        snap.activity.waiting(),
+        snap.activity.idle(),
+        snap.activity.unknown(),
     );
+    anstream::println!(
+        "    demand:        {} wrappers / {} uncertain / vscode={}",
+        snap.activity.wrappers,
+        snap.activity.uncertain(),
+        yes_no(snap.activity.vscode),
+    );
+    anstream::println!(
+        "    hosts:         {} detected",
+        snap.activity.detected_hosts
+    );
+    if let Some(policy) = &snap.cached_policy {
+        anstream::println!(
+            "    cached policy: {} ({}s ago; identity {})",
+            policy.policy_reason(),
+            snap.cached_policy_age_secs.unwrap_or(0),
+            if snap.cached_policy_identity_matches {
+                "matches"
+            } else {
+                "unverified"
+            },
+        );
+        if policy.version == 1 {
+            anstream::println!(
+                "                   legacy policy; session counts unavailable; refresh unsupported"
+            );
+        }
+    }
     anstream::println!("    agents:        {}", agents_line(snap));
     match snap.mode {
         vigil::mode::Mode::Auto => {}
@@ -231,12 +233,6 @@ fn render_text(snap: &StatusSnapshot, verbose: bool) {
             anstream::println!("    manual mode:   on (holding regardless of agents)")
         }
         vigil::mode::Mode::Off => anstream::println!("    manual mode:   off (never holding)"),
-    }
-    if snap.pending_active_matches > 0 {
-        anstream::println!(
-            "    pending scan:  {} live match(es) not counted yet",
-            snap.pending_active_matches,
-        );
     }
     anstream::println!();
     anstream::println!("  power");
@@ -250,20 +246,49 @@ fn render_text(snap: &StatusSnapshot, verbose: bool) {
 
     if verbose {
         anstream::println!();
+        anstream::println!("  sessions:");
+        for session in &snap.activity.sessions {
+            anstream::println!(
+                "    {} {}: {} ({}, {}){}",
+                session.provider,
+                session.id,
+                session.state.as_str(),
+                session.evidence,
+                session.reason,
+                session
+                    .foreground_wait
+                    .as_deref()
+                    .map(|wait| format!("; foreground wait={wait}"))
+                    .unwrap_or_default(),
+            );
+        }
+        anstream::println!();
         anstream::println!("  provider roots:");
         // bash `cmd_provider_roots_text | sed 's/^/    /'`: two lines per agent,
         // base-indented then shifted 4 more.
         for (name, p, state) in [
-            ("claude", &snap.provider_claude, snap.agent_claude),
-            ("codex", &snap.provider_codex, snap.agent_codex),
-            ("copilot", &snap.provider_copilot, snap.agent_copilot),
+            (
+                "claude",
+                &snap.provider_claude,
+                snap.activity.provider_state(Agent::Claude),
+            ),
+            (
+                "codex",
+                &snap.provider_codex,
+                snap.activity.provider_state(Agent::Codex),
+            ),
+            (
+                "copilot",
+                &snap.provider_copilot,
+                snap.activity.provider_state(Agent::Copilot),
+            ),
         ] {
             anstream::println!("      {name:<7} home={}", p.home);
             anstream::println!(
                 "              session={} exists={} state={}",
                 p.session_dir,
                 yes_no(p.exists),
-                state.as_str(),
+                state,
             );
         }
         anstream::println!();
@@ -272,7 +297,7 @@ fn render_text(snap: &StatusSnapshot, verbose: bool) {
     } else {
         anstream::println!();
         anstream::println!(
-            "  detail: use 'vigil status --verbose' for provider paths and assertion rows"
+            "  detail: use 'vigil status --verbose' for session evidence, provider paths and assertion rows"
         );
     }
 }

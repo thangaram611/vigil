@@ -1,0 +1,5 @@
+{
+  "compile_exit": 0,
+  "run_exit": 0,
+  "output": "scoped_environment_read=PASS start_time_nonzero=true parent_present=true\ndelayed_wrapper_registration=DropPidReuse (bug reproduced; intended Keep)\n"
+}

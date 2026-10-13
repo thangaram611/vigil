@@ -4,6 +4,27 @@ Vigil is a personal macOS tool: there are no version tags or releases, and none
 are planned. Everything below is history at a high level. Per-commit detail
 lives in `git log`; scope lives in [`ROADMAP.md`](./ROADMAP.md).
 
+## Per-session activity — 2026-10-13
+
+- Shared Claude, Codex and Copilot session reducers replace provider-wide
+  active-pidfile counts. Native waits, independent commands/children and
+  supported background loop gaps have separate evidence; unobservable state is
+  reported as unknown with explicit uncertain demand.
+- One process collector supplies identity/ownership. Wrapper registration now
+  uses actual process birth, retaining PID-reuse protection. Quiet verified work
+  has no arbitrary transcript timeout; recent-file fallback is bounded and labeled.
+- Automatic demand gets a monotonic 30-second release grace. `vigil refresh`
+  and menu **Refresh now** request a token/identity-bound post-action evaluation
+  with a single 2-second deadline. Guards/manual-off consume old grace.
+- Status JSON and daemon tick schemas are version 2. Fresh activity and cached
+  policy are separate; legacy ticks have unknown counts and cannot refresh.
+- `status`, `doctor` and `debug` no longer write helper health requests. Helper
+  installation is checked read-only; responsiveness is explicitly unchecked and
+  warns without failing valid static installation.
+- Codex approval waits, cold orphan ownership and unmeasured Desktop/remote paths
+  remain coverage limits. Native fixtures and the research handoff preserve the
+  difference between live measurements, source evidence and synthetic tests.
+
 ## Scope reset — 2026-09-20
 
 - **Personal macOS tool.** Linux (5.8), Windows (5.9), the native tray app, and

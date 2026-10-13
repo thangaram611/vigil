@@ -1,10 +1,19 @@
-//! Per-agent activity model: the pure mtime scan ([`scan`]) and the vscode
-//! hash-gate ([`vscode`]).
-//!
-//! The pure cores (mtime scan, vscode transition) take paths/records and have no
-//! env reads, so they are exercised by cargo tests over temp dirs. The live IO
-//! wrappers (host probe, recent-file collection, the read/write daemon path)
-//! honor the test-seam env vars at the call site.
-
+//! Session-scoped activity. Collection is read-only; lifecycle reducers are pure.
+pub mod claude;
+pub mod codex;
+mod collector;
+pub mod copilot;
+pub mod jsonl;
+pub mod model;
 pub mod scan;
 pub mod vscode;
+pub use collector::ActivityCollector;
+pub use model::{ActivitySnapshot, SessionActivity, State};
+fn text<'a>(v: &'a serde_json::Value, key: &str) -> &'a str {
+    v[key].as_str().unwrap_or("")
+}
+fn timestamp(v: &serde_json::Value) -> i64 {
+    chrono::DateTime::parse_from_rfc3339(text(v, "timestamp"))
+        .map(|t| t.timestamp())
+        .unwrap_or(0)
+}

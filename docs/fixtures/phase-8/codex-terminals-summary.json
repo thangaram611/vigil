@@ -1,0 +1,142 @@
+{
+  "done": {
+    "at": "2026-10-12T07:32:47.889+00:00",
+    "reason": "requested",
+    "sample_count": 274,
+    "elapsed_sec": 274.045,
+    "cleanup": [
+      {
+        "case": "normal",
+        "pid": 95562,
+        "action": "absent_or_identity_changed"
+      },
+      {
+        "case": "interrupt",
+        "pid": 97891,
+        "action": "absent_or_identity_changed"
+      }
+    ]
+  },
+  "sampling_errors": 0,
+  "registry_errors": 0,
+  "parse_errors": {
+    "probe": 0,
+    "observer": 0
+  },
+  "owner_identity_matches_all": true,
+  "registry_probe_entries_observed": false,
+  "cleanup_pids_absent": [
+    95506,
+    95562,
+    97891
+  ],
+  "cleanup_workload_groups_absent": [
+    95562,
+    97891
+  ],
+  "cases": {
+    "normal": {
+      "turn_id": "01a12f03-1749-7af1-8a50-b7fb04073d79",
+      "events": [
+        {
+          "observed_at": "2026-10-12T07:28:14.919+00:00",
+          "source_at": "2026-10-12T07:28:14.163Z",
+          "type": "task_started",
+          "turn_id": "01a12f03-1749-7af1-8a50-b7fb04073d79"
+        },
+        {
+          "observed_at": "2026-10-12T07:28:24.928+00:00",
+          "source_at": "2026-10-12T07:28:23.932Z",
+          "type": "task_complete",
+          "turn_id": "01a12f03-1749-7af1-8a50-b7fb04073d79"
+        }
+      ],
+      "native_owner": {
+        "pid": 95562,
+        "codex_thread_id": "01a12f00-ab75-7cf3-84bc-52a10969528d"
+      },
+      "exit_receipt": {
+        "case": "normal",
+        "pid": 95562,
+        "at": "2026-10-12T07:29:49.957497+00:00",
+        "reason": "duration_completed"
+      },
+      "first_process_absent_sample": "2026-10-12T07:29:50.897+00:00",
+      "command_completion": {
+        "observed_at": "2026-10-12T07:29:50.897+00:00",
+        "source_at": "2026-10-12T07:29:49.960Z",
+        "thread_id": "01a12f00-ab75-7cf3-84bc-52a10969528d",
+        "turn_id": "01a12f03-1749-7af1-8a50-b7fb04073d79",
+        "item": {
+          "type": "CommandExecution",
+          "id": "exec-ae7068ab-99ae-4db8-8584-061fdcd7cd05",
+          "process_id": "8395",
+          "source": "unified_exec_startup",
+          "status": "completed",
+          "exit_code": 0,
+          "duration": {
+            "secs": 89,
+            "nanos": 929978167
+          }
+        }
+      },
+      "terminal_survival_after_turn_seconds": 86.025,
+      "live_after_turn_samples": 86,
+      "probe_turn_idle_in_all_live_after_turn_samples": true,
+      "observer_turn_active_in_all_live_after_turn_samples": true
+    },
+    "interrupt": {
+      "turn_id": "01a12f04-f022-7931-99d0-9299780921b6",
+      "events": [
+        {
+          "observed_at": "2026-10-12T07:30:15.919+00:00",
+          "source_at": "2026-10-12T07:30:15.207Z",
+          "type": "task_started",
+          "turn_id": "01a12f04-f022-7931-99d0-9299780921b6"
+        },
+        {
+          "observed_at": "2026-10-12T07:30:28.939+00:00",
+          "source_at": "2026-10-12T07:30:27.977Z",
+          "type": "turn_aborted",
+          "turn_id": "01a12f04-f022-7931-99d0-9299780921b6",
+          "reason": "interrupted"
+        }
+      ],
+      "native_owner": {
+        "at": "2026-10-12T07:30:39.411261+00:00",
+        "pid": 97891,
+        "present": true,
+        "codex_thread_id": "01a12f00-ab75-7cf3-84bc-52a10969528d"
+      },
+      "exit_receipt": {
+        "case": "interrupt",
+        "pid": 97891,
+        "at": "2026-10-12T07:32:20.819296+00:00",
+        "reason": "duration_completed"
+      },
+      "first_process_absent_sample": "2026-10-12T07:32:20.903+00:00",
+      "command_completion": {
+        "observed_at": "2026-10-12T07:32:20.903+00:00",
+        "source_at": "2026-10-12T07:32:20.828Z",
+        "thread_id": "01a12f00-ab75-7cf3-84bc-52a10969528d",
+        "turn_id": "01a12f04-f022-7931-99d0-9299780921b6",
+        "item": {
+          "type": "CommandExecution",
+          "id": "exec-1926ab62-59f6-41e1-b521-859c553a1eeb",
+          "process_id": "86423",
+          "source": "unified_exec_startup",
+          "status": "completed",
+          "exit_code": 0,
+          "duration": {
+            "secs": 119,
+            "nanos": 940740834
+          }
+        }
+      },
+      "terminal_survival_after_turn_seconds": 112.842,
+      "live_after_turn_samples": 112,
+      "probe_turn_idle_in_all_live_after_turn_samples": true,
+      "observer_turn_active_in_all_live_after_turn_samples": true
+    }
+  }
+}

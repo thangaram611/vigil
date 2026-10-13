@@ -22,11 +22,11 @@ communicate only through a per-uid, file-based IPC queue. A third native binary,
                                        ▼
    ┌────────────────────────────────────────────────────────────────┐
    │ vigil daemon  (Rust tick loop, default 5s, VIGIL_TICK_SECS)    │
-   │  ├─ procscan: one long-lived sysinfo::System, refresh cmd+exe  │
+   │  ├─ procscan: one sysinfo::System, process identities           │
    │  │     match: cli-claude/codex/copilot, app-codex,             │
    │  │            app-vscode-copilot-chat                          │
    │  ├─ refcount: one *.pid file per match in state/active/        │
-   │  ├─ activity gates: session-mtime (claude/codex/copilot) +     │
+   │  ├─ activity: per-session reducers + uncertain fallback        │
    │  │     VS Code Copilot Chat content-hash                       │
    │  ├─ thermal: pmset -g therm (CPU_Scheduler_Limit floor)       │
    │  ├─ battery: pmset -g ps (VIGIL_BATTERY_FLOOR_PCT)            │
@@ -63,52 +63,51 @@ communicate only through a per-uid, file-based IPC queue. A third native binary,
 
 ## Signal flow
 
-Two signals, one source of truth (the daemon's refcount):
+One shared `ActivityCollector` supplies daemon, recovery and diagnostics. A
+process host is an anchor for native session evidence, not a working-session
+count. Collection validates PID/start, parentage, same-user and non-zombie
+identity. Only candidate commands have the three native session markers read;
+other environment variables are discarded. Codex rollout association uses a
+bounded read-only `lsof`, without connecting to private APIs or issuing provider
+list commands.
 
-1. **Process polling** — every tick (`tick_secs`, default 5,
-   `VIGIL_TICK_SECS`) the daemon refreshes one long-lived `sysinfo::System`
-   (command line + exe only, never cpu/memory). The pure classifier matches CLI
-   basenames (`claude`/`codex`/`copilot`), the Codex.app host, and the VS Code
-   host, after hard exclusions. Each match writes/refreshes
-   `~/Library/Application Support/vigil/state/active/<name>-<pid>.pid` with the
-   pid's `start_time`.
+Claude, Codex and Copilot retain their own native lifecycle semantics. Session
+aggregation prefers verified running work, then unresolved evidence, then fully
+observed human waits, then idle. Independent commands/children survive parent
+waits, turn completion and abort until their own terminal or exit evidence.
+A witnessed command can remain attributed after reparenting while its PID/start
+matches; this witness is in memory only. Cold detached-command attribution and
+Codex approval waits remain explicit coverage limits.
 
-2. **Wrapper PID files** — `vigil run <cmd> [args...]` writes a
-   `wrapper-<pid>.pid` file before running the child as a foreground subprocess
-   (not via `exec`), and removes it via an RAII `PidfileGuard` on return. It
-   propagates the child's exit code (signal-terminated → `128 + signal`,
-   command-not-found → `127`).
+JSONL history is buffered incrementally: 64 KiB chunks, an 8 MiB complete-record
+limit and a 16 MiB read budget per evaluation. Partial, replaced, truncated,
+malformed or oversized evidence produces unknown reconstruction. Required
+history continues on later daemon ticks; unchanged files read no transcript
+bytes after stat. These limits do not create a work-expiry timer.
 
-Agent pidfiles are counted only when the agent's **activity gate** is on:
-session-file mtime within the idle window for `claude`/`codex`/`copilot` (and
-`app-codex` shares the `codex` gate), and a semantic content-hash change of VS
-Code Copilot Chat `state.json` for `app-vscode-copilot-chat`. Wrapper pidfiles
-always count. Per-tick transition rules:
+`ActivitySnapshot` contains sessions, detected hosts, wrappers, the existing
+VS Code content-hash gate and uncertain demand. Exact working-session counts
+never come from multiplying a provider boolean by pidfile count. Recent-file
+fallback uses the configured idle window only for unresolved evidence and
+contributes at most one uncertain demand per provider. A currently owned
+unfinished native lifecycle with ambiguous wait state retains uncertain demand
+until its matching end or ownership invalidation.
 
-- **0 → >0**: Capture the current `SleepDisabled` value into
-  `state/baseline.json` (idempotently), submit an `engage` request to the root
-  helper, and **only if** the helper engage succeeds, spawn `caffeinate -i`
-  and record its PID.
-- **>0 steady state**: `reconcile_engaged` re-reads `SleepDisabled`; if it is
-  not `1` it re-submits `engage`, and if the recorded `caffeinate` child is not
-  alive-by-identity it respawns. Baseline is never touched here.
-- **>0 → 0**: Submit a `release` request, **always** kill the caffeinate child
-  (even if release fails), and clear `baseline.json`. Idle releases on the
-  helper side are no-ops, so a retained helper baseline cannot clobber a later
-  third-party sleep setting.
+Pidfiles retain process/wrapper lifecycle bookkeeping. Wrapper registration uses
+the actual process start from the scanner's identity source. GC drops verified
+exit/reuse; low CPU does not disprove quiet native work. `vigil run` keeps its
+foreground child and removes the wrapper pidfile on exit.
 
-Release priority is load-bearing when the hold drops for more than one reason:
-thermal (soft release, keeps `baseline.json` for re-engage) > battery (full
-release) > count==0 (full release).
+Transitions preserve the power ordering: capture baseline and engage the helper
+before starting `caffeinate -i`; reconcile an ongoing hold without recapturing
+baseline; release through the helper and clean the caffeinate child/baseline.
+Thermal, battery, cooldown and manual-off outrank automatic demand.
 
-Stale pidfiles are GC'd, in this branch order: (a) the PID is dead
-(`kill(pid,0)` fails) → drop; (b) the on-disk `start_ts` doesn't match the live
-PID's `start_time` (PID reuse) → drop; (c) for non-wrapper entries only, the
-file is older than `stale_age_secs` (default 30) **and** the PID's CPU is below
-`stale_cpu_pct` (default 0.5) → drop. The GC reads CPU off a second bare
-`sysinfo::System` with two refreshes spaced by `MINIMUM_CPU_UPDATE_INTERVAL`,
-because sysinfo's first cpu read is always `0.0` (a single refresh would drop
-every busy agent).
+Automatic work/uncertainty/VS Code demand starts a monotonic 30-second grace when
+its observed count becomes zero. Wrappers and manual-on are separate demand.
+There is no grace at startup. Refresh consumes a pending grace; later ticks
+cannot resurrect it. Guards/manual-off consume old grace immediately during
+evaluation. New observed work can establish a new grace cycle.
 
 ## How the two launchd jobs are wired
 
@@ -186,37 +185,51 @@ distinct from the daemon-side `baseline.json`.
 
 ## Daemon tick loop
 
-The daemon's per-tick order is load-bearing: (1) detect agents + write/refresh
-one pidfile per match; (2) GC stale pidfiles on a separate bare `System`
-reserved for the cpu probe; (3) compute per-agent activity flags
-(claude/codex/copilot/vscode); (4) activity-filtered `refcount::count`; (5)
-cutoff checks — thermal cut (fail-closed: an unreadable `pmset -g therm` cuts
-the hold), then battery cut, then the sliding cooldown re-arm; (6)
-decide `desired_hold = count>0 && !thermal && !battery && !cooling`; (7) act; (8)
-write the frozen `daemon.tick` ABI file (POST-action engaged); (9) the caller
-sleeps interruptibly (100ms granularity, honoring INT/TERM well within
-`ExitTimeOut=60`).
+The daemon collects processes once, updates/GCs identity records, evaluates the
+shared activity snapshot, applies guards/manual mode/grace, performs the power
+transition, then atomically writes the **post-action** tick. The interruptible
+wait honors INT/TERM and SIGUSR1; SIGUSR1 requests a wakeup, not proof of refresh.
+Recovery uses the same activity collector before retaining a leftover baseline.
+It does not restore old grace or recreate detached-work ownership from old files.
 
-Single-instance is guarded by an atomic-`mkdir` directory lock (not `flock` —
-macOS lacks `flock(1)`); a dead recorded pid is taken over, a live one yields
-and the process exits 0 (tolerated by `KeepAlive`+`ThrottleInterval=10`). Crash
-recovery runs **before** the loop: refresh evidence first (the same
-detect→touch→gc pass), recompute the startup count, evaluate thermal+battery,
-and if a leftover `baseline.json` exists, reconcile-or-release against current
-work. Clean shutdown runs on the main thread: full release if engaged → remove
-the daemon pidfile and tick file → remove the lock dir → exit 0.
+Single-instance remains guarded by the existing directory lock. Clean shutdown
+releases the hold, removes daemon pid/tick state and releases the lock. The
+closed-lid follow-ups remain required: `sleepnow` after release and
+`displaysleepnow` when the lid closes under a hold.
 
-## status / doctor: the unified CheckEngine
+## Tick schema and refresh
 
-`vigil status` and `vigil doctor` are both served by ONE read-only
-`CheckEngine` that builds a `StatusSnapshot` plus a doctor checklist. It scans
-live state, reads the pid/tick/state files, and probes `launchctl`, but never
-writes/refreshes/GCs anything. Its helper-liveness probe is deliberately capped
-at 2 seconds (`min(power_helper_timeout_secs, 2)`), far below the daemon's full
-10-second engage/release timeout, so one dead or slow helper can't block the
-status/doctor paint behind a ~10s blank wait. `vigil status` always exits 0;
-`vigil doctor` resolves to a three-state verdict (ready / ready-with-warnings →
-exit 0; needs-repair / not-installed → exit 1).
+`daemon.tick` schema 2 has one deterministic key/value parser and atomic writer.
+It includes daemon PID/start, evaluation sequence, session/host/wrapper counts,
+VS Code and uncertain demand, grace remaining, mode/guard/desired/post-action
+engaged state and an optional refresh token. Legacy ten-field ticks remain
+readable as policy, with unknown session counts and refresh unsupported.
+The menu reads this cache alone and displays its age; it does not scan transcripts.
+
+`vigil refresh` serializes callers using a user-only advisory lock, writes an
+atomic request with a unique token and expected daemon identity, validates the
+actual daemon executable/role/PID/start, then sends SIGUSR1. Its single 2-second
+deadline includes serialization. The daemon captures the token before evaluation
+and acknowledges that same token only in the post-action tick. A request arriving
+during a scan is left for another pass. Ordinary ticks, legacy ticks and a
+replaced daemon cannot acknowledge the request. Timeout reports unknown outcome.
+The command never starts an absent daemon or clears genuine work/uncertain demand.
+
+## status / doctor / debug
+
+Diagnostics use the same collector/reducers and read the cached VS Code gate,
+without creating files, GC, provider list commands or helper requests. Status
+JSON schema 2 separates fresh `activity` from `cached_policy` and includes policy
+age/identity plus per-session evidence, reason and foreground wait. It replaces
+legacy active/total pidfile ratios with explicit working/waiting/idle/unknown
+counts, detected hosts, wrappers and uncertain demand.
+
+The helper view validates static installation/IPC permissions and reads launchd
+and available process identity. Responsiveness is **unchecked**: presence does
+not verify a responsive helper. This is a warning, so doctor and power doctor
+exit 0 when required static checks pass. Concrete missing/invalid installation
+remains an error. `status` always exits 0 except for invalid usage. Operational
+power paths retain the separate helper IPC contract.
 
 ## Why a root helper instead of runtime sudo
 
@@ -272,7 +285,7 @@ flag it didn't originally raise. Helper-side baseline parsing is fail-safe to
 To reset the baseline back to `0`-state — i.e., to make vigil release all the
 way to sleep-enabled on the next quiet window — do one of:
 
-- While vigil is **idle** (refcount = 0, no `baseline.json` on disk): release the
+- While Vigil has **no demand or grace** (no `baseline.json` on disk): release the
   other sleep-prevention tool, or intentionally reset `SleepDisabled` as an admin
   outside Vigil. The next vigil engage will then capture `0`, and the next release
   will go back to `0`.
@@ -286,8 +299,8 @@ re-assert. Quit the other tool first.
 ## Crash recovery
 
 If the daemon restarts and finds `baseline.json`, it refreshes live process
-evidence before deciding what to do (the same detect→touch→gc pass). If active
-agent or wrapper refs still exist and thermal/battery guards allow holding sleep,
+evidence through the shared collector before deciding what to do. If verified or
+uncertain work or wrappers still demand a hold and thermal/battery guards allow it,
 vigil keeps the captured baseline and reasserts `SleepDisabled=1` plus
 `caffeinate -i`. If no active work remains, it restores the captured baseline and
 clears the stale state. This recovery runs once, before the tick loop starts.
@@ -329,7 +342,8 @@ So:
 - State: `~/Library/Application Support/vigil/state/` (mode 0700, created by
   `vigil setup`; default `<install_dir>/state`). Contains `active/`,
   `baseline.json`, `caffeinate.pid`, `daemon.pid`, `daemon.tick`, `state.lock`,
-  and `vscode-copilot-chat.state`.
+  `vscode-copilot-chat.state`, and the serialized `refresh.lock` /
+  `refresh.request` protocol slot.
 - Logs: `~/Library/Logs/vigil/` (created by `vigil setup`); the daemon log is
   `<log_dir>/daemon.log`.
 

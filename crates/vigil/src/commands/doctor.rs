@@ -9,12 +9,13 @@
 //!   - `errs>0  && markers>0` → needs repair         → exit 1
 //!   - `errs>0  && markers==0`→ not installed        → exit 1
 //!
-//! `lock helper` absent is the ONLY `warns++` site (the ready-with-warnings third
-//! state). `doctor --power` runs its own `errs` counter → exit 0/1.
+//! Unchecked helper responsiveness is a warning. Invalid installation remains
+//! an error. `doctor --power` follows the same read-only distinction.
 
 use std::ffi::OsString;
 use std::path::Path;
 
+use vigil::activity::scan::Agent;
 use vigil::check::{CheckEngine, CheckMode, StatusSnapshot};
 use vigil::config::VigilConfig;
 
@@ -52,8 +53,7 @@ pub fn run(args: Vec<OsString>) -> ! {
     let opts = parse(&args);
     let cfg = load_config_or_exit();
     let now = now_unix();
-    // Spinner on stderr while the snapshot is gathered (the helper liveness probe
-    // can take a beat). Interactive-only → piped/CI stdout stays byte-identical.
+    // Interactive-only spinner while read-only evidence is collected.
     let interactive = super::interactive(false);
 
     if opts.power {
@@ -184,24 +184,34 @@ fn render_doctor(cfg: &VigilConfig, snap: &StatusSnapshot, verbose: bool) -> i32
     anstream::println!();
     anstream::println!("  privileged helper");
     anstream::println!("    power mode:    best-effort");
-    if is_executable(&cfg.root_helper) {
+    if snap.power_helper.binary_valid {
         anstream::println!("    binary:        ok");
     } else {
-        anstream::println!("    binary:        missing (run vigil setup)");
+        anstream::println!("    binary:        missing or invalid (run vigil setup)");
         errs += 1;
     }
-    if Path::new(&helper_plist_path()).is_file() {
+    if snap.power_helper.launchdaemon_valid {
         anstream::println!("    LaunchDaemon:  ok");
     } else {
-        anstream::println!("    LaunchDaemon:  missing (run vigil setup)");
+        anstream::println!("    LaunchDaemon:  missing or invalid (run vigil setup)");
         errs += 1;
     }
-    if snap.power_helper_ok {
-        anstream::println!("    IPC:           ok");
+    if snap.power_helper.ipc_permissions_valid {
+        anstream::println!("    IPC dirs:      ok (ownership and permissions)");
     } else {
-        anstream::println!("    IPC:           fail (helper unavailable)");
+        anstream::println!("    IPC dirs:      missing or invalid (run vigil setup)");
         errs += 1;
     }
+    anstream::println!("    responsiveness: unchecked (read-only diagnostics)");
+    warns += 1;
+    anstream::println!(
+        "    launchd:       {}",
+        if snap.power_helper.launchd_loaded {
+            "loaded"
+        } else {
+            "not loaded"
+        },
+    );
     if Path::new(&cfg.newsyslog_file).is_file() {
         anstream::println!("    log rotation:  ok");
     } else {
@@ -229,7 +239,7 @@ fn render_doctor(cfg: &VigilConfig, snap: &StatusSnapshot, verbose: bool) -> i32
         anstream::println!("    daemon:        missing (run vigil setup)");
         errs += 1;
     }
-    // lock helper absent is the ONLY warns++ site (ready-with-warnings).
+    // Optional lock helper absence is another warning.
     let lock_helper = format!("{}/bin/vigil-lock-helper", cfg.install_dir);
     if is_executable(&lock_helper) {
         anstream::println!("    lock helper:   ok");
@@ -375,12 +385,13 @@ fn render_power(snap: &StatusSnapshot, verbose: bool) -> i32 {
         "  caffeinate alive:   {}",
         if snap.caffeinate_alive { "yes" } else { "no" }
     );
-    if snap.power_helper_ok {
-        anstream::println!("  root helper:        ok");
+    if snap.power_helper.installation_valid() {
+        anstream::println!("  root helper:        installation ok");
     } else {
-        anstream::println!("  root helper:        FAIL");
+        anstream::println!("  root helper:        FAIL (missing or invalid installation)");
         errs += 1;
     }
+    anstream::println!("  responsiveness:     unchecked (read-only diagnostics; warning)");
     anstream::println!("  thermal:            {}", snap.thermal);
     anstream::println!("  battery:            {}", snap.battery);
     anstream::println!("  power assertions:   {}", power_assertions_summary(snap));
@@ -401,7 +412,9 @@ fn render_power(snap: &StatusSnapshot, verbose: bool) -> i32 {
 
     anstream::println!();
     if errs == 0 {
-        anstream::println!("result: power path checks passed");
+        anstream::println!(
+            "result: static power path checks passed with 1 warning (responsiveness unchecked)"
+        );
         return 0;
     }
     anstream::println!("result: {errs} power path check(s) failed");
@@ -440,10 +453,10 @@ fn resolve_command(name: &str) -> Option<String> {
 fn agents_line(snap: &StatusSnapshot) -> String {
     format!(
         "claude={}  codex={}  copilot={}  vscode_copilot_chat={}",
-        snap.agent_claude.as_str(),
-        snap.agent_codex.as_str(),
-        snap.agent_copilot.as_str(),
-        snap.agent_vscode_copilot_chat.as_str(),
+        snap.activity.provider_state(Agent::Claude),
+        snap.activity.provider_state(Agent::Codex),
+        snap.activity.provider_state(Agent::Copilot),
+        snap.agent_vscode_copilot_chat,
     )
 }
 
@@ -473,16 +486,28 @@ fn power_assertions_summary(snap: &StatusSnapshot) -> String {
 /// `cmd_provider_roots_text | sed 's/^/    /'` → 4-space base shift).
 fn render_provider_roots(snap: &StatusSnapshot) {
     for (name, p, state) in [
-        ("claude", &snap.provider_claude, snap.agent_claude),
-        ("codex", &snap.provider_codex, snap.agent_codex),
-        ("copilot", &snap.provider_copilot, snap.agent_copilot),
+        (
+            "claude",
+            &snap.provider_claude,
+            snap.activity.provider_state(Agent::Claude),
+        ),
+        (
+            "codex",
+            &snap.provider_codex,
+            snap.activity.provider_state(Agent::Codex),
+        ),
+        (
+            "copilot",
+            &snap.provider_copilot,
+            snap.activity.provider_state(Agent::Copilot),
+        ),
     ] {
         anstream::println!("      {name:<7} home={}", p.home);
         anstream::println!(
             "              session={} exists={} state={}",
             p.session_dir,
             if p.exists { "yes" } else { "no" },
-            state.as_str(),
+            state,
         );
     }
 }
@@ -491,16 +516,28 @@ fn render_provider_roots(snap: &StatusSnapshot) {
 /// `cmd_provider_roots_text | sed 's/^/  /'` → 2-space base shift).
 fn render_provider_roots_indent2(snap: &StatusSnapshot) {
     for (name, p, state) in [
-        ("claude", &snap.provider_claude, snap.agent_claude),
-        ("codex", &snap.provider_codex, snap.agent_codex),
-        ("copilot", &snap.provider_copilot, snap.agent_copilot),
+        (
+            "claude",
+            &snap.provider_claude,
+            snap.activity.provider_state(Agent::Claude),
+        ),
+        (
+            "codex",
+            &snap.provider_codex,
+            snap.activity.provider_state(Agent::Codex),
+        ),
+        (
+            "copilot",
+            &snap.provider_copilot,
+            snap.activity.provider_state(Agent::Copilot),
+        ),
     ] {
         anstream::println!("    {name:<7} home={}", p.home);
         anstream::println!(
             "            session={} exists={} state={}",
             p.session_dir,
             if p.exists { "yes" } else { "no" },
-            state.as_str(),
+            state,
         );
     }
 }

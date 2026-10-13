@@ -16,6 +16,7 @@ That was decided on 2026-09-20. The category is covered — [`adrafinil`](https:
 | **5. Rust rewrite** | One `vigil` binary, a root `vigil-root-helper`, and `vigil-lock-helper`. All shell deleted. Unified `CheckEngine` behind `status` and `doctor`. |
 | **6. Manual mode + menu bar** | `vigil mode auto\|on\|off` overrides agent detection; thermal and battery guards still win. A SwiftBar plugin shows state and switches mode from the menu bar. |
 | **7. Clamshell test + closed-lid fixes** | Measured on the M5 Pro: `disablesleep` beats the lid sensor on battery. Found and fixed two closed-lid defects — sleep after a release, lock under a hold. [`docs/apple-silicon-lid-closed.md`](./docs/apple-silicon-lid-closed.md). |
+| **8. Per-session activity** | Shared native session reducers and process ownership, explicit unknown/uncertain demand, 30-second release grace, acknowledged refresh, schema 2 status/tick, and read-only diagnostics. Coverage limits remain below. |
 
 ## Dropped
 
@@ -25,7 +26,7 @@ That was decided on 2026-09-20. The category is covered — [`adrafinil`](https:
 
 ## Open
 
-- **Per-session activity (next).** "Active agents" counts open sessions, not working ones, holds for five minutes after a turn ends, and misses Codex inside ChatGPT.app entirely. Plan, with the measurements behind it: [`future/phase-8-per-session-activity.md`](./future/phase-8-per-session-activity.md).
+- **Activity coverage extensions.** Disk-only Codex approval waits, cold detached-process ownership, Claude Desktop and unmeasured remote/restart paths remain unknown rather than exact coverage. The implementation does not add private provider APIs, hooks or another daemon. Evidence and limits: [`future/phase-8-per-session-activity.md`](./future/phase-8-per-session-activity.md) and [`docs/fixtures/phase-8/README.md`](./docs/fixtures/phase-8/README.md).
 - **New agent surfaces** — only when one is installed here and can be verified live. Sketch: [`future/phase-N-agent-surface-refresh.md`](./future/phase-N-agent-surface-refresh.md).
 - **Conflict detection** against other sleep holders. Sketch: [`future/phase-N-conflict-detection.md`](./future/phase-N-conflict-detection.md).
 

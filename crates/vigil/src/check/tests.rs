@@ -1,22 +1,7 @@
-//! Unit tests for `src/check/` (Phase 5.7 §2.3 + §5 + §5.5).
-//!
-//! Three thrusts:
-//!   1. **`daemon_scan_state` thresholds** (§2.3.4) — the six states and their
-//!      exact `missing_after`/`stale_after` boundaries, driven by the pure
-//!      [`super::classify_scan_state`].
-//!   2. **`--json` byte-stability** (§5.1) — [`StatusSnapshot::to_json`] MINUS the
-//!      `"version": 1,` line equals `tests/golden/status_clean.json` byte-for-byte
-//!      (closes the status half of GAP #2). The ONE single-clock divergence (the
-//!      codex dual-clock artifact) is isolated + documented below.
-//!   3. **assertions tri-state in the status path** (§5.5) — the parser is unit-
-//!      tested in `power::assertions`; here we prove the `power_assertions_state`
-//!      / array projection through the snapshot + emitter, driving
-//!      `VIGIL_ASSERTIONS_FIXTURE`.
+//! Read-only diagnostic classification and version 2 JSON golden checks.
 
 use super::*;
 use crate::config::VigilConfig;
-use crate::helper::validate::Action;
-use crate::ipc::{HelperClient, IpcError, Response};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -33,21 +18,12 @@ const FIXED_NOW: i64 = 1_700_000_000;
 /// fixed sandbox under SBX, so they must not overlap).
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-// ── A load probe + helper client that need no real launchctl / IPC dirs ───────
+// Deterministic launchd and power-reading seams.
 
 struct FakeProbe(bool);
 impl LoadProbe for FakeProbe {
     fn is_loaded(&self, _label: &str) -> bool {
         self.0
-    }
-}
-
-/// A helper client that always reports the dirs missing (golden `power_helper_ok:
-/// false`), with NO filesystem touch.
-struct DeadHelper;
-impl HelperClient for DeadHelper {
-    fn request(&self, _action: Action) -> Result<Response, IpcError> {
-        Err(IpcError::DirsMissing)
     }
 }
 
@@ -61,12 +37,10 @@ impl crate::power::pmset::SleepReader for FakeSleep {
 
 // ── scan-state threshold tests (§2.3.4) ───────────────────────────────────────
 
-fn tick(pid: &str, updated: &str, tick_secs: &str) -> TickFields {
-    TickFields {
-        pid: Some(pid.to_string()),
-        updated_at: Some(updated.to_string()),
-        tick_secs: Some(tick_secs.to_string()),
-    }
+fn tick(pid: &str, updated: &str, tick_secs: &str) -> TickSnapshot {
+    tick::parse(&format!(
+        "pid={pid}\nupdated_at={updated}\ntick_secs={tick_secs}\nrefcount_active=0\ndesired_hold=0\nengaged=0\nthermal_cut=0\nbattery_cut=0\ncooling=0\nmode=auto\n"
+    )).unwrap()
 }
 
 #[test]
@@ -81,7 +55,7 @@ fn classify_scan_state_threshold_table() {
     // (label, loaded, daemon_pid, tick, pidfile_mtime, cfg_tick, wait, want_state, want_age)
     #[rustfmt::skip]
     #[allow(clippy::type_complexity)]
-    let cases: Vec<(&str, bool, Option<&str>, Option<TickFields>, Option<i64>, u32, u32, DaemonScanState, Option<i64>)> = vec![
+    let cases: Vec<(&str, bool, Option<&str>, Option<TickSnapshot>, Option<i64>, u32, u32, DaemonScanState, Option<i64>)> = vec![
         ("unloaded", false, Some("4242"), None, Some(now), 5, 6, Unloaded, None),
         ("starting: daemon pid not numeric", true, None, None, None, 5, 6, Starting, None),
         ("pending: tick pid != daemon pid, pidfile fresh", true, Some("4242"), Some(tick("9999", "1699999998", "5")), Some(now), 5, 6, Pending, None),
@@ -96,7 +70,7 @@ fn classify_scan_state_threshold_table() {
         ("stale boundary: age 15 == stale_after => fresh", true, Some("4242"), Some(tick("4242", &(now - 15).to_string(), "5")), Some(now), 5, 6, Fresh, Some(15)),
         ("stale boundary: age 16 > 15 => stale", true, Some("4242"), Some(tick("4242", &(now - 16).to_string(), "5")), Some(now), 5, 6, Stale, Some(16)),
         ("tick-file tick_secs=20 wins: age 30 < 45 => fresh", true, Some("4242"), Some(tick("4242", &(now - 30).to_string(), "20")), Some(now), 5, 6, Fresh, Some(30)),
-        ("pending: pid match but updated_at non-numeric", true, Some("4242"), Some(tick("4242", "not-a-number", "5")), Some(now), 5, 6, Pending, None),
+        ("pending: pid match but updated_at non-numeric", true, Some("4242"), None, Some(now), 5, 6, Pending, None),
     ];
     for (label, loaded, dpid, t, mtime, ct, wait, want_st, want_age) in &cases {
         let (st, age) = classify_scan_state(*loaded, *dpid, t.as_ref(), *mtime, now, *ct, *wait);
@@ -107,37 +81,18 @@ fn classify_scan_state_threshold_table() {
 
 #[test]
 fn classify_scan_state_edge_cases_table() {
-    // Edge arms NOT exercised by the threshold table: the negative-age clamp on
-    // BOTH age fields (a future-dated tick or pidfile must clamp to 0, never go
-    // negative), the `pidfile_mtime == 0` sentinel (treated as "no mtime" → never
-    // promotes Pending to Missing), and the non-numeric tick_secs fallback to the
-    // cfg tick_secs. Expecteds derived directly from classify_scan_state:
-    //   * future tick  (pid match, updated_at = now+100): age = now-(now+100) =
-    //     -100 → clamped to 0; stale_after = max(15, 5*2+5) = 15; 0 ≤ 15 → Fresh,
-    //     Some(0).
-    //   * future pidfile (pid MISmatch, mtime = now+100): pid_age = now-(now+100)
-    //     = -100 → clamped to 0; missing_after = max(10, 6+5+3) = 14; 0 > 14 is
-    //     false → Pending, None.
-    //   * mtime == 0 sentinel (pid MISmatch, mtime = Some(0)): the `mtime != 0`
-    //     guard skips the missing check entirely even though now-0 ≫ missing_after
-    //     → Pending (NOT Missing), None.
-    //   * non-numeric tick_secs (pid match, updated_at = now-30, tick_secs="abc"):
-    //     the is_numeric filter drops it → fall back to cfg tick_secs = 20;
-    //     stale_after = max(15, 20*2+5) = 45; age 30 ≤ 45 → Fresh, Some(30) (with
-    //     a numeric tick_secs=5 this same age 30 would be Stale, so this row proves
-    //     the cfg fallback fired).
+    // Future mtimes clamp to zero; a malformed atomic tick is unavailable.
     use DaemonScanState::{Fresh, Pending};
     let now = FIXED_NOW;
     let future_tick = (now + 100).to_string();
-    let recent_tick = (now - 30).to_string();
     // (label, loaded, daemon_pid, tick, pidfile_mtime, cfg_tick, wait, want_state, want_age)
     #[rustfmt::skip]
     #[allow(clippy::type_complexity)]
-    let cases: Vec<(&str, bool, Option<&str>, Option<TickFields>, Option<i64>, u32, u32, DaemonScanState, Option<i64>)> = vec![
+    let cases: Vec<(&str, bool, Option<&str>, Option<TickSnapshot>, Option<i64>, u32, u32, DaemonScanState, Option<i64>)> = vec![
         ("neg-age clamp: future-dated tick (updated_at=now+100) → age 0, Fresh", true, Some("4242"), Some(tick("4242", &future_tick, "5")), Some(now), 5, 6, Fresh, Some(0)),
         ("neg-age clamp: future-dated pidfile (mtime=now+100), pid mismatch → pid_age 0, Pending", true, Some("4242"), Some(tick("9999", "1699999998", "5")), Some(now + 100), 5, 6, Pending, None),
         ("mtime==0 sentinel: pid mismatch, mtime Some(0) → skip missing check → Pending", true, Some("4242"), Some(tick("9999", "1699999998", "5")), Some(0), 5, 6, Pending, None),
-        ("non-numeric tick_secs falls back to cfg(20): age 30 < 45 → Fresh", true, Some("4242"), Some(tick("4242", &recent_tick, "abc")), Some(now), 20, 6, Fresh, Some(30)),
+        ("malformed tick is unavailable", true, Some("4242"), None, Some(now), 20, 6, Pending, None),
     ];
     for (label, loaded, dpid, t, mtime, ct, wait, want_st, want_age) in &cases {
         let (st, age) = classify_scan_state(*loaded, *dpid, t.as_ref(), *mtime, now, *ct, *wait);
@@ -146,29 +101,105 @@ fn classify_scan_state_edge_cases_table() {
     }
 }
 
-// ── tick-file parse ───────────────────────────────────────────────────────────
-
+// The tick parser is shared with daemon, menu and refresh clients.
 #[test]
-fn read_tick_fields_first_match_wins_and_eq_is_first_sep() {
-    let dir = tempdir();
-    let f = dir.join("daemon.tick");
-    // A `=` in a later value must not confuse the first-separator split; a dup key
-    // must keep the FIRST (awk first-match).
+fn malformed_tick_is_not_partially_classified_as_fresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = golden_config_under(dir.path());
+    std::fs::create_dir_all(Path::new(&cfg.state_dir)).unwrap();
+    std::fs::write(&cfg.daemon_pidfile, "4242\n").unwrap();
     std::fs::write(
-        &f,
-        "pid=4242\nupdated_at=1699999998\ntick_secs=5\npid=9999\nfoo=bar=baz\n",
+        &cfg.daemon_tick_file,
+        format!("pid=4242\nupdated_at={FIXED_NOW}\ntick_secs=5\n"),
     )
     .unwrap();
-    let t = read_tick_fields(&f).unwrap();
-    assert_eq!(t.pid.as_deref(), Some("4242"));
-    assert_eq!(t.updated_at.as_deref(), Some("1699999998"));
-    assert_eq!(t.tick_secs.as_deref(), Some("5"));
+    assert_eq!(
+        CheckEngine::daemon_scan(&cfg, FIXED_NOW, &FakeProbe(true)),
+        (DaemonScanState::Pending, None)
+    );
 }
 
 #[test]
-fn read_tick_fields_none_when_absent() {
-    let dir = tempdir();
-    assert!(read_tick_fields(&dir.join("nope.tick")).is_none());
+fn readonly_collection_keeps_busy_and_waiting_sessions_separate() {
+    // Real, self-bounded local identities with synthetic native state. No
+    // provider session is started and no existing session is touched.
+    struct BoundedSleep(std::process::Child);
+    impl Drop for BoundedSleep {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = golden_config_under(dir.path());
+    let executable = dir.path().join("claude");
+    std::fs::copy("/bin/sleep", &executable).unwrap();
+    let mut children = Vec::new();
+    for _ in 0..2 {
+        children.push(BoundedSleep(
+            std::process::Command::new(&executable)
+                .arg("15")
+                .spawn()
+                .unwrap(),
+        ));
+    }
+    let mut scanner = ProcScanner::new();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let records = loop {
+        let records = scanner.collect();
+        if children.iter().all(|c| {
+            records.iter().any(|r| {
+                r.pid == c.0.id()
+                    && Path::new(&r.exe)
+                        .file_name()
+                        .is_some_and(|name| name == "claude")
+            })
+        }) {
+            break records;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "disposable hosts must become visible"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let records: Vec<_> = records
+        .into_iter()
+        .filter(|r| children.iter().any(|c| c.0.id() == r.pid))
+        .collect();
+    let native = Path::new(&cfg.claude_home).join("sessions");
+    std::fs::create_dir_all(&native).unwrap();
+    let transcripts = Path::new(&cfg.claude_home).join("projects/-fixture");
+    std::fs::create_dir_all(&transcripts).unwrap();
+    for (record, (id, state)) in records.iter().zip([("busy", "busy"), ("wait", "waiting")]) {
+        let proc_start = chrono::DateTime::from_timestamp(record.start_time, 0)
+            .unwrap()
+            .format("%a %b %e %H:%M:%S %Y")
+            .to_string();
+        let value = serde_json::json!({"pid":record.pid,"sessionId":id,"procStart":proc_start,
+            "kind":"interactive","status":state,"waitingFor":"input needed","cwd":"/fixture"});
+        std::fs::write(
+            native.join(format!("{}.json", record.pid)),
+            value.to_string(),
+        )
+        .unwrap();
+        std::fs::write(transcripts.join(format!("{id}.jsonl")), "").unwrap();
+    }
+    let direct = ActivityCollector::default().collect(&cfg, &mut scanner, &records, FIXED_NOW);
+    let (diagnostic, _) = collect_activity_readonly(&cfg, &mut scanner, &records, FIXED_NOW);
+    assert_eq!(
+        (
+            diagnostic.working(),
+            diagnostic.waiting(),
+            diagnostic.uncertain()
+        ),
+        (1, 1, 0)
+    );
+    assert_eq!(
+        serde_json::to_value(direct.sessions).unwrap(),
+        serde_json::to_value(diagnostic.sessions).unwrap(),
+        "same reducer, same evidence"
+    );
 }
 
 // ── --json byte-stability vs the Gate-0 golden (§5.1) ─────────────────────────
@@ -202,32 +233,33 @@ fn json_clean_matches_golden_byte_for_byte() {
     // SAFETY: serialized by ENV_LOCK; cleaned up via clear_fixture_env.
     unsafe { set_golden_fixture_env("") };
 
-    let report = CheckEngine::run_with(
+    let mut report = CheckEngine::run_with(
         &cfg,
         CheckMode::Status,
         FIXED_NOW,
         &FakeProbe(false), // launchctl → not loaded (golden clean)
-        &DeadHelper,
-        &FakeSleep(0), // golden $ROOT/sleepdisabled = 0
+        &FakeSleep(0),     // golden $ROOT/sleepdisabled = 0
     );
+    report.snapshot.power_helper = HelperInspection {
+        binary_valid: false,
+        launchdaemon_valid: false,
+        launchd_loaded: false,
+        process_pid: None,
+        process_start: None,
+        ipc_permissions_valid: false,
+        responsiveness: "unchecked",
+    };
+    // The fixture has no observed host: a recent file is uncertain fallback,
+    // never an exact active session. Ignore unrelated real hosts in this golden.
+    report.snapshot.activity = ActivitySnapshot {
+        uncertain_providers: vec!["codex".into()],
+        ..ActivitySnapshot::default()
+    };
     let got = report.snapshot.to_json();
 
-    // The golden is the BASH output (no version). Insert the single allowed diff
-    // (`  "version": 1,` after the opening `{`) to build the expected Rust output.
-    let golden = read_golden("status_clean.json");
-    let expected = apply_codex_artifact(&insert_version_line(&golden));
-
+    let expected = read_golden("status_clean.json");
     sbx.clear_fixture_env();
-    assert_eq!(
-        got, expected,
-        "status --json must match status_clean.json byte-for-byte \
-         (+ the version line, modulo the documented codex single-clock artifact)"
-    );
-
-    // INVARIANT (golden README): stripping the version line yields the bash
-    // golden exactly (modulo the same codex artifact).
-    let stripped = strip_version_line(&got);
-    assert_eq!(stripped, apply_codex_artifact(&golden));
+    assert_eq!(got, expected, "status --json version 2 golden");
 }
 
 #[test]
@@ -241,18 +273,32 @@ fn json_assertions_ok_state_projects_holders() {
     // SAFETY: serialized by ENV_LOCK.
     unsafe { set_golden_fixture_env(fixture) };
 
-    let report = CheckEngine::run_with(
+    let mut report = CheckEngine::run_with(
         &cfg,
         CheckMode::Status,
         FIXED_NOW,
         &FakeProbe(false),
-        &DeadHelper,
         &FakeSleep(0),
     );
+    report.snapshot.power_helper = HelperInspection {
+        binary_valid: false,
+        launchdaemon_valid: false,
+        launchd_loaded: false,
+        process_pid: None,
+        process_start: None,
+        ipc_permissions_valid: false,
+        responsiveness: "unchecked",
+    };
+    // The fixture has no observed host: a recent file is uncertain fallback,
+    // never an exact active session. Ignore unrelated real hosts in this golden.
+    report.snapshot.activity = ActivitySnapshot {
+        uncertain_providers: vec!["codex".into()],
+        ..ActivitySnapshot::default()
+    };
     let got = report.snapshot.to_json();
 
     let golden = read_golden("status_assertions.json");
-    let expected = apply_codex_artifact(&insert_version_line(&golden));
+    let expected = golden;
 
     sbx.clear_fixture_env();
     assert_eq!(
@@ -279,32 +325,6 @@ fn empty_assertions_fixture_yields_none_state() {
 fn read_golden(name: &str) -> String {
     std::fs::read_to_string(PathBuf::from(GOLDEN_DIR).join(name))
         .unwrap_or_else(|e| panic!("read golden {name}: {e}"))
-}
-
-/// Insert `  "version": 1,\n` right after the opening `{\n` (the single allowed
-/// diff vs the bash golden).
-fn insert_version_line(golden: &str) -> String {
-    debug_assert!(golden.starts_with("{\n"));
-    let (head, tail) = golden.split_at(2); // "{\n"
-    format!("{head}  \"version\": 1,\n{tail}")
-}
-
-/// The inverse: strip the `  "version": 1,\n` line.
-fn strip_version_line(rust: &str) -> String {
-    rust.replacen("  \"version\": 1,\n", "", 1)
-}
-
-/// The codex dual-clock artifact (module note): the bash golden captured codex as
-/// `idle` because the real-wall-clock `find -mmin` activity probe saw the 2023
-/// session-file mtime as outside the window, while the `date +%s` STUB pinned the
-/// age field to 0. The Rust engine uses a SINGLE `now` for both probes, so a
-/// session file with `mtime == now` (the only way to reproduce `age: 0`) reads as
-/// ACTIVE, not idle. We reproduce `age: 0` (mtime == now) and patch the one
-/// divergent token — `"codex":"idle"` → `"codex":"active"` in the agents object —
-/// then assert everything else byte-for-byte. This isolates a documented bash
-/// artifact to a single token; every other field reproduces exactly.
-fn apply_codex_artifact(golden: &str) -> String {
-    golden.replace("\"codex\":\"idle\"", "\"codex\":\"active\"")
 }
 
 /// A fixed-path sandbox under `SBX` so the rendered provider paths match the
@@ -368,23 +388,6 @@ fn set_mtime(path: &Path, secs: i64) {
     let t = SystemTime::UNIX_EPOCH + Duration::from_secs(secs as u64);
     f.set_times(FileTimes::new().set_accessed(t).set_modified(t))
         .unwrap();
-}
-
-/// A unique throwaway temp dir for the tick-file parse tests.
-fn tempdir() -> PathBuf {
-    let base = std::env::temp_dir().join(format!(
-        "vigil-check-test-{}-{}",
-        std::process::id(),
-        next_seq()
-    ));
-    std::fs::create_dir_all(&base).unwrap();
-    base
-}
-
-fn next_seq() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    SEQ.fetch_add(1, Ordering::Relaxed)
 }
 
 /// The golden-env `VigilConfig` parameterized to a sandbox root (mirrors the

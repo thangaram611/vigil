@@ -1,0 +1,15 @@
+{
+  "checked_at": "2026-10-13T09:00:47.679899+00:00",
+  "checks": [
+    "all 22 fixture hashes and JSON records valid",
+    "Copilot correlation, permission join, survival and unmatched interrupted-read assertions pass",
+    "Claude launch/duplicate completion and loop clear assertions pass",
+    "Codex late exits follow their matching turn completion/abort",
+    "Codex pending disk/API distinction retained",
+    "relative document links valid",
+    "claude copied source unchanged (8 files)",
+    "copilot copied source unchanged (8 files)",
+    "all recorded owned probe PIDs absent"
+  ],
+  "production_code_changed": false
+}

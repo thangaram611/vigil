@@ -78,6 +78,8 @@ enum Command {
     },
     /// Print the SwiftBar menu (called by the menu-bar plugin)
     Menubar,
+    /// Reevaluate activity now and consume release grace
+    Refresh,
     /// Re-sync daemon + libs into install dir, restart launchd
     Reload {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -263,6 +265,7 @@ fn dispatch(command: Command) -> ! {
         Command::Run { args } => commands::run::run(args),
         Command::Mode { mode } => commands::mode::run(mode),
         Command::Menubar => commands::menubar::run(),
+        Command::Refresh => commands::refresh::run(),
         Command::Reload { args } => commands::reload::run(args),
         Command::Lock { args } => commands::lock::run(args),
         Command::Doctor { args } => commands::doctor::run(args),

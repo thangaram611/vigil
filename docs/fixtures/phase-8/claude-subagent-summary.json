@@ -1,0 +1,170 @@
+{
+  "session_id": "94291bcb-f77e-4e69-b676-2722f208e40a",
+  "agent_id": "aecf9ba24458d94db",
+  "host": {
+    "runner_pid": 22284,
+    "cli_pid": 22288,
+    "process_group": 22288,
+    "started_at": "2026-10-12T10:40:31.775688+00:00",
+    "deadline_seconds": 900
+  },
+  "recorder": {
+    "pid": 22443,
+    "at": "2026-10-12T10:41:10.505+00:00"
+  },
+  "agent_dispatch": "2026-10-12T10:42:18.386Z",
+  "agent_end_turn": "2026-10-12T10:48:27.296Z",
+  "duration_sec": 368.91,
+  "agent_metadata": {
+    "agentType": "general-purpose",
+    "description": "Trace Vigil activity path",
+    "toolUseId": "toolu_01V3ASDbsQWA7nU6xca2CxYk",
+    "spawnDepth": 1,
+    "requestShape": "background",
+    "requestNonInteractive": true
+  },
+  "tool_counts": {
+    "Glob": 1,
+    "Read": 27,
+    "Grep": 7
+  },
+  "last_tool": {
+    "at": "2026-10-12T10:44:04.498Z",
+    "name": "Grep"
+  },
+  "quiet_before_final_sec": 262.798,
+  "cases": {
+    "input needed": {
+      "first": "2026-10-12T10:42:22.537+00:00",
+      "last": "2026-10-12T10:45:34.505+00:00",
+      "samples": 193,
+      "during_subagent_samples": 193,
+      "during_subagent_without_caffeinate": 162,
+      "after_subagent_samples": 0
+    },
+    "permission prompt": {
+      "first": "2026-10-12T10:46:09.537+00:00",
+      "last": "2026-10-12T10:49:27.533+00:00",
+      "samples": 199,
+      "during_subagent_samples": 138,
+      "during_subagent_without_caffeinate": 108,
+      "after_subagent_samples": 61
+    }
+  },
+  "transitions": [
+    {
+      "at": "2026-10-12T10:41:10.505+00:00",
+      "status": null,
+      "waitingFor": null,
+      "own_caffeinate": false
+    },
+    {
+      "at": "2026-10-12T10:41:22.529+00:00",
+      "status": "busy",
+      "waitingFor": null,
+      "own_caffeinate": true
+    },
+    {
+      "at": "2026-10-12T10:41:29.529+00:00",
+      "status": "idle",
+      "waitingFor": null,
+      "own_caffeinate": true
+    },
+    {
+      "at": "2026-10-12T10:41:51.532+00:00",
+      "status": "busy",
+      "waitingFor": null,
+      "own_caffeinate": true
+    },
+    {
+      "at": "2026-10-12T10:42:22.537+00:00",
+      "status": "waiting",
+      "waitingFor": "input needed",
+      "own_caffeinate": true
+    },
+    {
+      "at": "2026-10-12T10:42:53.522+00:00",
+      "status": "waiting",
+      "waitingFor": "input needed",
+      "own_caffeinate": false
+    },
+    {
+      "at": "2026-10-12T10:45:35.532+00:00",
+      "status": "busy",
+      "waitingFor": null,
+      "own_caffeinate": true
+    },
+    {
+      "at": "2026-10-12T10:46:09.537+00:00",
+      "status": "waiting",
+      "waitingFor": "permission prompt",
+      "own_caffeinate": true
+    },
+    {
+      "at": "2026-10-12T10:46:39.532+00:00",
+      "status": "waiting",
+      "waitingFor": "permission prompt",
+      "own_caffeinate": false
+    },
+    {
+      "at": "2026-10-12T10:49:28.511+00:00",
+      "status": "busy",
+      "waitingFor": null,
+      "own_caffeinate": true
+    },
+    {
+      "at": "2026-10-12T10:49:32.529+00:00",
+      "status": "idle",
+      "waitingFor": null,
+      "own_caffeinate": true
+    },
+    {
+      "at": "2026-10-12T10:50:02.527+00:00",
+      "status": "idle",
+      "waitingFor": null,
+      "own_caffeinate": false
+    },
+    {
+      "at": "2026-10-12T10:50:06.508+00:00",
+      "status": null,
+      "waitingFor": null,
+      "own_caffeinate": false
+    }
+  ],
+  "notifications": [
+    {
+      "at": "2026-10-12T10:48:27.370Z",
+      "operation": "enqueue",
+      "reason": null,
+      "task_id": "aecf9ba24458d94db",
+      "status": "completed"
+    },
+    {
+      "at": "2026-10-12T10:49:28.222Z",
+      "operation": "remove",
+      "reason": "absorbed_mid_turn",
+      "task_id": "aecf9ba24458d94db",
+      "status": "completed"
+    }
+  ],
+  "sampling_errors": 0,
+  "parse_errors": 0,
+  "identity_mismatches_while_present": 0,
+  "recorder_done": {
+    "at": "2026-10-12T10:50:07.457+00:00",
+    "reason": "requested",
+    "samples": 537,
+    "elapsed_sec": 537.002
+  },
+  "runner_done": {
+    "at": "2026-10-12T10:50:07.062068+00:00",
+    "reason": "cli_exit",
+    "wait_status": 0
+  },
+  "remaining_processes": [],
+  "native_session_file_exists": false,
+  "transcript_paths": [
+    "/Users/fixture/.claude/projects/fixture-project-vigil-subagent-waits-20261012-lad96ggn-claude/94291bcb-f77e-4e69-b676-2722f208e40a.jsonl",
+    "/Users/fixture/.claude/projects/fixture-project-vigil-subagent-waits-20261012-lad96ggn-claude/94291bcb-f77e-4e69-b676-2722f208e40a/subagents/agent-aecf9ba24458d94db.jsonl"
+  ]
+}

@@ -1,0 +1,113 @@
+{
+  "at": "2026-10-12T06:25:52.173988+00:00",
+  "done": {
+    "at": "2026-10-12T06:25:52.032+00:00",
+    "reason": "requested",
+    "sample_count": 462,
+    "elapsed_sec": 462.004
+  },
+  "recorder_process": null,
+  "sample_count": 462,
+  "sampling_errors": 0,
+  "all_sampled_identities_valid": true,
+  "post_deadline_count": 112,
+  "post_deadline_first": "2026-10-12T06:24:00.105+00:00",
+  "post_deadline_last": "2026-10-12T06:25:51.103+00:00",
+  "all_post_deadline_clear": true,
+  "all_after_cancellation_clear": true,
+  "transcript_events_after_cancel": [
+    {
+      "at": "2026-10-12T06:23:33.756Z",
+      "type": "system",
+      "subtype": "away_summary",
+      "role": null,
+      "tool_calls": []
+    }
+  ],
+  "final_sample": {
+    "at": "2026-10-12T06:25:51.103+00:00",
+    "elapsed_sec": 461.074,
+    "sessions": [
+      {
+        "pid": 13179,
+        "sessionId": "6cd06110-9982-47de-b25e-1d013e5e6fc4",
+        "procStart": "Mon Oct 12 06:15:20 2026",
+        "version": "2.1.296",
+        "kind": "bg",
+        "status": "idle",
+        "statusUpdatedAt": 1791786029926,
+        "updatedAt": 1791786029926,
+        "name": "vigil-loop-cancel-test",
+        "jobId": "6cd06110",
+        "pidDomain": "darwin",
+        "file": "13179.json",
+        "file_metadata": {
+          "exists": true,
+          "size": 544,
+          "mtime_ns": 1791786029928263845
+        },
+        "pid_present": true,
+        "identity_matches": true
+      }
+    ],
+    "jobs": [
+      {
+        "sessionId": "6cd06110-9982-47de-b25e-1d013e5e6fc4",
+        "state": "working",
+        "tempo": "idle",
+        "createdAt": "2026-10-12T06:15:19.556Z",
+        "updatedAt": "2026-10-12T06:21:26.294Z",
+        "id": "6cd06110",
+        "file_metadata": {
+          "exists": true,
+          "size": 3441,
+          "mtime_ns": 1791786086294843990
+        },
+        "inFlight": {
+          "tasks": 0,
+          "queued": 0,
+          "kinds": [],
+          "drainableMonitors": 0
+        },
+        "pending_wakeup": {
+          "exists": false
+        }
+      }
+    ],
+    "processes": [
+      {
+        "pid": 1,
+        "ppid": 0,
+        "start_utc": "Sun Oct 4 20:51:51 2026",
+        "name": "launchd"
+      },
+      {
+        "pid": 13154,
+        "ppid": 1,
+        "start_utc": "Mon Oct 12 06:15:19 2026",
+        "name": "claude"
+      },
+      {
+        "pid": 13164,
+        "ppid": 13154,
+        "start_utc": "Mon Oct 12 06:15:20 2026",
+        "name": "claude bg-pty-host"
+      },
+      {
+        "pid": 13179,
+        "ppid": 13164,
+        "start_utc": "Mon Oct 12 06:15:20 2026",
+        "name": "claude bg-spare"
+      }
+    ],
+    "own_caffeinate_pids": [],
+    "transcripts": {
+      "6cd06110-9982-47de-b25e-1d013e5e6fc4": {
+        "exists": true,
+        "size": 354092,
+        "mtime_ns": 1791786213867055563
+      }
+    },
+    "errors": []
+  }
+}

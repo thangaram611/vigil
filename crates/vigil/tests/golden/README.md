@@ -1,9 +1,9 @@
 # Golden fixtures
 
-Byte-exact reference output, captured from the retired Bash implementation
-before it was deleted. The Bash source is gone, so these files cannot be
-regenerated — they are now the frozen reference. Change one only together with
-the renderer it pins, and say why in the commit.
+Byte-exact reference output. Service files preserve the retired Bash captures.
+Status JSON now pins the version 2 schema: fresh session activity, separately
+labeled cached daemon policy and read-only helper installation evidence.
+Change a fixture together with the renderer it pins and explain why.
 
 | File | Pins | Read by |
 | --- | --- | --- |
@@ -13,7 +13,8 @@ the renderer it pins, and say why in the commit.
 | `status_clean.json` | `vigil status --json`, clean state | `src/check/tests.rs` |
 | `status_assertions.json` | `vigil status --json` with two assertion holders | `src/check/tests.rs` |
 
-The JSON goldens predate the `"version": 1,` first key; the tests insert that
-line before comparing. Paths inside the files point at the capture sandbox
+The JSON goldens include their schema version and compare directly. Their recent
+Codex file supplies labeled uncertain fallback, not an exact working session.
+Paths inside the files point at the capture sandbox
 (`/private/tmp/vigil-golden-sbx`), and `helper.plist` / `vigil.newsyslog` carry
 the capture machine's uid and user name — the tests substitute both.

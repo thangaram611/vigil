@@ -1,0 +1,21 @@
+{
+  "session": "e54a6f1b-d4ca-4b51-8e5b-f06f52cfb03b",
+  "exit": 0,
+  "samples": 37,
+  "observed_states": [
+    "working"
+  ],
+  "working_samples": 20,
+  "unknown_samples": 0,
+  "idle_samples": 0,
+  "provider_reply_ok": true,
+  "session_after_host_exit": [],
+  "cleanup_host_gone": true,
+  "native_source_sha256": "c13201d216461a0997b5adf53152cad75bad6ce4bdc382900e1afef60ffc1d31",
+  "native_projection_sha256": "14aa28efb67f1dbcaa3c5db8e07d30230021679fc76eed59696d1594dbfd6241",
+  "registered_daemon_seen": true,
+  "verification": "actual disposable Copilot foreground shell and native OS collection; no physical lid or sleep experiment",
+  "launcher_version": "1.0.96",
+  "native_producer_stamp": "1.0.95",
+  "no_auto_update": true
+}

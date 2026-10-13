@@ -1,0 +1,83 @@
+{
+  "thread_id": "01a13467-6104-7ef0-b259-077e7eb29b14",
+  "host1": 32145,
+  "after_command": {
+    "pid": 32190,
+    "ppid": 32174,
+    "pgid": 32190,
+    "native_thread_id": "01a13467-6104-7ef0-b259-077e7eb29b14",
+    "sample": 0,
+    "at": 1791880553.148459,
+    "ps": "32190     1 32190 Tue Oct 13 14:05:53 2026     Ss   /opt/homebrew/Cellar/python@3.15/3.15.0/Frameworks/Python.framework/Versions/3.15/Resources/Python.app/Contents/MacOS/Python\n"
+  },
+  "terminals_before": {
+    "data": [],
+    "nextCursor": null
+  },
+  "before_host_stop": {
+    "pid": 32190,
+    "ppid": 32174,
+    "pgid": 32190,
+    "native_thread_id": "01a13467-6104-7ef0-b259-077e7eb29b14",
+    "sample": 0,
+    "at": 1791880553.148459,
+    "ps": "32190     1 32190 Tue Oct 13 14:05:53 2026     Ss   /opt/homebrew/Cellar/python@3.15/3.15.0/Frameworks/Python.framework/Versions/3.15/Resources/Python.app/Contents/MacOS/Python\n"
+  },
+  "host1_exit": 0,
+  "after_host_stop": {
+    "pid": 32190,
+    "ppid": 32174,
+    "pgid": 32190,
+    "native_thread_id": "01a13467-6104-7ef0-b259-077e7eb29b14",
+    "sample": 0,
+    "at": 1791880553.148459,
+    "ps": "32190     1 32190 Tue Oct 13 14:05:53 2026     Ss   /opt/homebrew/Cellar/python@3.15/3.15.0/Frameworks/Python.framework/Versions/3.15/Resources/Python.app/Contents/MacOS/Python\n"
+  },
+  "host2": 32241,
+  "terminals_after": {
+    "data": [],
+    "nextCursor": null
+  },
+  "after_resume": {
+    "pid": 32190,
+    "ppid": 32174,
+    "pgid": 32190,
+    "native_thread_id": "01a13467-6104-7ef0-b259-077e7eb29b14",
+    "sample": 0,
+    "at": 1791880553.148459,
+    "ps": "32190     1 32190 Tue Oct 13 14:05:53 2026     Ss   /opt/homebrew/Cellar/python@3.15/3.15.0/Frameworks/Python.framework/Versions/3.15/Resources/Python.app/Contents/MacOS/Python\n"
+  },
+  "ten_seconds_after_resume": {
+    "pid": 32190,
+    "ppid": 1,
+    "pgid": 32190,
+    "native_thread_id": "01a13467-6104-7ef0-b259-077e7eb29b14",
+    "sample": 2,
+    "at": 1791880563.1520529,
+    "ps": "32190     1 32190 Tue Oct 13 14:05:53 2026     Ss   /opt/homebrew/Cellar/python@3.15/3.15.0/Frameworks/Python.framework/Versions/3.15/Resources/Python.app/Contents/MacOS/Python\n"
+  },
+  "archive": {},
+  "server_exits": [
+    {
+      "pid": 32145,
+      "exit": 0
+    },
+    {
+      "pid": 32241,
+      "exit": 0
+    }
+  ],
+  "final": {
+    "pid": 32190,
+    "ppid": 1,
+    "pgid": 32190,
+    "native_thread_id": "01a13467-6104-7ef0-b259-077e7eb29b14",
+    "sample": 2,
+    "at": 1791880563.1520529,
+    "ps": "32190     1 32190 Tue Oct 13 14:05:53 2026     Ss   /opt/homebrew/Cellar/python@3.15/3.15.0/Frameworks/Python.framework/Versions/3.15/Resources/Python.app/Contents/MacOS/Python\n"
+  },
+  "detached_done": {
+    "pid": 32190,
+    "at": 1791880633.186979
+  }
+}

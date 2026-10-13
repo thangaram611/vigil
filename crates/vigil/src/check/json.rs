@@ -1,9 +1,4 @@
-//! `status --json` emitter — Phase 5.7 §5.1/§5.2.
-//!
-//! HAND-EMITS the object in the FROZEN key order. Does NOT derive `Serialize`
-//! (whose field order/escaping could drift). The output (MINUS the prepended
-//! `"version": 1,` first line) is byte-identical to the captured bash golden
-//! `tests/golden/status_clean.json`.
+//! Version 2 status JSON. Fresh activity and cached policy are separate.
 
 use std::fmt::Write as _;
 
@@ -12,12 +7,9 @@ use crate::power::assertions::Assertion;
 
 /// The schema version (decision Q2). Prepended as the new FIRST `--json` key with
 /// a trailing comma. Bump on any key add/remove/reorder.
-pub const STATUS_JSON_VERSION: u32 = 1;
+pub const STATUS_JSON_VERSION: u32 = 2;
 
-/// Escape a string with the bash `vigil_json_escape` semantics: `\` → `\\`,
-/// `"` → `\"`, TAB → `\t`, CR → `\r`, LF → `\n` — IN THAT ORDER (the `\`-first
-/// order matters so the inserted backslashes are not re-escaped). No other
-/// control chars are touched (the operational strings are short ASCII).
+/// Escape dynamic strings, including every JSON control character.
 fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
@@ -27,6 +19,9 @@ fn json_escape(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             '\r' => out.push_str("\\r"),
             '\n' => out.push_str("\\n"),
+            c if c < ' ' => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
             c => out.push(c),
         }
     }
@@ -45,10 +40,13 @@ fn opt_num<T: std::fmt::Display>(v: Option<T>) -> String {
 fn agents_obj(s: &StatusSnapshot) -> String {
     format!(
         "{{\"claude\":\"{}\",\"codex\":\"{}\",\"copilot\":\"{}\",\"vscode_copilot_chat\":\"{}\"}}",
-        s.agent_claude.as_str(),
-        s.agent_codex.as_str(),
-        s.agent_copilot.as_str(),
-        s.agent_vscode_copilot_chat.as_str(),
+        s.activity
+            .provider_state(crate::activity::scan::Agent::Claude),
+        s.activity
+            .provider_state(crate::activity::scan::Agent::Codex),
+        s.activity
+            .provider_state(crate::activity::scan::Agent::Copilot),
+        s.agent_vscode_copilot_chat,
     )
 }
 
@@ -94,10 +92,63 @@ fn assertions_arr(holders: &[Assertion]) -> String {
     out
 }
 
+fn activity_obj(s: &StatusSnapshot) -> String {
+    let a = &s.activity;
+    format!(
+        "{{\"working\":{},\"waiting\":{},\"idle\":{},\"unknown\":{},\"detected_hosts\":{},\"wrappers\":{},\"vscode\":{},\"uncertain_demand\":{},\"uncertain_providers\":{},\"sessions\":{}}}",
+        a.working(),
+        a.waiting(),
+        a.idle(),
+        a.unknown(),
+        a.detected_hosts,
+        a.wrappers,
+        a.vscode,
+        a.uncertain(),
+        serde_json::to_string(&a.uncertain_providers).unwrap(),
+        serde_json::to_string(&a.sessions).unwrap(),
+    )
+}
+
+fn cached_policy_obj(s: &StatusSnapshot) -> String {
+    let Some(t) = &s.cached_policy else {
+        return "null".to_string();
+    };
+    let flag = |v: Option<bool>| {
+        v.map(|b| b.to_string())
+            .unwrap_or_else(|| "null".to_string())
+    };
+    format!(
+        "{{\"version\":{},\"age_secs\":{},\"identity_matches\":{},\"daemon_pid\":{},\"daemon_start\":{},\"evaluation_sequence\":{},\"working\":{},\"waiting\":{},\"idle\":{},\"unknown\":{},\"detected_hosts\":{},\"wrappers\":{},\"vscode\":{},\"uncertain_demand\":{},\"grace_remaining_secs\":{},\"desired_hold\":{},\"engaged\":{},\"thermal_cut\":{},\"battery_cut\":{},\"cooling\":{},\"mode\":\"{}\",\"reason\":\"{}\",\"refresh_supported\":{}}}",
+        t.version,
+        opt_num(s.cached_policy_age_secs),
+        s.cached_policy_identity_matches,
+        t.pid,
+        opt_num(t.daemon_start),
+        t.evaluation_sequence,
+        opt_num(t.working),
+        opt_num(t.waiting),
+        opt_num(t.idle),
+        opt_num(t.unknown),
+        opt_num(t.detected_hosts),
+        opt_num(t.wrappers),
+        flag(t.vscode),
+        opt_num(t.uncertain),
+        t.grace_remaining,
+        t.desired_hold,
+        t.engaged,
+        t.thermal_cut,
+        t.battery_cut,
+        t.cooling,
+        t.mode.as_str(),
+        t.policy_reason(),
+        t.supports_refresh(),
+    )
+}
+
 impl StatusSnapshot {
-    /// Hand-emit the FROZEN `--json` object (§5.1). Opens `{\n`, closes `}\n`,
+    /// Hand-emit the versioned `--json` object (§5.1). Opens `{\n`, closes `}\n`,
     /// two-space indent on every key, every key but the last (`power_assertions`)
-    /// trailing-comma. Prepends `"version": 1,` as the first key.
+    /// trailing-comma. Prepends the schema version as the first key.
     pub fn to_json(&self) -> String {
         let mut o = String::new();
         o.push_str("{\n");
@@ -114,13 +165,8 @@ impl StatusSnapshot {
             "  \"daemon_scan_age_secs\": {},",
             opt_num(self.daemon_scan_age_secs)
         );
-        let _ = writeln!(o, "  \"refcount_active\": {},", self.refcount_active);
-        let _ = writeln!(o, "  \"refcount_total\": {},", self.refcount_total);
-        let _ = writeln!(
-            o,
-            "  \"pending_active_matches\": {},",
-            self.pending_active_matches
-        );
+        let _ = writeln!(o, "  \"activity\": {},", activity_obj(self));
+        let _ = writeln!(o, "  \"cached_policy\": {},", cached_policy_obj(self));
         let _ = writeln!(
             o,
             "  \"idle_window_minutes\": {},",
@@ -139,7 +185,11 @@ impl StatusSnapshot {
         let _ = writeln!(o, "  \"caffeinate_alive\": {},", self.caffeinate_alive);
         let _ = writeln!(o, "  \"thermal\": \"{}\",", json_escape(&self.thermal));
         let _ = writeln!(o, "  \"battery\": \"{}\",", json_escape(&self.battery));
-        let _ = writeln!(o, "  \"power_helper_ok\": {},", self.power_helper_ok);
+        let _ = writeln!(
+            o,
+            "  \"power_helper\": {},",
+            serde_json::to_string(&self.power_helper).unwrap()
+        );
         let _ = writeln!(
             o,
             "  \"power_assertions_state\": \"{}\",",
@@ -173,6 +223,7 @@ mod tests {
         assert_eq!(json_escape("\\\t"), "\\\\\\t");
         // Plain ASCII untouched.
         assert_eq!(json_escape("ok 90%"), "ok 90%");
+        assert_eq!(json_escape("\0\u{1}"), "\\u0000\\u0001");
     }
 
     #[test]
@@ -182,7 +233,7 @@ mod tests {
         assert_eq!(opt_num(Some(-3i64)), "-3");
     }
 
-    use crate::check::{DaemonScanState, ProviderRoot, TriState};
+    use crate::check::{DaemonScanState, HelperInspection, ProviderRoot};
 
     /// Build a provider root with the given dynamic strings.
     fn provider(home: &str, session_dir: &str) -> ProviderRoot {
@@ -206,14 +257,12 @@ mod tests {
             daemon_pid: Some(1234),
             daemon_scan_state: DaemonScanState::Fresh,
             daemon_scan_age_secs: Some(3),
-            refcount_active: 1,
-            refcount_total: 2,
-            pending_active_matches: 0,
+            activity: crate::activity::ActivitySnapshot::default(),
+            cached_policy: None,
+            cached_policy_age_secs: None,
+            cached_policy_identity_matches: false,
             idle_window_minutes: 10,
-            agent_claude: TriState::Active,
-            agent_codex: TriState::Idle,
-            agent_copilot: TriState::None,
-            agent_vscode_copilot_chat: TriState::None,
+            agent_vscode_copilot_chat: "none",
             // a quote + a backslash in home; a TAB + a LF in session_dir.
             provider_claude: provider("~/Li\"b\\c", "se\tss\nion"),
             provider_codex: provider("", ""),
@@ -225,7 +274,15 @@ mod tests {
             caffeinate_alive: false,
             thermal: "ok".to_string(),
             battery: "AC 90%".to_string(),
-            power_helper_ok: true,
+            power_helper: HelperInspection {
+                binary_valid: true,
+                launchdaemon_valid: true,
+                launchd_loaded: true,
+                process_pid: None,
+                process_start: None,
+                ipc_permissions_valid: true,
+                responsiveness: "unchecked",
+            },
             power_assertions_state: "ok".to_string(),
             // a quote in process, a backslash in type.
             power_assertions: vec![Assertion {
@@ -260,7 +317,7 @@ mod tests {
         );
         // closed enums are emitted plain (no escape path).
         assert!(
-            json.contains(r#""claude":"active""#),
+            json.contains(r#""claude":"none""#),
             "agent enum plain: {json}"
         );
         assert!(

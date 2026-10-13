@@ -157,7 +157,7 @@ fn flat_json(s: &str) -> BTreeMap<String, String> {
 // ── status --json ─────────────────────────────────────────────────────────────
 
 #[test]
-fn status_json_version_is_first_key_and_one() {
+fn status_json_version_is_first_key_and_two() {
     let sbx = Sandbox::new("jsonver");
     let (code, out, _err) = run(&["status", "--json"], &sbx);
     assert_eq!(code, 0, "status --json always exits 0");
@@ -166,8 +166,8 @@ fn status_json_version_is_first_key_and_one() {
     assert_eq!(lines.next(), Some("{"));
     assert_eq!(
         lines.next(),
-        Some("  \"version\": 1,"),
-        "version must be the first key with value 1"
+        Some("  \"version\": 2,"),
+        "version must be the first key with value 2"
     );
 }
 
@@ -185,9 +185,8 @@ fn status_json_schema_is_complete_and_deterministic() {
         "daemon_pid",
         "daemon_scan_state",
         "daemon_scan_age_secs",
-        "refcount_active",
-        "refcount_total",
-        "pending_active_matches",
+        "activity",
+        "cached_policy",
         "idle_window_minutes",
         "agents",
         "provider_roots",
@@ -198,7 +197,7 @@ fn status_json_schema_is_complete_and_deterministic() {
         "caffeinate_alive",
         "thermal",
         "battery",
-        "power_helper_ok",
+        "power_helper",
         "power_assertions_state",
         "power_assertions",
     ] {
@@ -206,18 +205,35 @@ fn status_json_schema_is_complete_and_deterministic() {
     }
 
     // The deterministic (fixture-pinned / clean-state) values.
-    assert_eq!(m["version"], "1");
+    assert_eq!(m["version"], "2");
     assert_eq!(m["launchd_loaded"], "false");
     assert_eq!(m["daemon_pid"], "null");
     assert_eq!(m["daemon_scan_state"], "\"unloaded\"");
-    assert_eq!(m["refcount_active"], "0");
-    assert_eq!(m["refcount_total"], "0");
-    assert_eq!(m["pending_active_matches"], "0");
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    for counter in ["working", "waiting", "idle", "wrappers", "uncertain_demand"] {
+        assert_eq!(value["activity"][counter], 0, "isolated fixture {counter}");
+    }
+    // Live process discovery can see cold orphan markers outside the isolated
+    // provider roots. They must remain unknown and supply no exact work.
+    assert!(
+        value["activity"]["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|session| session["state"] == "unknown")
+    );
+    assert_eq!(value["cached_policy"], serde_json::Value::Null);
+    assert!(
+        value.get("refcount_active").is_none(),
+        "legacy ratios are removed"
+    );
     assert_eq!(m["idle_window_minutes"], "5");
     assert_eq!(m["power_hold_mode"], "\"best-effort\"");
     assert_eq!(m["thermal"], "\"ok\"");
     assert_eq!(m["battery"], "\"AC 90%\"");
-    assert_eq!(m["power_helper_ok"], "false");
+    assert_eq!(value["power_helper"]["binary_valid"], false);
+    assert_eq!(value["power_helper"]["ipc_permissions_valid"], false);
+    assert_eq!(value["power_helper"]["responsiveness"], "unchecked");
     assert_eq!(m["power_assertions_state"], "\"none\"");
     assert_eq!(m["power_assertions"], "[]");
     // pmset_disablesleep is a live `/usr/bin/pmset` read (machine-dependent) →
@@ -239,6 +255,85 @@ fn status_json_is_valid_json() {
     serde_json::from_str::<serde_json::Value>(&out).expect("status --json must be parseable JSON");
 }
 
+#[test]
+fn status_distinguishes_fresh_activity_from_legacy_and_stale_cached_policy() {
+    let sbx = Sandbox::new("cached-policy");
+    let tick_file = sbx.state_dir().join("daemon.tick");
+    let legacy = "pid=4242\nupdated_at=1700000000\ntick_secs=5\nrefcount_active=4\ndesired_hold=1\nengaged=1\nthermal_cut=0\nbattery_cut=0\ncooling=0\nmode=auto\n";
+    std::fs::write(&tick_file, legacy).unwrap();
+    let (code, out, _) = run(&["status", "--json"], &sbx);
+    assert_eq!(code, 0);
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(value["activity"]["working"], 0);
+    assert_eq!(value["cached_policy"]["version"], 1);
+    assert_eq!(value["cached_policy"]["working"], serde_json::Value::Null);
+    assert_eq!(value["cached_policy"]["reason"], "legacy-policy");
+    assert_eq!(value["cached_policy"]["refresh_supported"], false);
+
+    let tick = vigil::daemon::tick::TickSnapshot {
+        pid: 4242,
+        daemon_start: Some(1699999900),
+        updated_at: 1700000000,
+        working: Some(4),
+        desired_hold: true,
+        engaged: true,
+        ..Default::default()
+    };
+    std::fs::write(&tick_file, vigil::daemon::tick::render(&tick)).unwrap();
+    let (code, out, _) = run(&["status", "--json"], &sbx);
+    assert_eq!(code, 0);
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(value["activity"]["working"], 0);
+    assert_eq!(value["cached_policy"]["working"], 4);
+    assert_eq!(value["cached_policy"]["identity_matches"], false);
+    assert!(value["cached_policy"]["age_secs"].as_i64().unwrap() > 15);
+    assert_eq!(
+        std::fs::read_to_string(tick_file).unwrap(),
+        vigil::daemon::tick::render(&tick)
+    );
+}
+
+#[test]
+fn status_and_debug_share_cached_vscode_gate_without_writes() {
+    let sbx = Sandbox::new("cached-vscode");
+    let state = sbx.state_dir().join("vscode-copilot-chat.state");
+    // Far-future gate: both readers must honor it only with a present host.
+    std::fs::write(
+        &state,
+        "active_until\t9999999999\nlast_scan\t1\nprimed\t1\n",
+    )
+    .unwrap();
+    for (host, demand) in [
+        ("", false),
+        (
+            "/Applications/Visual Studio Code.app/Contents/MacOS/Electron",
+            true,
+        ),
+    ] {
+        for subcommand in ["status", "debug"] {
+            let before = tree_snapshot(&sbx.root);
+            let mut cmd = bin();
+            sbx.apply_env(&mut cmd);
+            let out = cmd
+                .args([subcommand, "--json"])
+                .env("VIGIL_VSCODE_PS_FIXTURE", host)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            let value: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            assert_eq!(
+                value["activity"]["vscode"], demand,
+                "{subcommand}: cached gate + host"
+            );
+            assert_eq!(
+                before,
+                tree_snapshot(&sbx.root),
+                "{subcommand} must not rescan or rewrite the gate"
+            );
+        }
+    }
+}
+
 // ── status text ───────────────────────────────────────────────────────────────
 
 #[test]
@@ -253,12 +348,12 @@ fn status_text_blocks_and_hint() {
         "    scan:          not running",
         "    root helper:   not loaded",
         "  activity",
-        "    refcount:      0 active / 0 total (idle window 5m)",
+        "    sessions:      0 working / 0 waiting / 0 idle /",
         "  power",
         "    thermal:       ok",
         "    battery:       AC 90%",
         "    assertions:    none",
-        "  detail: use 'vigil status --verbose' for provider paths and assertion rows",
+        "  detail: use 'vigil status --verbose' for session evidence, provider paths and assertion rows",
     ] {
         assert!(
             out.contains(needle),
@@ -278,8 +373,8 @@ fn status_verbose_adds_provider_roots_and_assertions() {
     assert_eq!(code, 0);
     assert!(out.contains("  provider roots:"));
     assert!(
-        out.contains("exists=yes state=idle"),
-        "codex provider state"
+        out.contains("exists=yes state=none") || out.contains("exists=yes state=unknown"),
+        "unobserved or cold-orphan Codex state is never fabricated working"
     );
     assert!(out.contains("  power assertions:"));
     assert!(out.contains("    (none)"));
@@ -355,7 +450,7 @@ fn doctor_verbose_shows_paths_and_provider_roots() {
     assert!(out.contains("LaunchAgent:"));
     assert!(out.contains("  provider roots:"));
     assert!(
-        out.contains("state=idle"),
+        out.contains("state=none"),
         "codex provider state in doctor verbose"
     );
 }
@@ -369,7 +464,8 @@ fn doctor_power_nonzero_when_helper_unavailable() {
         "vigil power doctor",
         "  power hold mode:    best-effort",
         "  display sleep:      allowed",
-        "  root helper:        FAIL",
+        "  root helper:        FAIL (missing or invalid installation)",
+        "  responsiveness:     unchecked",
         "  thermal:            ok",
         "  battery:            AC 90%",
         "  power assertions:   none",
@@ -381,4 +477,57 @@ fn doctor_power_nonzero_when_helper_unavailable() {
             "power doctor missing: {needle:?}\n{out}"
         );
     }
+}
+
+/// Diagnostics must leave provider, state and privileged IPC trees untouched,
+/// including directory mtimes. Creating and deleting a helper request is still
+/// a write even when no artifact remains after its timeout.
+#[test]
+fn diagnostics_are_read_only_including_helper_ipc() {
+    let sbx = Sandbox::new("readonly-ipc");
+    let uid = vigil::config::get_uid();
+    for sub in [
+        format!("root/helper/requests/{uid}"),
+        format!("root/helper/responses/{uid}"),
+        "root/helper/state".to_string(),
+        "root/helper/logs".to_string(),
+    ] {
+        let dir = sbx.root.join(sub);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("seed"), "unchanged\n").unwrap();
+    }
+    for args in [
+        vec!["status", "--json"],
+        vec!["doctor"],
+        vec!["doctor", "--power"],
+        vec!["debug", "--json"],
+    ] {
+        let before = tree_snapshot(&sbx.root);
+        let _ = run(&args, &sbx);
+        assert_eq!(
+            before,
+            tree_snapshot(&sbx.root),
+            "{args:?} must not write even transient IPC requests"
+        );
+    }
+}
+
+fn tree_snapshot(root: &Path) -> BTreeMap<PathBuf, (Vec<u8>, std::time::SystemTime)> {
+    fn visit(root: &Path, result: &mut BTreeMap<PathBuf, (Vec<u8>, std::time::SystemTime)>) {
+        let meta = std::fs::symlink_metadata(root).unwrap();
+        let bytes = if meta.is_file() {
+            std::fs::read(root).unwrap()
+        } else {
+            Vec::new()
+        };
+        result.insert(root.to_path_buf(), (bytes, meta.modified().unwrap()));
+        if meta.is_dir() {
+            for entry in std::fs::read_dir(root).unwrap() {
+                visit(&entry.unwrap().path(), result);
+            }
+        }
+    }
+    let mut result = BTreeMap::new();
+    visit(root, &mut result);
+    result
 }

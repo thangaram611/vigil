@@ -45,6 +45,10 @@ pub struct ProcRecord {
     pub exe: String,
     /// = bash `command_line` (full argv, space-joined).
     pub cmdline: String,
+    pub start_time: i64,
+    pub parent: Option<u32>,
+    pub same_user: bool,
+    pub zombie: bool,
 }
 
 /// A long-lived `sysinfo::System`, created ONCE for the daemon lifetime (never
@@ -72,7 +76,8 @@ impl ProcScanner {
     pub fn collect(&mut self) -> Vec<ProcRecord> {
         let kind = ProcessRefreshKind::nothing()
             .with_cmd(UpdateKind::Always)
-            .with_exe(UpdateKind::Always);
+            .with_exe(UpdateKind::Always)
+            .with_user(UpdateKind::Always);
         self.sys
             .refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
 
@@ -99,9 +104,76 @@ impl ProcScanner {
                 pid: pid.as_u32(),
                 exe,
                 cmdline,
+                start_time: proc_.start_time() as i64,
+                parent: proc_.parent().map(|p| p.as_u32()),
+                same_user: proc_
+                    .user_id()
+                    .is_some_and(|u| **u == unsafe { libc::geteuid() }),
+                zombie: proc_.status() == sysinfo::ProcessStatus::Zombie,
             });
         }
         out
+    }
+
+    /// Scoped, ephemeral environment extraction. Retain only native markers.
+    pub fn session_markers(
+        &self,
+        pids: &[u32],
+    ) -> std::collections::BTreeMap<
+        u32,
+        std::collections::BTreeMap<crate::activity::scan::Agent, String>,
+    > {
+        use crate::activity::scan::Agent;
+        let mut sys = System::new();
+        let pids: Vec<_> = pids.iter().map(|p| sysinfo::Pid::from_u32(*p)).collect();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&pids),
+            true,
+            ProcessRefreshKind::nothing()
+                .with_environ(UpdateKind::Always)
+                .with_cmd(UpdateKind::Always),
+        );
+        let mut result = std::collections::BTreeMap::new();
+        for (pid, p) in sys.processes() {
+            let mut markers = std::collections::BTreeMap::new();
+            for env in p.environ() {
+                let raw = env.to_string_lossy();
+                for (key, agent) in [
+                    ("CLAUDE_CODE_SESSION_ID", Agent::Claude),
+                    ("CODEX_THREAD_ID", Agent::Codex),
+                    ("COPILOT_AGENT_SESSION_ID", Agent::Copilot),
+                ] {
+                    if let Some(value) = raw.strip_prefix(key).and_then(|s| s.strip_prefix('=')) {
+                        markers.insert(agent, value.to_owned());
+                    }
+                }
+            }
+            result.insert(pid.as_u32(), markers);
+        }
+        result
+    }
+    pub fn identity_matches(&self, pid: u32, start: i64) -> bool {
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        sys.process(sysinfo::Pid::from_u32(pid)).is_some_and(|p| {
+            p.start_time() as i64 == start && p.status() != sysinfo::ProcessStatus::Zombie
+        })
+    }
+    /// Actual registration identity uses the same source as the scanner/GC.
+    pub fn process_start(pid: u32) -> Option<i64> {
+        let mut sys = System::new();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[sysinfo::Pid::from_u32(pid)]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        sys.process(sysinfo::Pid::from_u32(pid))
+            .map(|p| p.start_time() as i64)
+            .filter(|t| *t > 0)
     }
 
     /// Live detect: [`collect`](Self::collect) then [`detect_line`] over each record.

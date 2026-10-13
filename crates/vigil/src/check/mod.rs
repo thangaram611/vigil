@@ -1,36 +1,17 @@
-//! `src/check/` — the unified CheckEngine — Phase 5.7 §2.3 + §5.
+//! Shared read-only collection for status, doctor and debug.
 //!
-//! ONE engine produces a [`StatusSnapshot`] (every `vigil status --json` value)
-//! plus a `Vec<Check>` checklist, consumed by BOTH `vigil status` (always exit 0)
-//! and `vigil doctor` (three-state). This commit builds + tests the engine and
-//! its hand-emitted `--json` writer; it is NOT yet wired to any dispatch arm
-//! (status/doctor stay shimmed to bash this stage — §6.3 Commit 2).
-//!
-//! ## Read-only
-//! Like [`crate::debug::assemble`], the snapshot scans live state and reads files
-//! but MUST NOT write/refresh/GC any pid or state file. The vscode flag is read
-//! the same read-only way `debug` reads it (parse the state file, never rescan).
-//! The single addition over `debug::assemble` is the daemon round-trip the
-//! status path needs: the launchctl `print` load check, the daemon pidfile read,
-//! and the tick-file read that drives [`DaemonScanState`].
-//!
-//! ## `--json` byte-stability (§5)
-//! [`StatusSnapshot::to_json`] HAND-EMITS the object in the FROZEN key order
-//! (§5.1 table) — it does NOT derive `Serialize` (whose field order/escaping
-//! could drift). It prepends the new `"version": 1,` first key (decision Q2); the
-//! remaining 21 keys keep the exact order/types/escaping of the captured bash
-//! golden, so `to_json()` MINUS the version line equals
-//! `tests/golden/status_clean.json` byte-for-byte.
+//! Provider activity uses the same collector as the daemon. Diagnostics read
+//! the cached VS Code gate and daemon policy, and never issue helper requests.
 
 use std::path::Path;
 
-use crate::activity::scan::{self, Agent, AgentState};
+use crate::activity::scan::{self, Agent};
 use crate::activity::vscode::{self, VscodeState};
+use crate::activity::{ActivityCollector, ActivitySnapshot};
 use crate::config::VigilConfig;
-use crate::ipc::HelperClient;
+use crate::daemon::tick::{self, TickSnapshot};
 use crate::power::assertions::{self, Assertion, AssertionsSummary};
-use crate::procscan::{AgentKind, AgentMatch, ProcScanner};
-use crate::refcount;
+use crate::procscan::{ProcRecord, ProcScanner};
 
 mod json;
 #[cfg(test)]
@@ -39,8 +20,8 @@ mod tests;
 // ── Check / report shapes (§2.3.1) ────────────────────────────────────────────
 
 /// Per-check severity. `Info` is informational (no counter); `Ok` is a passing
-/// check; `Warn` is the (sole) lock-helper-missing third state; `Error` is any
-/// other failed check.
+/// check; `Warn` reports an unchecked or optional condition; `Error` is a
+/// concrete failed check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Info,
@@ -124,37 +105,6 @@ impl DaemonScanState {
     }
 }
 
-/// Parsed daemon tick-file fields the scan classifier needs (§2.1.6 frozen ABI).
-#[derive(Debug, Default, Clone)]
-struct TickFields {
-    pid: Option<String>,
-    updated_at: Option<String>,
-    tick_secs: Option<String>,
-}
-
-/// `awk -F=` first-match parse of the daemon tick file (Contract 1 §5: `=` is the
-/// first separator, one field per line). Returns `None` only when the file is
-/// absent; individual fields are `None` when the key is missing.
-fn read_tick_fields(tick_file: &Path) -> Option<TickFields> {
-    let text = std::fs::read_to_string(tick_file).ok()?;
-    let mut f = TickFields::default();
-    for line in text.lines() {
-        if let Some((k, v)) = line.split_once('=') {
-            let slot = match k {
-                "pid" => &mut f.pid,
-                "updated_at" => &mut f.updated_at,
-                "tick_secs" => &mut f.tick_secs,
-                _ => continue,
-            };
-            // awk first-match-wins: don't clobber an earlier value.
-            if slot.is_none() {
-                *slot = Some(v.to_string());
-            }
-        }
-    }
-    Some(f)
-}
-
 fn is_numeric(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
@@ -166,7 +116,7 @@ fn is_numeric(s: &str) -> bool {
 fn classify_scan_state(
     loaded: bool,
     daemon_pid: Option<&str>,
-    tick: Option<&TickFields>,
+    tick: Option<&TickSnapshot>,
     pidfile_mtime: Option<i64>,
     now: i64,
     cfg_tick_secs: u32,
@@ -181,13 +131,11 @@ fn classify_scan_state(
         _ => return (DaemonScanState::Starting, None),
     };
 
-    let tick_pid = tick.and_then(|t| t.pid.as_deref());
-    let updated = tick.and_then(|t| t.updated_at.as_deref());
+    let tick_pid = tick.map(|t| t.pid.to_string());
 
     // pending / missing — tick pid ≠ daemon pid OR updated_at non-numeric.
-    let pid_match = tick_pid == Some(daemon_pid);
-    let updated_numeric = updated.is_some_and(is_numeric);
-    if !pid_match || !updated_numeric {
+    let pid_match = tick_pid.as_deref() == Some(daemon_pid);
+    if !pid_match {
         // missing iff pidfile age > missing_after = max(10, wait + tick + 3).
         if let Some(mtime) = pidfile_mtime
             && mtime != 0
@@ -205,18 +153,15 @@ fn classify_scan_state(
     }
 
     // stale / fresh — pid matches and updated_at numeric.
-    let updated_val: i64 = updated.unwrap().parse().unwrap_or(0);
+    let updated_val = tick.unwrap().updated_at;
     let mut age = now - updated_val;
     if age < 0 {
         age = 0;
     }
-    // tick_secs from the tick file if numeric, else cfg.
     let tick_secs = tick
-        .and_then(|t| t.tick_secs.as_deref())
-        .filter(|s| is_numeric(s))
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(cfg_tick_secs as i64);
-    let stale_after = (tick_secs * 2 + 5).max(15);
+        .map(|t| i64::from(t.tick_secs))
+        .unwrap_or(i64::from(cfg_tick_secs));
+    let stale_after = tick::stale_after(tick_secs);
     if age > stale_after {
         (DaemonScanState::Stale, Some(age))
     } else {
@@ -235,35 +180,9 @@ pub struct ProviderRoot {
     pub latest_activity_age_secs: Option<i64>,
 }
 
-/// The per-agent tri-state (`active`|`idle`|`none`) shown in the agents
-/// sub-object (§5.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TriState {
-    None,
-    Active,
-    Idle,
-}
-
-impl TriState {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            TriState::None => "none",
-            TriState::Active => "active",
-            TriState::Idle => "idle",
-        }
-    }
-    fn from_agent_state(s: AgentState) -> Self {
-        match s {
-            AgentState::None => TriState::None,
-            AgentState::Active => TriState::Active,
-            AgentState::Idle => TriState::Idle,
-        }
-    }
-}
-
 /// Carries EVERY `--json` value (§5.1) plus the bits the status text blocks need.
 /// Built once by [`CheckEngine::run`]; rendered by [`StatusSnapshot::to_json`]
-/// (machine schema) or the (future) status text renderer.
+/// (machine schema) or the status text renderer.
 #[derive(Debug, Clone)]
 pub struct StatusSnapshot {
     // 1..8
@@ -271,15 +190,14 @@ pub struct StatusSnapshot {
     pub daemon_pid: Option<u32>,
     pub daemon_scan_state: DaemonScanState,
     pub daemon_scan_age_secs: Option<i64>,
-    pub refcount_active: u32,
-    pub refcount_total: u32,
-    pub pending_active_matches: u32,
+    /// Fresh read-only collection, independent of the cached daemon policy.
+    pub activity: ActivitySnapshot,
+    pub cached_policy: Option<TickSnapshot>,
+    pub cached_policy_age_secs: Option<i64>,
+    pub cached_policy_identity_matches: bool,
     pub idle_window_minutes: u32,
     // 9 agents
-    pub agent_claude: TriState,
-    pub agent_codex: TriState,
-    pub agent_copilot: TriState,
-    pub agent_vscode_copilot_chat: TriState,
+    pub agent_vscode_copilot_chat: &'static str,
     // 10 provider_roots (claude, codex, copilot — order preserved)
     pub provider_claude: ProviderRoot,
     pub provider_codex: ProviderRoot,
@@ -292,7 +210,7 @@ pub struct StatusSnapshot {
     pub caffeinate_alive: bool,
     pub thermal: String,
     pub battery: String,
-    pub power_helper_ok: bool,
+    pub power_helper: HelperInspection,
     // 19..20
     pub power_assertions_state: String,
     pub power_assertions: Vec<Assertion>,
@@ -335,51 +253,48 @@ impl LoadProbe for RealLoadProbe {
     }
 }
 
-/// The status/doctor helper liveness probe must stay snappy: it only needs to
-/// know whether the privileged helper answers a `status` ping *now*. The helper
-/// `--serve` loop polls its request dir every `poll_secs` (default 1s), so a
-/// couple of cycles is plenty. We cap the probe FAR below the 10s power-
-/// OPERATION timeout (`power_helper_timeout_secs`) — at the full timeout a single
-/// dead/slow helper blocks the ENTIRE status/doctor paint (the ~10s blank wait).
-/// This cap only affects the diagnostic snapshot; the daemon's real engage/
-/// release path builds its own client with the full timeout.
-const STATUS_PROBE_TIMEOUT_SECS: u32 = 2;
+/// Static helper evidence. Presence never implies verified responsiveness.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HelperInspection {
+    pub binary_valid: bool,
+    pub launchdaemon_valid: bool,
+    pub launchd_loaded: bool,
+    pub process_pid: Option<u32>,
+    pub process_start: Option<i64>,
+    pub ipc_permissions_valid: bool,
+    pub responsiveness: &'static str,
+}
+
+impl HelperInspection {
+    pub fn installation_valid(&self) -> bool {
+        self.binary_valid && self.launchdaemon_valid && self.ipc_permissions_valid
+    }
+}
 
 /// The unified check engine.
 pub struct CheckEngine;
 
 impl CheckEngine {
-    /// Run with the production seams (real launchctl probe + real helper client +
-    /// real `pmset -g` SleepDisabled reader).
+    /// Read live launchd state, processes, provider files and `pmset -g`.
     pub fn run(cfg: &VigilConfig, mode: CheckMode, now: i64) -> CheckReport {
         let probe = RealLoadProbe;
-        let helper = crate::ipc::MacHelperClient {
-            request_dir: std::path::PathBuf::from(&cfg.power_request_dir),
-            response_dir: std::path::PathBuf::from(&cfg.power_response_dir),
-            // Liveness probe, not a power operation — cap it (see the const docs).
-            timeout_secs: cfg.power_helper_timeout_secs.min(STATUS_PROBE_TIMEOUT_SECS),
-        };
         let sleep = crate::power::pmset::MacSleepReader;
-        Self::run_with(cfg, mode, now, &probe, &helper, &sleep)
+        Self::run_with(cfg, mode, now, &probe, &sleep)
     }
 
     /// Run with injected seams (the testable core). `mode` currently gates only
     /// the doctor checklist breadth; the snapshot is always fully built. The
     /// [`SleepReader`](crate::power::pmset::SleepReader) seam keeps the snapshot
     /// hermetic in tests (production reads live `pmset -g`).
-    pub fn run_with<P: LoadProbe, H: HelperClient, S: crate::power::pmset::SleepReader>(
+    pub fn run_with<P: LoadProbe, S: crate::power::pmset::SleepReader>(
         cfg: &VigilConfig,
         _mode: CheckMode,
         now: i64,
         probe: &P,
-        helper: &H,
         sleep: &S,
     ) -> CheckReport {
-        let snapshot = Self::snapshot(cfg, now, probe, helper, sleep);
-        // The doctor checklist is built by the (future) doctor command on top of
-        // this snapshot; Commit 2 lands the snapshot + emitter only. The report
-        // exposes an empty checklist with zeroed counters for now so the shape is
-        // stable for the doctor command to fill in Commit 4.
+        let snapshot = Self::snapshot(cfg, now, probe, sleep);
+        // Doctor renders the installation checklist from this shared snapshot.
         CheckReport {
             checks: Vec::new(),
             errs: 0,
@@ -401,7 +316,7 @@ impl CheckEngine {
         let loaded = probe.is_loaded(crate::service::USER_AGENT_LABEL);
         let daemon_pid_raw = std::fs::read_to_string(&cfg.daemon_pidfile).ok();
         let daemon_pid_str = daemon_pid_raw.as_ref().map(|s| s.trim().to_string());
-        let tick = read_tick_fields(Path::new(&cfg.daemon_tick_file));
+        let tick = tick::read(Path::new(&cfg.daemon_tick_file));
         let pidfile_mtime = file_mtime_secs(Path::new(&cfg.daemon_pidfile));
         classify_scan_state(
             loaded,
@@ -414,13 +329,11 @@ impl CheckEngine {
         )
     }
 
-    /// Assemble the full [`StatusSnapshot`] (read-only). Mirrors bash
-    /// `cmd_status_json` field-by-field (§5.1) so `to_json` is byte-stable.
-    fn snapshot<P: LoadProbe, H: HelperClient, S: crate::power::pmset::SleepReader>(
+    /// Assemble fresh activity and separately labeled cached policy read-only.
+    fn snapshot<P: LoadProbe, S: crate::power::pmset::SleepReader>(
         cfg: &VigilConfig,
         now: i64,
         probe: &P,
-        helper: &H,
         sleep: &S,
     ) -> StatusSnapshot {
         // 1. launchd_loaded.
@@ -435,7 +348,7 @@ impl CheckEngine {
             .and_then(|s| s.parse().ok());
 
         // 3/4. daemon_scan_state (+age).
-        let tick = read_tick_fields(Path::new(&cfg.daemon_tick_file));
+        let tick = tick::read(Path::new(&cfg.daemon_tick_file));
         let pidfile_mtime = file_mtime_secs(Path::new(&cfg.daemon_pidfile));
         let (scan_state, scan_age) = classify_scan_state(
             loaded,
@@ -455,59 +368,37 @@ impl CheckEngine {
         let copilot_dir =
             scan::session_dir_from_provider_home(Path::new(&cfg.copilot_home), Agent::Copilot);
 
-        let claude_state = scan::agent_state(
-            &claude_dir,
-            Agent::Claude.pattern(),
-            cfg.idle_after_sec,
-            now,
-        );
-        let codex_state =
-            scan::agent_state(&codex_dir, Agent::Codex.pattern(), cfg.idle_after_sec, now);
-        let copilot_state = scan::agent_state(
-            &copilot_dir,
-            Agent::Copilot.pattern(),
-            cfg.idle_after_sec,
-            now,
-        );
-
-        // vscode: read-only (host probe + state-file parse). `host_running(None)`
-        // honors VIGIL_VSCODE_PS_FIXTURE; the active flag is read from the
-        // existing state file (active_until > now) WITHOUT rescanning, mirroring
-        // `debug::vscode_active_readonly`.
-        let vscode_host = vscode::host_running(None);
-        let vscode_active =
-            vscode_host && vscode_active_readonly(&cfg.vscode_copilot_state_file, now);
-        let vscode_tri = if !vscode_host {
-            TriState::None
-        } else if vscode_active {
-            TriState::Active
-        } else {
-            TriState::Idle
-        };
-
-        let claude_active = claude_state == AgentState::Active;
-        let codex_active = codex_state == AgentState::Active;
-        let copilot_active = copilot_state == AgentState::Active;
-
-        // 5/6. refcount.
-        let active_dir = Path::new(&cfg.active_dir);
-        let refcount_active = refcount::count(
-            active_dir,
-            claude_active,
-            codex_active,
-            copilot_active,
-            vscode_active,
-        );
-        let refcount_total = refcount::count_total(active_dir);
-
-        // 7. pending_active_matches — only when active==0 yet some agent is
-        //    active AND launchd is loaded (bash gate).
-        let any_agent_active = claude_active || codex_active || copilot_active || vscode_active;
-        let pending_active_matches = if refcount_active == 0 && any_agent_active && loaded {
-            live_active_match_count(claude_active, codex_active, copilot_active, vscode_active)
-        } else {
-            0
-        };
+        // A single process snapshot feeds the shared classifier and helper
+        // identity view. No GC, provider commands or mutable VS Code scan.
+        let mut scanner = ProcScanner::new();
+        let records = scanner.collect();
+        let (activity, vscode_state) = collect_activity_readonly(cfg, &mut scanner, &records, now);
+        let cached_policy_age_secs = tick.as_ref().map(|t| (now - t.updated_at).max(0));
+        let installed_exe = Path::new(&cfg.install_dir)
+            .join("bin/vigil")
+            .canonicalize()
+            .ok();
+        let caller_exe = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.canonicalize().ok());
+        let cached_policy_identity_matches = tick.as_ref().is_some_and(|t| {
+            loaded
+                && Some(t.pid) == daemon_pid
+                && records.iter().any(|r| {
+                    r.pid == t.pid
+                        && !r.zombie
+                        && r.same_user
+                        && t.daemon_start.is_some_and(|start| r.start_time == start)
+                        && Path::new(&r.exe).canonicalize().ok().is_some_and(|exe| {
+                            installed_exe.as_ref() == Some(&exe)
+                                || caller_exe.as_ref() == Some(&exe)
+                        })
+                        && r.cmdline
+                            .strip_prefix(&r.exe)
+                            .or_else(|| r.cmdline.strip_prefix("vigil"))
+                            .is_some_and(|args| args.trim() == "daemon")
+                })
+        });
 
         // 8. idle_window_minutes = ceil(idle_after_sec / 60) (bash `(s+59)/60`).
         let idle_window_minutes = cfg.idle_after_sec.div_ceil(60);
@@ -544,8 +435,9 @@ impl CheckEngine {
         let battery = crate::battery::battery_summary(&batt_reading, cfg.battery_floor_pct);
         let cut_battery = crate::battery::live_should_cut(&batt_raw, cfg.battery_floor_pct);
 
-        // 18. power_helper_ok — status round-trip (DirsMissing/timeout → false).
-        let power_helper_ok = helper.status().is_ok();
+        // Installation and process evidence only. A health request writes IPC
+        // files, so responsiveness is deliberately unchecked in diagnostics.
+        let power_helper = inspect_helper(cfg, &records);
 
         // 19/20. power_assertions tri-state.
         let assertions_raw = assertions::read_assertions_raw();
@@ -561,14 +453,12 @@ impl CheckEngine {
             daemon_pid,
             daemon_scan_state: scan_state,
             daemon_scan_age_secs: scan_age,
-            refcount_active,
-            refcount_total,
-            pending_active_matches,
+            activity,
+            cached_policy: tick,
+            cached_policy_age_secs,
+            cached_policy_identity_matches,
             idle_window_minutes,
-            agent_claude: TriState::from_agent_state(claude_state),
-            agent_codex: TriState::from_agent_state(codex_state),
-            agent_copilot: TriState::from_agent_state(copilot_state),
-            agent_vscode_copilot_chat: vscode_tri,
+            agent_vscode_copilot_chat: vscode_state,
             provider_claude,
             provider_codex,
             provider_copilot,
@@ -579,7 +469,7 @@ impl CheckEngine {
             caffeinate_alive,
             thermal,
             battery,
-            power_helper_ok,
+            power_helper,
             power_assertions_state,
             power_assertions,
             cut_thermal,
@@ -600,7 +490,7 @@ fn file_mtime_secs(path: &Path) -> Option<i64> {
 }
 
 /// READ-ONLY vscode active: parse the existing state file, compare
-/// `active_until > now`. NEVER rescans (mirrors `debug::vscode_active_readonly`).
+/// `active_until > now`. Never rescan or rewrite the state file.
 fn vscode_active_readonly(state_file: &str, now: i64) -> bool {
     match std::fs::read_to_string(state_file) {
         Ok(text) => VscodeState::parse(&text).active_until > now,
@@ -632,27 +522,76 @@ fn caffeinate_alive_identity(pid: u32) -> bool {
     MacCaffeinate.is_alive_by_identity(pid)
 }
 
-/// Count live detect matches gated by per-agent activity (bash
-/// `cmd_live_active_match_count`). Builds its own scanner (this is the live
-/// re-scan the status path does ONLY in the pending-match sub-case).
-fn live_active_match_count(
-    claude_active: bool,
-    codex_active: bool,
-    copilot_active: bool,
-    vscode_active: bool,
-) -> u32 {
-    let matches: Vec<AgentMatch> = ProcScanner::new().detect();
-    let mut count = 0u32;
-    for m in matches {
-        let inc = match m.kind {
-            AgentKind::CliClaude => claude_active,
-            AgentKind::CliCodex | AgentKind::AppCodex => codex_active,
-            AgentKind::CliCopilot => copilot_active,
-            AgentKind::AppVscodeCopilotChat => vscode_active,
-        };
-        if inc {
-            count += 1;
-        }
+/// Read provider activity and the existing VS Code gate without changing files.
+pub(crate) fn collect_activity_readonly(
+    cfg: &VigilConfig,
+    scanner: &mut ProcScanner,
+    records: &[ProcRecord],
+    now: i64,
+) -> (ActivitySnapshot, &'static str) {
+    let mut activity = ActivityCollector::default().collect(cfg, scanner, records, now);
+    let host_text = std::env::var_os("VIGIL_VSCODE_PS_FIXTURE")
+        .map(|text| text.to_string_lossy().into_owned())
+        .unwrap_or_else(|| {
+            records
+                .iter()
+                .map(|r| r.cmdline.as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+    let host = vscode::host_running(Some(&host_text));
+    activity.vscode = host && vscode_active_readonly(&cfg.vscode_copilot_state_file, now);
+    let state = if !host {
+        "none"
+    } else if activity.vscode {
+        "active"
+    } else {
+        "idle"
+    };
+    (activity, state)
+}
+
+fn inspect_helper(cfg: &VigilConfig, records: &[ProcRecord]) -> HelperInspection {
+    use std::os::unix::fs::MetadataExt;
+    let valid_file = |path: &Path, executable: bool| {
+        std::fs::symlink_metadata(path).is_ok_and(|m| {
+            m.is_file()
+                && m.uid() == 0
+                && m.mode() & 0o022 == 0
+                && (!executable || m.mode() & 0o111 != 0)
+        })
+    };
+    let valid_dir = |path: &str, uid: u32, mode: u32| {
+        std::fs::symlink_metadata(path)
+            .is_ok_and(|m| m.is_dir() && m.uid() == uid && m.mode() & 0o777 == mode)
+    };
+    let identity = records.iter().find(|r| {
+        r.exe == cfg.root_helper
+            && r.start_time > 0
+            && !r.zombie
+            && r.cmdline.split_whitespace().any(|arg| arg == "--serve")
+    });
+    let target = format!("system/{}", crate::service::HELPER_LABEL);
+    let loaded = std::process::Command::new("launchctl")
+        .args(["print", &target])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    HelperInspection {
+        binary_valid: valid_file(Path::new(&cfg.root_helper), true),
+        launchdaemon_valid: valid_file(
+            Path::new(&format!(
+                "/Library/LaunchDaemons/{}.plist",
+                crate::service::HELPER_LABEL
+            )),
+            false,
+        ),
+        launchd_loaded: loaded,
+        process_pid: identity.map(|r| r.pid),
+        process_start: identity.map(|r| r.start_time),
+        ipc_permissions_valid: valid_dir(&cfg.power_request_dir, crate::config::get_uid(), 0o700)
+            && valid_dir(&cfg.power_response_dir, 0, 0o755),
+        responsiveness: "unchecked",
     }
-    count
 }

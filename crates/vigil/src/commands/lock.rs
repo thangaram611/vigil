@@ -191,7 +191,9 @@ fn lock_run(cfg: &VigilConfig, args: Vec<OsString>) -> i32 {
     }
     let pid = std::process::id();
     let pidfile = format!("{}/wrapper-{pid}.pid", cfg.active_dir);
-    let body = refcount::wrapper_pidfile_body(pid, "vigil lock", super::now_unix());
+    let start = vigil::procscan::ProcScanner::process_start(pid)
+        .unwrap_or_else(|| die("lock process identity unavailable"));
+    let body = refcount::wrapper_pidfile_body(pid, "vigil lock", start);
     if let Err(e) = std::fs::write(&pidfile, body) {
         die(&format!("could not write lock pidfile: {e}"));
     }
@@ -940,15 +942,16 @@ mod tests {
             battery_cut: false,
             cooling: false,
             mode: Mode::Auto,
+            ..Default::default()
         };
         assert!(!lock_power_hold_satisfied(None), "no tick file");
         let cases: &[(&str, TickSnapshot, bool)] = &[
-            ("counted, no power flag yet", base, false),
+            ("counted, no power flag yet", base.clone(), false),
             (
                 "counted + engaged",
                 TickSnapshot {
                     engaged: true,
-                    ..base
+                    ..base.clone()
                 },
                 true,
             ),
@@ -956,7 +959,7 @@ mod tests {
                 "counted + thermal",
                 TickSnapshot {
                     thermal_cut: true,
-                    ..base
+                    ..base.clone()
                 },
                 true,
             ),
@@ -964,7 +967,7 @@ mod tests {
                 "counted + battery",
                 TickSnapshot {
                     battery_cut: true,
-                    ..base
+                    ..base.clone()
                 },
                 true,
             ),
@@ -972,7 +975,7 @@ mod tests {
                 "counted + cooling",
                 TickSnapshot {
                     cooling: true,
-                    ..base
+                    ..base.clone()
                 },
                 true,
             ),
@@ -981,7 +984,7 @@ mod tests {
                 TickSnapshot {
                     refcount_active: 0,
                     engaged: true,
-                    ..base
+                    ..base.clone()
                 },
                 false,
             ),
@@ -989,7 +992,7 @@ mod tests {
                 "mode off: nothing to wait for",
                 TickSnapshot {
                     mode: Mode::Off,
-                    ..base
+                    ..base.clone()
                 },
                 true,
             ),

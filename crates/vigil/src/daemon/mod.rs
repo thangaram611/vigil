@@ -12,16 +12,19 @@
 //! decide → act → closed-lid follow-ups → write tick (POST-action engaged) →
 //! sleep.
 
+pub mod grace;
 pub mod lock;
+pub mod refresh;
 pub mod tick;
 
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crate::activity::scan::{self, Agent};
+use crate::activity::scan::Agent;
 use crate::activity::vscode;
+use crate::activity::{ActivityCollector, ActivitySnapshot};
 use crate::config::{self, VigilConfig};
 use crate::mode::{self, Mode};
 use crate::power::lid::{self, Lid, MacLid};
@@ -165,8 +168,15 @@ pub struct Daemon {
     /// THE one long-lived `sysinfo::System` (via the scanner) for detect +
     /// start-time.
     scanner: ProcScanner,
-    /// A SECOND bare `System` for the gc cpu probe (Q9 default).
-    sys_for_gc: sysinfo::System,
+    /// Incremental session reconstruction and in-memory process ownership.
+    activity_collector: ActivityCollector,
+    last_records: Vec<crate::procscan::ProcRecord>,
+    grace: grace::Grace,
+    started: Instant,
+    identity: refresh::DaemonIdentity,
+    evaluation_sequence: u64,
+    refresh_token: Option<String>,
+    wakeup: Arc<AtomicBool>,
     /// The joined `ps`-style cmdline text from THIS tick's single `scanner`
     /// pass, cached by `detect_and_touch` so the vscode host probe reuses it
     /// instead of spinning up a SECOND full process scan per tick.
@@ -202,6 +212,9 @@ impl Daemon {
             .join("\n");
         let active_dir = Path::new(&self.cfg.active_dir);
         for r in &records {
+            if !r.same_user || r.zombie {
+                continue;
+            }
             let Some(m) = crate::procscan::detect_line(r.pid, &r.exe, &r.cmdline) else {
                 continue;
             };
@@ -213,99 +226,76 @@ impl Daemon {
             let pidfile = active_dir.join(format!("{}-{}.pid", m.kind.name(), m.pid));
             let _ = std::fs::write(&pidfile, body);
         }
+        self.last_records = records;
     }
 
-    /// GC stale pidfiles on the shared gc System (§2.1.3 step 2).
-    fn gc(&mut self, now: i64) {
-        refcount::gc(
-            Path::new(&self.cfg.active_dir),
-            &mut self.sys_for_gc,
-            self.cfg.stale_age_secs,
-            self.cfg.stale_cpu_pct,
-            now,
-        );
+    /// Reuse the scanner's identity snapshot; low CPU never disproves work.
+    fn gc(&mut self, _now: i64) {
+        for e in refcount::read_entries(Path::new(&self.cfg.active_dir)) {
+            let disk = refcount::field(&e.body, "start_ts").and_then(|s| s.parse::<i64>().ok());
+            let live = self
+                .last_records
+                .iter()
+                .find(|r| r.pid == e.pid && !r.zombie);
+            if live.is_none() || live.is_some_and(|r| disk != Some(r.start_time)) {
+                let _ = std::fs::remove_file(e.path);
+            }
+        }
     }
-
-    /// Per-agent activity, computed once per tick (§2.1.3 step 3).
-    ///
-    /// vscode reuses THIS tick's single `scanner` pass via `last_ps_text` rather
-    /// than letting `host_running` spin up a second full process scan. The
-    /// `VIGIL_VSCODE_PS_FIXTURE` seam is preserved: when the fixture is set
-    /// (tests), pass `None` so `host_running` reads the fixture; otherwise hand it
-    /// the cached scan text.
-    fn activity(&self, now: i64) -> ActivityFlags {
-        let idle = self.cfg.idle_after_sec;
-        let claude = scan::is_active(
-            &scan::session_dir_from_provider_home(Path::new(&self.cfg.claude_home), Agent::Claude),
-            Agent::Claude.pattern(),
-            idle,
-            now,
-        );
-        let codex = scan::is_active(
-            &scan::session_dir_from_provider_home(Path::new(&self.cfg.codex_home), Agent::Codex),
-            Agent::Codex.pattern(),
-            idle,
-            now,
-        );
-        let copilot = scan::is_active(
-            &scan::session_dir_from_provider_home(
-                Path::new(&self.cfg.copilot_home),
-                Agent::Copilot,
-            ),
-            Agent::Copilot.pattern(),
-            idle,
-            now,
-        );
-        // Reuse this tick's single scan unless a ps fixture is set (test seam),
-        // in which case pass None so host_running reads VIGIL_VSCODE_PS_FIXTURE.
+    fn activity(&mut self, now: i64) -> ActivitySnapshot {
+        let mut activity =
+            self.activity_collector
+                .collect(&self.cfg, &mut self.scanner, &self.last_records, now);
         let ps_override = if std::env::var_os("VIGIL_VSCODE_PS_FIXTURE").is_some() {
             None
         } else {
             Some(self.last_ps_text.as_str())
         };
-        let vscode = vscode::chat_is_active(
+        activity.vscode = vscode::chat_is_active(
             Path::new(&self.cfg.copilot_home),
             Path::new(&self.cfg.vscode_copilot_state_file),
             now,
-            idle,
+            self.cfg.idle_after_sec,
             self.cfg.vscode_copilot_discover_secs,
             self.cfg.vscode_copilot_recent_mins,
             ps_override,
         );
-        ActivityFlags {
-            claude,
-            codex,
-            copilot,
-            vscode,
-        }
+        activity
     }
 
     /// One tick of the loop (§2.1.3). Returns nothing; mutates `self.engaged` and
     /// `self.cooldown_until`.
     fn tick(&mut self) {
+        let request = refresh::capture_request(
+            Path::new(&self.cfg.state_dir),
+            self.identity,
+            self.refresh_token.as_deref(),
+        )
+        .unwrap_or_else(|e| {
+            tracing::warn!("refresh request: {e}");
+            None
+        });
         // 1. detect + touch.
         self.detect_and_touch();
         // 2. gc.
         let now_gc = now_unix();
         self.gc(now_gc);
         // 3. per-agent activity (computed once/tick).
-        let flags = self.activity(now_gc);
-        // 4. activity-filtered count.
-        let active_dir = Path::new(&self.cfg.active_dir);
-        let count = refcount::count(
-            active_dir,
-            flags.claude,
-            flags.codex,
-            flags.copilot,
-            flags.vscode,
-        );
+        let activity = self.activity(now_gc);
+        let flags = ActivityFlags {
+            claude: activity.provider_state(Agent::Claude) == "working",
+            codex: activity.provider_state(Agent::Codex) == "working",
+            copilot: activity.provider_state(Agent::Copilot) == "working",
+            vscode: activity.vscode,
+        };
+        let count = activity.demand();
         // 4b. the manual mode turns the count into the hold demand.
         let mode = mode::read(Path::new(&self.cfg.mode_file));
         if mode != self.mode {
             tracing::info!("mode {} → {}", self.mode.as_str(), mode.as_str());
             self.mode = mode;
         }
-        let demand = mode.demand(count);
+
         // 5. cutoff checks (+ cooldown re-arm).
         let now = now_unix();
         // Fail CLOSED: a genuine pmset read failure cuts the hold so a keep-awake
@@ -320,6 +310,24 @@ impl Daemon {
             self.cfg.thermal_cooldown_secs,
         );
         self.cooldown_until = cooldown_until;
+        let grace = self.grace.evaluate(
+            self.started.elapsed(),
+            activity.working() + activity.uncertain() + u32::from(activity.vscode) > 0,
+            (request.is_some()
+                && activity.working() + activity.uncertain() + u32::from(activity.vscode) == 0)
+                || mode == Mode::Off
+                || cut_thermal
+                || cut_battery
+                || cooling,
+        );
+        let demand = mode.demand(
+            count
+                + u32::from(
+                    grace.automatic_hold
+                        && activity.working() + activity.uncertain() + u32::from(activity.vscode)
+                            == 0,
+                ),
+        );
         // 6. decide.
         let desired = desired_hold(demand, cut_thermal, cut_battery, cooling);
         // 7. act. The battery summary reuses the already-read raw (no second read).
@@ -346,7 +354,24 @@ impl Daemon {
             self.held_closed,
         );
         // 8. write tick (POST-action engaged).
+        self.evaluation_sequence += 1;
+        if let Some(request) = request {
+            self.refresh_token = Some(request.token);
+        }
         let snap = TickSnapshot {
+            version: 2,
+            daemon_start: Some(self.identity.start),
+            evaluation_sequence: self.evaluation_sequence,
+            working: Some(activity.working()),
+            waiting: Some(activity.waiting()),
+            idle: Some(activity.idle()),
+            unknown: Some(activity.unknown()),
+            detected_hosts: Some(activity.detected_hosts),
+            wrappers: Some(activity.wrappers),
+            uncertain: Some(activity.uncertain()),
+            vscode: Some(activity.vscode),
+            grace_remaining: grace.remaining_secs,
+            refresh_token: self.refresh_token.clone(),
             pid: std::process::id(),
             updated_at: now,
             tick_secs: self.cfg.tick_secs,
@@ -372,15 +397,7 @@ impl Daemon {
         let now = now_unix();
         self.gc(now);
         // 2. startup_count via the same activity-filtered count.
-        let flags = self.activity(now);
-        let active_dir = Path::new(&self.cfg.active_dir);
-        let startup_count = refcount::count(
-            active_dir,
-            flags.claude,
-            flags.codex,
-            flags.copilot,
-            flags.vscode,
-        );
+        let startup_count = self.activity(now).demand();
         // 3. startup_can_hold = !thermal && !battery (both at startup).
         let thermal_should = thermal::cut_thermal_failclosed(self.cfg.thermal_cpu_limit_floor);
         let battery_should =
@@ -419,6 +436,9 @@ impl Daemon {
             while slept < total_ms {
                 if self.shutdown.load(Ordering::SeqCst) {
                     self.cleanup_and_exit();
+                }
+                if self.wakeup.swap(false, Ordering::SeqCst) {
+                    break;
                 }
                 std::thread::sleep(Duration::from_millis(100));
                 slept += 100;
@@ -510,9 +530,25 @@ pub fn run() -> ! {
         }
     }
 
+    let wakeup = Arc::new(AtomicBool::new(false));
+    if let Err(e) = signal_hook::flag::register(signal_hook::consts::SIGUSR1, Arc::clone(&wakeup)) {
+        tracing::error!("refresh signal: {e}");
+        std::process::exit(1);
+    }
+    let start = ProcScanner::process_start(my_pid).unwrap_or_else(|| {
+        tracing::error!("daemon process identity unavailable");
+        std::process::exit(1)
+    });
     let mut daemon = Daemon {
         scanner: ProcScanner::new(),
-        sys_for_gc: sysinfo::System::new(),
+        activity_collector: ActivityCollector::default(),
+        last_records: Vec::new(),
+        grace: grace::Grace::default(),
+        started: Instant::now(),
+        identity: refresh::DaemonIdentity { pid: my_pid, start },
+        evaluation_sequence: 0,
+        refresh_token: None,
+        wakeup,
         last_ps_text: String::new(),
         power,
         lid: Box::new(MacLid),

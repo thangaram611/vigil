@@ -1,0 +1,448 @@
+[
+  {
+    "at": "2026-10-12T10:41:10.505+00:00",
+    "identity_matches": true,
+    "host": {
+      "pid": 22288,
+      "ppid": 22284,
+      "pgid": 22288,
+      "start_utc": "Mon Oct 12 10:40:31 2026",
+      "exe": "/opt/homebrew/bin/claude"
+    },
+    "native_session": {},
+    "children": []
+  },
+  {
+    "at": "2026-10-12T10:41:21.516+00:00",
+    "identity_matches": true,
+    "host": {
+      "pid": 22288,
+      "ppid": 22284,
+      "pgid": 22288,
+      "start_utc": "Mon Oct 12 10:40:31 2026",
+      "exe": "/opt/homebrew/bin/claude"
+    },
+    "native_session": {},
+    "children": [
+      {
+        "pid": 22582,
+        "ppid": 22288,
+        "pgid": 22288,
+        "start_utc": "Mon Oct 12 10:41:21 2026",
+        "exe": "ioreg"
+      },
+      {
+        "pid": 22583,
+        "ppid": 22288,
+        "pgid": 22288,
+        "start_utc": "Mon Oct 12 10:41:21 2026",
+        "exe": "(git)"
+      }
+    ]
+  },
+  {
+    "at": "2026-10-12T10:41:22.529+00:00",
+    "identity_matches": true,
+    "host": {
+      "pid": 22288,
+      "ppid": 22284,
+      "pgid": 22288,
+      "start_utc": "Mon Oct 12 10:40:31 2026",
+      "exe": "/opt/homebrew/bin/claude"
+    },
+    "native_session": {
+      "pid": 22288,
+      "sessionId": "94291bcb-f77e-4e69-b676-2722f208e40a",
+      "kind": "interactive",
+      "status": "busy",
+      "waitingFor": null,
+      "procStart": "Mon Oct 12 10:40:31 2026",
+      "statusUpdatedAt": 1791801682460,
+      "version": "2.1.296"
+    },
+    "children": [
+      {
+        "pid": 22593,
+        "ppid": 22288,
+        "pgid": 22593,
+        "start_utc": "Mon Oct 12 10:41:22 2026",
+        "exe": "/bin/sh"
+      },
+      {
+        "pid": 22591,
+        "ppid": 22288,
+        "pgid": 22288,
+        "start_utc": "Mon Oct 12 10:41:22 2026",
+        "exe": "sh"
+      },
+      {
+        "pid": 22594,
+        "ppid": 22288,
+        "pgid": 22288,
+        "start_utc": "Mon Oct 12 10:41:22 2026",
+        "exe": "/bin/sh"
+      },
+      {
+        "pid": 22597,
+        "ppid": 22288,
+        "pgid": 22288,
+        "start_utc": "Mon Oct 12 10:41:22 2026",
+        "exe": "caffeinate"
+      },
+      {
+        "pid": 22598,
+        "ppid": 22288,
+        "pgid": 22288,
+        "start_utc": "Mon Oct 12 10:41:22 2026",
+        "exe": "gh"
+      },
+      {
+        "pid": 22599,
+        "ppid": 22288,
+        "pgid": 22288,
+        "start_utc": "Mon Oct 12 10:41:22 2026",
+        "exe": "rg"
+      },
+      {
+        "pid": 22600,
+        "ppid": 22288,
+        "pgid": 22288,
+        "start_utc": "Mon Oct 12 10:41:22 2026",
+        "exe": "rg"
+      }
+    ]
+  },
+  {
+    "at": "2026-10-12T10:41:29.529+00:00",
+    "identity_matches": true,
+    "host": {
+      "pid": 22288,
+      "ppid": 22284,
+      "pgid": 22288,
+      "start_utc": "Mon Oct 12 10:40:31 2026",
+      "exe": "/opt/homebrew/bin/claude"
+    },
+    "native_session": {
+      "pid": 22288,
+      "sessionId": "94291bcb-f77e-4e69-b676-2722f208e40a",
+      "kind": "interactive",
+      "status": "idle",
+      "waitingFor": null,
+      "procStart": "Mon Oct 12 10:40:31 2026",
+      "statusUpdatedAt": 1791801689265,
+      "version": "2.1.296"
+    },
+    "children": [
+      {
+        "pid": 22597,
+        "ppid": 22288,
+        "pgid": 22288,
+        "start_utc": "Mon Oct 12 10:41:22 2026",
+        "exe": "caffeinate"
+      }
+    ]
+  },
+  {
+    "at": "2026-10-12T10:41:51.532+00:00",
+    "identity_matches": true,
+    "host": {
+      "pid": 22288,
+      "ppid": 22284,
+      "pgid": 22288,
+      "start_utc": "Mon Oct 12 10:40:31 2026",
+      "exe": "/opt/homebrew/bin/claude"
+    },
+    "native_session": {
+      "pid": 22288,
+      "sessionId": "94291bcb-f77e-4e69-b676-2722f208e40a",
+      "kind": "interactive",
+      "status": "busy",
+      "waitingFor": null,
+      "procStart": "Mon Oct 12 10:40:31 2026",
+      "statusUpdatedAt": 1791801711085,
+      "version": "2.1.296"
+    },
+    "children": [
+      {
+        "pid": 22597,
+        "ppid": 22288,
+        "pgid": 22288,
+        "start_utc": "Mon Oct 12 10:41:22 2026",
+        "exe": "caffeinate"
+      }
+    ]
+  },
+  {
+    "at": "2026-10-12T10:42:22.537+00:00",
+    "identity_matches": true,
+    "host": {
+      "pid": 22288,
+      "ppid": 22284,
+      "pgid": 22288,
+      "start_utc": "Mon Oct 12 10:40:31 2026",
+      "exe": "/opt/homebrew/bin/claude"
+    },
+    "native_session": {
+      "pid": 22288,
+      "sessionId": "94291bcb-f77e-4e69-b676-2722f208e40a",
+      "kind": "interactive",
+      "status": "waiting",
+      "waitingFor": "input needed",
+      "procStart": "Mon Oct 12 10:40:31 2026",
+      "statusUpdatedAt": 1791801742526,
+      "version": "2.1.296"
+    },
+    "children": [
+      {
+        "pid": 22597,
+        "ppid": 22288,
+        "pgid": 22288,
+        "start_utc": "Mon Oct 12 10:41:22 2026",
+        "exe": "caffeinate"
+      }
+    ]
+  },
+  {
+    "at": "2026-10-12T10:42:53.522+00:00",
+    "identity_matches": true,
+    "host": {
+      "pid": 22288,
+      "ppid": 22284,
+      "pgid": 22288,
+      "start_utc": "Mon Oct 12 10:40:31 2026",
+      "exe": "/opt/homebrew/bin/claude"
+    },
+    "native_session": {
+      "pid": 22288,
+      "sessionId": "94291bcb-f77e-4e69-b676-2722f208e40a",
+      "kind": "interactive",
+      "status": "waiting",
+      "waitingFor": "input needed",
+      "procStart": "Mon Oct 12 10:40:31 2026",
+      "statusUpdatedAt": 1791801742526,
+      "version": "2.1.296"
+    },
+    "children": []
+  },
+  {
+    "at": "2026-10-12T10:45:35.532+00:00",
+    "identity_matches": true,
+    "host": {
+      "pid": 22288,
+      "ppid": 22284,
+      "pgid": 22288,
+      "start_utc": "Mon Oct 12 10:40:31 2026",
+      "exe": "/opt/homebrew/bin/claude"
+    },
+    "native_session": {
+      "pid": 22288,
+      "sessionId": "94291bcb-f77e-4e69-b676-2722f208e40a",
+      "kind": "interactive",
+      "status": "busy",
+      "waitingFor": null,
+      "procStart": "Mon Oct 12 10:40:31 2026",
+      "statusUpdatedAt": 1791801934786,
+      "version": "2.1.296"
+    },
+    "children": [
+      {
+        "pid": 25283,
+        "ppid": 22288,
+        "pgid": 22288,
+        "start_utc": "Mon Oct 12 10:45:34 2026",
+        "exe": "caffeinate"
+      }
+    ]
+  },
+  {
+    "at": "2026-10-12T10:46:09.537+00:00",
+    "identity_matches": true,
+    "host": {
+      "pid": 22288,
+      "ppid": 22284,
+      "pgid": 22288,
+      "start_utc": "Mon Oct 12 10:40:31 2026",
+      "exe": "/opt/homebrew/bin/claude"
+    },
+    "native_session": {
+      "pid": 22288,
+      "sessionId": "94291bcb-f77e-4e69-b676-2722f208e40a",
+      "kind": "interactive",
+      "status": "waiting",
+      "waitingFor": "permission prompt",
+      "procStart": "Mon Oct 12 10:40:31 2026",
+      "statusUpdatedAt": 1791801969205,
+      "version": "2.1.296"
+    },
+    "children": [
+      {
+        "pid": 25283,
+        "ppid": 22288,
+        "pgid": 22288,
+        "start_utc": "Mon Oct 12 10:45:34 2026",
+        "exe": "caffeinate"
+      }
+    ]
+  },
+  {
+    "at": "2026-10-12T10:46:39.532+00:00",
+    "identity_matches": true,
+    "host": {
+      "pid": 22288,
+      "ppid": 22284,
+      "pgid": 22288,
+      "start_utc": "Mon Oct 12 10:40:31 2026",
+      "exe": "/opt/homebrew/bin/claude"
+    },
+    "native_session": {
+      "pid": 22288,
+      "sessionId": "94291bcb-f77e-4e69-b676-2722f208e40a",
+      "kind": "interactive",
+      "status": "waiting",
+      "waitingFor": "permission prompt",
+      "procStart": "Mon Oct 12 10:40:31 2026",
+      "statusUpdatedAt": 1791801969205,
+      "version": "2.1.296"
+    },
+    "children": []
+  },
+  {
+    "at": "2026-10-12T10:48:27.522+00:00",
+    "identity_matches": true,
+    "host": {
+      "pid": 22288,
+      "ppid": 22284,
+      "pgid": 22288,
+      "start_utc": "Mon Oct 12 10:40:31 2026",
+      "exe": "/opt/homebrew/bin/claude"
+    },
+    "native_session": {
+      "pid": 22288,
+      "sessionId": "94291bcb-f77e-4e69-b676-2722f208e40a",
+      "kind": "interactive",
+      "status": "waiting",
+      "waitingFor": "permission prompt",
+      "procStart": "Mon Oct 12 10:40:31 2026",
+      "statusUpdatedAt": 1791801969205,
+      "version": "2.1.296"
+    },
+    "children": []
+  },
+  {
+    "at": "2026-10-12T10:48:28.526+00:00",
+    "identity_matches": true,
+    "host": {
+      "pid": 22288,
+      "ppid": 22284,
+      "pgid": 22288,
+      "start_utc": "Mon Oct 12 10:40:31 2026",
+      "exe": "/opt/homebrew/bin/claude"
+    },
+    "native_session": {
+      "pid": 22288,
+      "sessionId": "94291bcb-f77e-4e69-b676-2722f208e40a",
+      "kind": "interactive",
+      "status": "waiting",
+      "waitingFor": "permission prompt",
+      "procStart": "Mon Oct 12 10:40:31 2026",
+      "statusUpdatedAt": 1791801969205,
+      "version": "2.1.296"
+    },
+    "children": []
+  },
+  {
+    "at": "2026-10-12T10:49:28.511+00:00",
+    "identity_matches": true,
+    "host": {
+      "pid": 22288,
+      "ppid": 22284,
+      "pgid": 22288,
+      "start_utc": "Mon Oct 12 10:40:31 2026",
+      "exe": "/opt/homebrew/bin/claude"
+    },
+    "native_session": {
+      "pid": 22288,
+      "sessionId": "94291bcb-f77e-4e69-b676-2722f208e40a",
+      "kind": "interactive",
+      "status": "busy",
+      "waitingFor": null,
+      "procStart": "Mon Oct 12 10:40:31 2026",
+      "statusUpdatedAt": 1791802168181,
+      "version": "2.1.296"
+    },
+    "children": [
+      {
+        "pid": 28594,
+        "ppid": 22288,
+        "pgid": 22288,
+        "start_utc": "Mon Oct 12 10:49:28 2026",
+        "exe": "caffeinate"
+      }
+    ]
+  },
+  {
+    "at": "2026-10-12T10:49:32.529+00:00",
+    "identity_matches": true,
+    "host": {
+      "pid": 22288,
+      "ppid": 22284,
+      "pgid": 22288,
+      "start_utc": "Mon Oct 12 10:40:31 2026",
+      "exe": "/opt/homebrew/bin/claude"
+    },
+    "native_session": {
+      "pid": 22288,
+      "sessionId": "94291bcb-f77e-4e69-b676-2722f208e40a",
+      "kind": "interactive",
+      "status": "idle",
+      "waitingFor": null,
+      "procStart": "Mon Oct 12 10:40:31 2026",
+      "statusUpdatedAt": 1791802172204,
+      "version": "2.1.296"
+    },
+    "children": [
+      {
+        "pid": 28594,
+        "ppid": 22288,
+        "pgid": 22288,
+        "start_utc": "Mon Oct 12 10:49:28 2026",
+        "exe": "caffeinate"
+      }
+    ]
+  },
+  {
+    "at": "2026-10-12T10:50:02.527+00:00",
+    "identity_matches": true,
+    "host": {
+      "pid": 22288,
+      "ppid": 22284,
+      "pgid": 22288,
+      "start_utc": "Mon Oct 12 10:40:31 2026",
+      "exe": "/opt/homebrew/bin/claude"
+    },
+    "native_session": {
+      "pid": 22288,
+      "sessionId": "94291bcb-f77e-4e69-b676-2722f208e40a",
+      "kind": "interactive",
+      "status": "idle",
+      "waitingFor": null,
+      "procStart": "Mon Oct 12 10:40:31 2026",
+      "statusUpdatedAt": 1791802172204,
+      "version": "2.1.296"
+    },
+    "children": []
+  },
+  {
+    "at": "2026-10-12T10:50:06.508+00:00",
+    "identity_matches": true,
+    "host": {
+      "pid": 22288,
+      "ppid": 22284,
+      "pgid": 22288,
+      "start_utc": "Mon Oct 12 10:40:31 2026",
+      "exe": "/opt/homebrew/bin/claude"
+    },
+    "native_session": {},
+    "children": []
+  }
+]

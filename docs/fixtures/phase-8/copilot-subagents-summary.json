@@ -1,0 +1,22 @@
+{
+  "session_id": "a03fcec8-b72f-4ce1-a30e-97ebce6a664f",
+  "version": "1.0.95",
+  "question_completed_at": "2026-10-13T08:33:11.766Z",
+  "normal_child_tool_calls": 9,
+  "normal_child_requested_cap": 8,
+  "child_permission_requested": "2026-10-13T08:33:53.309Z",
+  "child_permission_completed": "2026-10-13T08:34:26.913Z",
+  "parent_abort": "2026-10-13T08:34:28.638Z",
+  "child_completed": "2026-10-13T08:35:39.773Z",
+  "workload_receipt": {
+    "pid": 31547,
+    "ppid": 31546,
+    "start": 1791880466.989343,
+    "native_session": "7e9ad0d5-da9b-4dcd-9309-a3ad638159d2",
+    "end": 1791880536.990439
+  },
+  "parent_read_agent_call": "toolu_01JDq2FmMBZnTzxMDxPLRSxV",
+  "parent_read_agent_completed": false,
+  "persisted_user_input_events": 0,
+  "persisted_session_idle": 0
+}

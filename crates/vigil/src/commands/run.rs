@@ -16,7 +16,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Command;
 
-use super::{load_config_or_exit, now_unix};
+use super::load_config_or_exit;
 
 /// Print the usage line to stderr and exit 1 (bash `die`).
 fn usage_die() -> ! {
@@ -60,7 +60,10 @@ pub fn run(args: Vec<OsString>) -> ! {
     }
 
     let pid = std::process::id();
-    let now = now_unix();
+    let start = vigil::procscan::ProcScanner::process_start(pid).unwrap_or_else(|| {
+        anstream::eprintln!("vigil: run: process identity unavailable");
+        std::process::exit(super::EX_ERROR);
+    });
 
     // 3. cmd_str = args joined by a single space (bash `"$*"`). args[0] is the
     //    program, the rest are its arguments; the summary is the whole line.
@@ -73,7 +76,7 @@ pub fn run(args: Vec<OsString>) -> ! {
     // 4. Write the wrapper pidfile (byte-identical to bash
     //    `vigil_refcount_touch_wrapper`).
     let pidfile = PathBuf::from(&cfg.active_dir).join(format!("wrapper-{pid}.pid"));
-    let body = vigil::refcount::wrapper_pidfile_body(pid, &cmd_str, now);
+    let body = vigil::refcount::wrapper_pidfile_body(pid, &cmd_str, start);
     if let Err(e) = std::fs::write(&pidfile, body) {
         anstream::eprintln!("vigil: run: could not write wrapper pidfile: {e}");
         std::process::exit(super::EX_ERROR);

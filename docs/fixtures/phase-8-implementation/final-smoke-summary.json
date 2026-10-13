@@ -1,0 +1,15 @@
+{
+  "at_utc": "2026-10-13T11:09:30.051148+00:00",
+  "session": "42b06c2a-ad5d-46cd-8d2c-4000e3afa5bc",
+  "native_producer_stamp": "1.0.95",
+  "no_auto_update": true,
+  "exit": 0,
+  "states": [
+    "working"
+  ],
+  "working_samples": 21,
+  "reply_ok": true,
+  "session_absent_after_exit": true,
+  "owned_host_reaped": true,
+  "installed_daemon_identity_verified": true
+}

@@ -1,0 +1,30 @@
+{
+  "at": "2026-10-12T06:21:56.532759+00:00",
+  "job_id": "6cd06110",
+  "session": {
+    "pid": 13179,
+    "sessionId": "6cd06110-9982-47de-b25e-1d013e5e6fc4",
+    "jobId": "6cd06110",
+    "kind": "bg",
+    "version": "2.1.296",
+    "procStart": "Mon Oct 12 06:15:20 2026",
+    "status": "idle",
+    "updatedAt": 1791786029926,
+    "statusUpdatedAt": 1791786029926
+  },
+  "job": {
+    "sessionId": "6cd06110-9982-47de-b25e-1d013e5e6fc4",
+    "state": "working",
+    "tempo": "idle",
+    "createdAt": "2026-10-12T06:15:19.556Z",
+    "updatedAt": "2026-10-12T06:21:26.294Z",
+    "inFlight": {
+      "tasks": 0,
+      "queued": 0,
+      "kinds": []
+    }
+  },
+  "pending_wakeup_file": {
+    "exists": false
+  }
+}

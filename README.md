@@ -26,7 +26,7 @@
 
 Vigil is a small systems utility for a specific workflow: you start an AI coding agent, let the display sleep or lock the Mac, and expect the agent to keep working until it is actually idle.
 
-Generic keep-awake tools hold the machine awake whenever you ask. Vigil watches the agent surfaces you use, counts only active work, releases when the work goes idle, and refuses to keep the machine awake through thermal pressure or a low battery.
+Generic keep-awake tools hold the machine awake whenever you ask. Vigil watches the agent surfaces you use, counts supported working sessions, reports uncertain evidence, releases after observed work stops, and refuses to keep the machine awake through thermal pressure or a low battery.
 
 The current implementation is a Rust workspace:
 
@@ -42,23 +42,42 @@ There is no shell daemon and no `bin/` or `lib/` shell tree.
 | --- | --- |
 | Sleep hold | `pmset disablesleep=1` plus `caffeinate -i` while active work exists. |
 | Display policy | No display-awake assertion by default; displays can sleep and macOS can lock. |
-| Agent signal | Process detection plus session-activity gates, not just "process exists". |
-| Release policy | Releases on idle, thermal pressure, or battery floor while unplugged. |
+| Agent signal | Native per-session state and correlated work, with explicit unknown coverage. |
+| Release policy | 30-second grace after observed automatic demand ends; safety guards and manual-off bypass it. |
 | Baseline | Restores the prior `SleepDisabled` state instead of clobbering another tool. |
 | Runtime privilege | Normal runtime does not execute `sudo`; power transitions go through the installed root helper. |
 | Install model | `vigil setup` copies an install snapshot into `~/Library/Application Support/vigil/bin/` for launchd/TCC stability and links the dev build onto `PATH`. |
 
 ## Agent Coverage
 
-| Surface | Detection model | Activity gate |
-| --- | --- | --- |
-| Claude Code CLI | `claude` basename | Recent writes under `~/.claude/projects/` |
-| Claude.app Local Agent Mode | Bundled `claude` worker | Same Claude session activity |
-| Codex CLI | `codex` basename | Recent writes under `~/.codex/sessions/` |
-| Codex.app | Electron host carved out before `/Applications/` exclusion | Same Codex session activity |
-| OpenAI ChatGPT VS Code extension | Transitive bundled `codex` worker | Same Codex session activity |
-| GitHub Copilot CLI | `copilot` basename, including `copilot --acp` workers | Recent writes under `~/.copilot/session-state/` |
-| VS Code + GitHub Copilot Chat | VS Code/Insiders host process plus chat storage scan | Semantic content-hash changes in `workspaceStorage/*/chatEditingSessions/*/state.json` |
+| Surface | Local activity evidence |
+| --- | --- |
+| Claude Code CLI | PID/start-validated native session state, correlated child lifecycles and witnessed local commands. |
+| Codex CLI and the ChatGPT/Codex desktop worker | Sessions associated with validated workers and open rollouts; turn/tool lifecycles and witnessed local commands. Auxiliary servers are excluded. |
+| GitHub Copilot CLI, including `--acp` | Native session/actor events, human waits, child invocations and witnessed local commands. |
+| VS Code + GitHub Copilot Chat | Existing host and semantic content-hash gate in `workspaceStorage/*/chatEditingSessions/*/state.json`. |
+
+One session counts once even when it owns several work sources. One host can
+own several sessions. `status` reports working, waiting, idle and unknown
+sessions separately from detected hosts, wrappers, VS Code and uncertain demand.
+A fully observed human wait releases demand only when no independent work remains.
+
+Coverage is bounded by the provider's local evidence. Codex approval state is
+not reliably saved in rollouts; an unresolved locally owned turn can remain
+unknown and retain demand until its matching end or ownership invalidation.
+Recent-file fallback is labeled uncertain and contributes at most once per
+provider; `VIGIL_IDLE_AFTER_SEC` applies to that fallback, not verified work.
+Quiet verified work has no transcript timeout. A restarted Vigil cannot recover
+all detached-command ownership from a marker alone. Claude Desktop and remote
+execution environments have not been verified here; app presence or a remote
+viewer alone does not prove local work. The [research handoff](./future/phase-8-per-session-activity.md)
+and [native fixtures](./docs/fixtures/phase-8/README.md) distinguish measured,
+source-only and synthetic coverage.
+
+Supported Claude self-paced loop gaps require background mode (`/bg`) and a
+matching native worker/wake record. Pending fixed cron schedules do not hold;
+executing invocations use ordinary work evidence. Use manual-on or a wrapper
+when automatic coverage is insufficient.
 
 The long-lived `node` router used by companion-style tools is intentionally excluded when its command line carries the `node_repl` token; Vigil watches the actual `copilot` worker instead.
 
@@ -106,6 +125,7 @@ vigil uninstall
 vigil status
 vigil status --verbose
 vigil status --json
+vigil refresh
 vigil doctor
 vigil doctor --power
 vigil log
@@ -144,7 +164,7 @@ vigil mode auto     # back to agent detection (default)
 
 The mode persists across restarts and takes effect on the daemon's next tick. Thermal pressure and the battery floor still release the hold in every mode — `on` outranks detection, not the safety guards.
 
-The menu-bar item is a [SwiftBar](https://github.com/swiftbar/SwiftBar) plugin: an icon for the current state, plus the three modes as one-click items.
+The menu-bar item is a [SwiftBar](https://github.com/swiftbar/SwiftBar) plugin: an icon for the current state, the three modes, and **Refresh now**.
 
 ```bash
 brew install --cask swiftbar
@@ -152,7 +172,7 @@ open -a SwiftBar        # pick a plugin folder on first launch
 vigil setup             # writes vigil.5s.sh into that folder
 ```
 
-The plugin is a two-line shim around `vigil menubar`, which reads only the daemon's tick file and the mode file, so a 5-second refresh costs nothing.
+The plugin is a two-line shim around `vigil menubar`, which reads only the daemon's tick file and the mode file, so its normal refresh does not scan provider transcripts.
 
 | Icon | Meaning |
 | --- | --- |
@@ -169,7 +189,8 @@ The plugin is a two-line shim around `vigil menubar`, which reads only the daemo
 | `vigil setup` | Install the user LaunchAgent, root helper, log rotation, install snapshot, and PATH link. |
 | `vigil start` / `vigil stop` | Bootstrap or boot out the LaunchAgent. |
 | `vigil reload` | Rebuild, re-sync install binaries, heal the PATH link, and restart launchd. |
-| `vigil status` | Print service, activity, and power state. |
+| `vigil status` | Print fresh activity, cached daemon policy and power evidence. JSON schema version 2. |
+| `vigil refresh` | Request and acknowledge one daemon evaluation; consume release grace when automatic demand is zero. |
 | `vigil doctor` | Diagnose installation readiness. |
 | `vigil doctor --power` | Focus on `pmset`, helper, `caffeinate`, and assertion state. |
 | `vigil run <cmd>` | Hold sleep prevention for an explicit foreground command. |
@@ -181,6 +202,12 @@ The plugin is a two-line shim around `vigil menubar`, which reads only the daemo
 | `vigil config` / `vigil config --json` | Print the fully resolved configuration. |
 | `vigil completions <shell>` | Emit shell completions. |
 | `vigil uninstall` | Remove install components and restore the baseline. |
+
+`vigil refresh` has a single 2-second response deadline and never starts an absent
+daemon. It reports the matching post-action evaluation and hold reason. Real work
+or uncertain demand can keep the hold engaged. Timeout means the outcome is
+unknown. Old tick files expose legacy policy with unknown session counts and
+cannot acknowledge refresh; run `vigil reload` after updating the source.
 
 Immediately after `start`, `reload`, or login, `vigil status` may briefly report `pending first scan` or `expected hold: pending` while launchd has started the daemon but the first tick has not completed.
 
@@ -199,7 +226,7 @@ Common knobs:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `VIGIL_IDLE_AFTER_SEC` | `300` | Session-activity window before an agent is considered idle. |
+| `VIGIL_IDLE_AFTER_SEC` | `300` | Recent-file fallback window, rounded up to whole minutes; also the existing VS Code hash-gate window. |
 | `VIGIL_TICK_SECS` | `5` | Daemon tick interval. |
 | `VIGIL_BATTERY_FLOOR_PCT` | `20` | Battery cutoff while unplugged. |
 | `VIGIL_START_WAIT_SECS` | `6` | First-scan and lock pre-arm wait bound. |
@@ -245,12 +272,18 @@ For the event-tap boundary and locked-use details, read [`docs/macos-lock-and-lo
 
 Two launchd jobs drive macOS runtime behavior:
 
-- **LaunchAgent `com.thangaram.vigil`** runs `<install_dir>/bin/vigil daemon` as the user. The daemon ticks every `VIGIL_TICK_SECS`, detects agent processes, applies activity gates, garbage-collects stale pidfiles, evaluates thermal and battery cutoffs, and decides whether a hold should be engaged.
+- **LaunchAgent `com.thangaram.vigil`** runs `<install_dir>/bin/vigil daemon` as the user. The daemon ticks every `VIGIL_TICK_SECS`, collects process identities once, reduces per-session evidence, removes invalid pidfiles, evaluates thermal and battery cutoffs, and decides whether a hold should be engaged.
 - **LaunchDaemon `com.thangaram.vigil.helper`** runs `vigil-root-helper --serve` as root. It accepts only `engage`, `release`, and `status` through a per-uid filesystem request/response queue. The helper validates request files by file descriptor and runs only fixed `/usr/bin/pmset -a disablesleep 0|1` argv.
 
 The daemon also owns a `caffeinate -i` child while active work exists. It never uses a display-awake assertion by default, so macOS can still turn displays off and show the Lock Screen.
 
-`status` and `doctor` are read-only surfaces over one `CheckEngine`: they scan pid/tick/state files plus launchd state, but do not refresh, write, or garbage-collect anything. Their helper-liveness probe is capped at 2 seconds so a dead helper does not block the status paint behind the daemon's longer power timeout.
+`status`, `doctor` and `debug` share read-only activity collection. They read
+provider/state files and launchd state without writing, GC or helper requests.
+Helper installation and IPC permissions are checked; responsiveness is explicitly
+**unchecked**, a warning rather than a failed health probe. `doctor` and
+`doctor --power` exit 0 when required static checks pass; concrete installation
+faults remain errors. Status JSON separates fresh `activity` from `cached_policy`,
+including cache age and daemon identity, so an old policy is never a fresh session count.
 
 Deep dives:
 
@@ -286,7 +319,7 @@ If you depend on overnight closed-lid runs, use clamshell mode. See [`docs/apple
 
 ## Roadmap
 
-Vigil is done growing sideways. Linux, Windows, a native tray app, and public releases were dropped on 2026-09-20; what remains open is a clamshell hardware test and new agent surfaces as they land on this machine. See [`ROADMAP.md`](./ROADMAP.md).
+Vigil is done growing sideways. Linux, Windows, a native tray app, and public releases were dropped on 2026-09-20; session activity now has explicit coverage limits, and new agent surfaces remain subject to local verification. See [`ROADMAP.md`](./ROADMAP.md).
 
 ## Development
 
