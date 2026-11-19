@@ -23,11 +23,18 @@ That was decided on 2026-09-20. The category is covered — [`adrafinil`](https:
 - **Linux (5.8) and Windows (5.9).** The partial Linux power path was removed; the workspace refuses to compile off macOS.
 - **Native menu-bar/tray app.** Replaced by the SwiftBar plugin.
 - **The all-phases release gate, v1.0.0, and the Homebrew tap.**
+- **Pause on lid close (2026-11-19).** The commute failures were network loss under a hold, not sleep. Claude Code's `CLAUDE_CODE_RETRY_WATCHDOG` waits out the outage and Codex waits for the network by itself, so the hold now lets a closed Mac resume on any network. No pause feature or provider hooks; agent-companion's `docs/MVP_TRACKER.md` decision 11 has the evidence.
 
 ## Open
 
 - **Activity coverage extensions.** Disk-only Codex approval waits, cold detached-process ownership, Claude Desktop and unmeasured remote/restart paths remain unknown rather than exact coverage. The implementation does not add private provider APIs, hooks or another daemon. Evidence and limits: [`future/phase-8-per-session-activity.md`](./future/phase-8-per-session-activity.md) and [`docs/fixtures/phase-8/README.md`](./docs/fixtures/phase-8/README.md).
 - **New agent surfaces** — only when one is installed here and can be verified live. Sketch: [`future/phase-N-agent-surface-refresh.md`](./future/phase-N-agent-surface-refresh.md).
+- **Stuck-hold follow-ups (2026-11-19).** `b0f85cd` stopped counting the agent-companion bridge, `codex-code-mode-host` and Claude's `ugrep` as work. Still open:
+  - Confirm a `release — no demand` once every session is idle. Right after the fix, a "cold orphan" Claude session still gave 1 uncertain demand.
+  - Any other long-lived MCP server child of a session would still count as work; only the bridge is excluded by name.
+  - A running agent-companion job counts only sometimes while its host session is idle: `codex app-server` can, `claude -p` needs a native registration, and `opencode serve` only as a tied descendant. A closed Mac can sleep mid-job.
+  - There is no "retrying" state. A session waiting out an outage under the retry watchdog counts as working, holding the Mac for up to the retry window (about 6 h with `CLAUDE_CODE_MAX_RETRIES=600`), bounded by the battery and thermal guards. That is deliberate for now: work resumes on any network.
+  - Proposal, not adopted: after the fix, log the detector against vendor sleep assertions for two weeks, and retire the detector if they agree.
 - **Conflict detection** against other sleep holders. Sketch: [`future/phase-N-conflict-detection.md`](./future/phase-N-conflict-detection.md).
 
 ## Working policy
