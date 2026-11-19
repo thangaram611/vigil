@@ -9,6 +9,7 @@ use crate::config::VigilConfig;
 use crate::procscan::{AgentKind, ProcRecord, ProcScanner, detect_line};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -200,16 +201,29 @@ fn ancestor_witness(
     }
     None
 }
-fn command_candidate(r: &ProcRecord) -> bool {
-    let name = Path::new(&r.exe)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("");
+fn companion_bridge(argv: &[OsString]) -> bool {
+    let script = match argv {
+        [_, script] => script,
+        [_, flag, loader, script]
+            if flag == "--import"
+                && Path::new(loader).ends_with("hooks/launch-agent-bridge.mjs") =>
+        {
+            script
+        }
+        _ => return false,
+    };
+    let script = Path::new(script);
+    script.ends_with("bridge-server/server.mjs")
+        && script.iter().any(|part| part == "agent-companion")
+}
+fn command_candidate(r: &ProcRecord, argv: &[OsString]) -> bool {
+    let name = crate::procscan::detect::process_name(&r.exe, &r.cmdline);
     // These processes are provider infrastructure, not work. Other processes
     // still require a native marker, validated nearest host and identity.
     ![
         "caffeinate",
         "codex",
+        "codex-code-mode-host",
         "claude",
         "copilot",
         "vigil",
@@ -217,6 +231,7 @@ fn command_candidate(r: &ProcRecord) -> bool {
         "vigil-lock-helper",
     ]
     .contains(&name)
+        && !(name == "node" && companion_bridge(argv))
         && ![
             "node_repl",
             "exec-server",
@@ -543,7 +558,20 @@ impl ActivityCollector {
                 agent.pattern(),
                 cfg.idle_after_sec,
                 now,
-                |path| !observed_paths.contains(&canonical(path)),
+                |path| {
+                    let path = canonical(path);
+                    // A child transcript belongs to its observed Claude session even
+                    // before the bounded reader reaches the launch in the parent.
+                    if agent == Agent::Claude
+                        && let Some(dir) = path.parent()
+                        && dir.ends_with("subagents")
+                        && let Some(session) = dir.parent()
+                        && observed_paths.contains(&session.with_extension("jsonl"))
+                    {
+                        return false;
+                    }
+                    !observed_paths.contains(&path)
+                },
             ) {
                 snap.uncertain_providers.push(agent.token().to_owned());
             }
@@ -570,7 +598,7 @@ impl ActivityCollector {
             .filter(|r| {
                 r.same_user
                     && !r.zombie
-                    && command_candidate(r)
+                    && command_candidate(r, scanner.argv(r.pid))
                     && (nearest_owner(r, &by_pid).is_some()
                         || ancestor_witness(r, &by_pid, &self.witnesses).is_some()
                         || r.parent == Some(1))
@@ -879,6 +907,54 @@ impl ActivityCollector {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn session_infrastructure_is_not_a_workload_candidate() {
+        let bridge = "/plugin cache/agent-companion/0.2.0/bridge-server/server.mjs";
+        for (exe, argv, workload) in [
+            ("node", vec!["node", bridge], false),
+            (
+                "node",
+                vec![
+                    "node",
+                    "--import",
+                    "/plugin cache/agent-companion/0.2.0/hooks/launch-agent-bridge.mjs",
+                    bridge,
+                ],
+                false,
+            ),
+            (
+                "codex-code-mode-host",
+                vec!["codex-code-mode-host", "--listen", "stdio"],
+                false,
+            ),
+            ("node", vec!["node", "build.mjs", bridge], true),
+            (
+                "node",
+                vec!["node", "/project/bridge-server/server.mjs"],
+                true,
+            ),
+            ("claude", vec!["ugrep", "-G", "pattern"], true),
+        ] {
+            let record = ProcRecord {
+                pid: 42,
+                parent: Some(41),
+                start_time: 1,
+                same_user: true,
+                zombie: false,
+                exe: exe.into(),
+                cmdline: argv.join(" "),
+            };
+            let argv: Vec<_> = argv.into_iter().map(OsString::from).collect();
+            assert_eq!(
+                command_candidate(&record, &argv),
+                workload,
+                "{}",
+                record.cmdline
+            );
+        }
+    }
+
     #[test]
     fn synthetic_descriptor_failure_keeps_owned_turn_uncertain_without_recent_fallback() {
         let tmp = tempfile::tempdir().unwrap();

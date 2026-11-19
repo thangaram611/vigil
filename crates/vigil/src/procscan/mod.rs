@@ -115,6 +115,13 @@ impl ProcScanner {
         out
     }
 
+    /// Argument boundaries from the same refresh as the process record.
+    pub(crate) fn argv(&self, pid: u32) -> &[std::ffi::OsString] {
+        self.sys
+            .process(sysinfo::Pid::from_u32(pid))
+            .map_or(&[], |p| p.cmd())
+    }
+
     /// Scoped, ephemeral environment extraction. Retain only native markers.
     pub fn session_markers(
         &self,

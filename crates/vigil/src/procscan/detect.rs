@@ -103,6 +103,16 @@ pub(crate) fn process_role<'a>(comm: &str, command_line: &'a str) -> &'a str {
         })
         .unwrap_or("")
 }
+
+pub(crate) fn process_name<'a>(comm: &'a str, command_line: &str) -> &'a str {
+    let name = basename(comm);
+    // Claude also executes its bundled search tool with argv[0] set to ugrep.
+    if name == "claude" && command_line.split_whitespace().next().map(basename) == Some("ugrep") {
+        "ugrep"
+    } else {
+        name
+    }
+}
 /// Classify one `(pid, comm, command_line)` triple. Returns `None` when bash
 /// emits no row.
 pub fn detect_line(pid: u32, comm: &str, command_line: &str) -> Option<AgentMatch> {
@@ -170,7 +180,7 @@ pub fn detect_line(pid: u32, comm: &str, command_line: &str) -> Option<AgentMatc
     }
 
     // 4. CLI agents by basename.
-    let kind = match basename(comm) {
+    let kind = match process_name(comm, command_line) {
         "claude" => AgentKind::CliClaude,
         "codex" => AgentKind::CliCodex,
         "copilot" => AgentKind::CliCopilot,
@@ -273,6 +283,13 @@ mod tests {
         assert_eq!(basename("/opt/homebrew/bin/copilot"), "copilot");
         assert_eq!(basename("claude"), "claude");
         assert_eq!(basename(""), "");
+    }
+
+    #[test]
+    fn claude_running_its_bundled_ugrep_is_not_a_session_host() {
+        let exe = "/opt/homebrew/Caskroom/claude-code/2.1.328/claude";
+        assert!(detect_line(42, exe, "ugrep -G --ignore-files --hidden -I pattern").is_none());
+        assert!(detect_line(42, exe, "claude -p explain ugrep").is_some());
     }
 
     #[test]

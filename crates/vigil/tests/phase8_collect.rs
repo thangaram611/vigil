@@ -785,6 +785,12 @@ fn unregistered_claude_host_cannot_borrow_resolved_siblings_recent_transcript() 
     let (unregistered, _) = sandbox.spawn("claude", "unregistered", "host", None, &[]);
     let (waiting, _) = sandbox.spawn("claude", "registered-waiting", "host", None, &[]);
     sandbox.claude(waiting, "registered-waiting-session", "waiting", 0);
+    // A sidechain belongs to the registered sibling even if the lifecycle
+    // reader has not seen its launch in the parent's transcript yet.
+    let children = Path::new(&sandbox.cfg.claude_home)
+        .join("projects/-phase8/registered-waiting-session/subagents");
+    std::fs::create_dir_all(&children).unwrap();
+    std::fs::write(children.join("agent-child.jsonl"), "{}\n").unwrap();
     let now = chrono::Utc::now().timestamp();
     let mut scanner = ProcScanner::new();
     let records = sandbox.records(&mut scanner);
